@@ -29,7 +29,15 @@ export interface AuditRecord {
   newSha256?: string;
   bytes?: number;
   cmd?: string;
-  exitCode?: number;
+  // null when the command was signal-terminated; never coerced to 0 (ADR-004 §3).
+  exitCode?: number | null;
+  signal?: string;
+  timedOut?: boolean;
+  // Node-side `timeout` wrapper seconds; `cmd` records the *original* command,
+  // this records the wrapper parameter (ADR-004 Compatibility note).
+  timeoutSecs?: number;
+  // Set when a CONFIRM-tier command ran because the caller passed confirm:true.
+  confirmGated?: boolean;
   isLargeChange?: boolean;
   isRevertible?: boolean;
   note?: string;

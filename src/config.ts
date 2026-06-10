@@ -14,8 +14,12 @@ const ConfigSchema = z.object({
     username: z.string().default("root"),
     privateKeyPath: z.string(),
     keepaliveInterval: z.number().default(10_000),
+    // Base delay for exponential reconnect backoff (ms); cap 60s, jittered.
     reconnectDelay: z.number().default(3_000),
     commandTimeoutMs: z.number().default(30_000),
+    // Client-side backstop grace added on top of the node-enforced timeout, for
+    // the case where the connection itself is wedged (ADR-004 §2).
+    commandTimeoutGraceMs: z.number().default(10_000),
     skipHostVerification: z.boolean().default(false),
     // Explicit host-key pin (recommended). Accepts a bare base64 digest, a
     // "SHA256:..." token, or a full `ssh-keygen -lf` line.
@@ -71,6 +75,14 @@ const ConfigSchema = z.object({
     // rollback is disk-only (guest resumes as if from power loss).
     vmstate: z.boolean().default(false),
   }),
+  // ADR-004 — tool-layer caps.
+  tools: z.object({
+    // read_file refuses files larger than this (ADR-004 §4); use offset/maxBytes
+    // for deliberate windowed reads, or execute with head/tail/grep/wc.
+    readFileMaxBytes: z.number().default(2 * 1024 * 1024), // 2 MB
+    // Unified-diff line cap for dryRun previews (ADR-004 §6).
+    dryRunDiffMaxLines: z.number().default(200),
+  }),
   guardrails: z.object({
     commandDenylist: z.array(z.string()).default([
       "rm -rf /",
@@ -81,13 +93,10 @@ const ConfigSchema = z.object({
       "> /dev/sda",
       ":(){ :|:& };:",
       "chmod -R 777 /",
-      "chown -R",
-      "shutdown",
-      "reboot",
-      "halt",
-      "poweroff",
-      "init 0",
-      "init 6",
+      // NOTE: availability-class commands (shutdown/reboot/halt/poweroff/init 0|6)
+      // are handled by the built-in CONFIRM tier (segment, command-position only),
+      // NOT this substring denylist — see guardrails/denylist.ts. `chown -R` was
+      // removed in ADR-004: it blocked every legitimate recursive chown.
     ]),
     pathAllowlist: z.array(z.string()).optional(),
     pathDenylist: z.array(z.string()).default([
@@ -108,8 +117,13 @@ function loadConfig(): Config {
       username: process.env.SSH_USER ?? "root",
       privateKeyPath: process.env.SSH_KEY_PATH ?? "",
       keepaliveInterval: 10_000,
-      reconnectDelay: 3_000,
+      reconnectDelay: process.env.SSH_RECONNECT_DELAY_MS
+        ? parseInt(process.env.SSH_RECONNECT_DELAY_MS)
+        : 3_000,
       commandTimeoutMs: 30_000,
+      commandTimeoutGraceMs: process.env.SSH_COMMAND_TIMEOUT_GRACE_MS
+        ? parseInt(process.env.SSH_COMMAND_TIMEOUT_GRACE_MS)
+        : 10_000,
       skipHostVerification: process.env.SSH_SKIP_HOST_VERIFICATION === "true",
       hostKeyFingerprint: process.env.SSH_HOST_KEY_FINGERPRINT || undefined,
       knownHostsPath:
@@ -169,6 +183,14 @@ function loadConfig(): Config {
         ? parseInt(process.env.SNAPSHOT_PER_GUEST_CAP)
         : 3,
       vmstate: process.env.SNAPSHOT_VMSTATE === "true",
+    },
+    tools: {
+      readFileMaxBytes: process.env.READ_FILE_MAX_BYTES
+        ? parseInt(process.env.READ_FILE_MAX_BYTES)
+        : 2 * 1024 * 1024,
+      dryRunDiffMaxLines: process.env.DRY_RUN_DIFF_MAX_LINES
+        ? parseInt(process.env.DRY_RUN_DIFF_MAX_LINES)
+        : 200,
     },
     guardrails: {
       commandDenylist: process.env.COMMAND_DENYLIST

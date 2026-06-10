@@ -10,9 +10,10 @@ import zlib from "zlib";
 
 function makeConfig(tmpDir: string): Config {
   return {
-    ssh: { host: "test-host", port: 22, username: "root", privateKeyPath: "", keepaliveInterval: 0, reconnectDelay: 0, commandTimeoutMs: 5000, skipHostVerification: true },
+    ssh: { host: "test-host", port: 22, username: "root", privateKeyPath: "", keepaliveInterval: 0, reconnectDelay: 0, commandTimeoutMs: 5000, commandTimeoutGraceMs: 10000, skipHostVerification: true },
     backup: { baseDir: path.join(tmpDir, "backups"), largeFileBytesThreshold: 1024 * 1024, largeFilePolicy: "diff", perFileVersionCap: 10, globalSizeCapBytes: 100 * 1024 * 1024, diskPressureFailSafe: "warn" },
     audit: { logPath: path.join(tmpDir, "audit.jsonl") },
+    tools: { readFileMaxBytes: 2 * 1024 * 1024, dryRunDiffMaxLines: 200 },
     guardrails: { commandDenylist: [], pathAllowlist: undefined, pathDenylist: [] },
   };
 }

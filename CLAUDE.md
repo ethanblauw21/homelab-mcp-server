@@ -71,6 +71,15 @@ src/
 
 Root is granted at the SSH layer on purpose — Proxmox's tooling assumes root. Every real guardrail lives at the **tool layer**: the guardrail/backup/cleanup code is the security and data-integrity boundary and must have ~90%+ line/branch coverage (plus mutation testing per the testing strategy).
 
+## Transport & guardrail trust model (ADR-004)
+
+- **Host-key verification is fail-closed.** `Ssh2Transport` always supplies a `hostVerifier`; the SHA-256 fingerprint must match an explicit pin (`SSH_HOST_KEY_FINGERPRINT`) or a TOFU entry in `known_hosts.json` (first connect pins + warns). A mismatch refuses the connection — never auto-re-pins. `skipHostVerification: true` (Docker harness only) warns on every connect. All host-key diagnostics go to **stderr** (stdout is the MCP channel).
+- **Timeouts are enforced on the node**, not by client timers: `Ssh2Transport.exec` wraps every command with `timeout --signal=TERM --kill-after=5 <secs> bash -c '<cmd>'` (shared helper `ssh/command.ts`; `bash` not `sh` per A4.1 — Debian `sh` is dash and drops bashisms). A client backstop (`commandTimeoutGraceMs`) only fires for a wedged connection and forces reconnect. `pct_exec` composes the same wrapper inside the container.
+- **Exit semantics are honest.** `ExecResult` is `{ stdout; stderr; exitCode: number | null; signal?; timedOut? }`. `null` (signal kill) is **never** coerced to `0`; coreutils `timeout` exit 124 → `timedOut: true`. Handlers and audit records propagate all three; the audit log can no longer record a false success.
+- **Denylist is two-tier and segment-anchored** (`guardrails/denylist.ts` → `checkCommand`): **DENY** (unconditional: `rm -rf /`, `mkfs`, `dd` to block devices, fork bomb, `chmod -R 777 /`) and **CONFIRM** (command-position only: `shutdown`/`reboot`/`halt`/`poweroff`/`init 0|6`/`systemctl reboot|poweroff|halt`). `execute`/`pct_exec` take `confirm?: boolean`; a CONFIRM match without it is refused, with it the audit notes `confirmGated`. Configured entries are segment-prefix matched and may carry a `confirm:` tier prefix. Known limit: a tripwire, not a sandbox — `bash -c "reboot"` hides the command in an argument and is not caught.
+- **`read_file` is stat-gated** at `tools.readFileMaxBytes` (2 MB default); use `offset`/`maxBytes` for windowed reads, or `execute` with `head`/`tail`/`grep`/`wc`.
+- **`dryRun` on `write_file`** runs the full pipeline read-only and returns a `computeUnifiedDiff` preview (`util/diff.ts`, shared with ADR-005) plus would-be metadata — **no write, no backup, no audit**.
+
 ## Storage: backups are not naive copies
 
 Backup pipeline (in order): dedup by content hash → gzipped reverse-diff for text files → large-file policy for big/binary writes. Two retention caps: **per-file version count** + **global total-size cap** with oldest-first/LRU eviction. Cleanup runs before each backup and under disk pressure, with a deterministic fail-safe (refuse or warn, configurable). The storage soak and disk-pressure tests are first-class, not edge cases.

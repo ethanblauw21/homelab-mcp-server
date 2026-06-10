@@ -1,4 +1,10 @@
-import type { ExecResult, FileEntry, SshTransport } from "./transport.js";
+import type {
+  ExecResult,
+  FileEntry,
+  FileStat,
+  ReadFileOptions,
+  SshTransport,
+} from "./transport.js";
 
 export interface FakeTransportOptions {
   execResults?: Map<string, ExecResult>;
@@ -28,9 +34,20 @@ export class FakeTransport implements SshTransport {
     return this.execResults.get(command) ?? { stdout: "", stderr: "", exitCode: 0 };
   }
 
-  async readFile(remotePath: string): Promise<Buffer> {
+  async stat(remotePath: string): Promise<FileStat> {
     const content = this.files.get(remotePath);
     if (!content) throw new Error(`File not found: ${remotePath}`);
+    return { size: content.length };
+  }
+
+  async readFile(remotePath: string, opts?: ReadFileOptions): Promise<Buffer> {
+    const content = this.files.get(remotePath);
+    if (!content) throw new Error(`File not found: ${remotePath}`);
+    if (opts?.start !== undefined || opts?.length !== undefined) {
+      const start = opts.start ?? 0;
+      const end = opts.length !== undefined ? start + opts.length : content.length;
+      return content.subarray(start, end);
+    }
     return content;
   }
 
