@@ -1,0 +1,239 @@
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { FakeTransport } from "../ssh/fakeTransport.js";
+import { buildPctExecCommand } from "./pctHelpers.js";
+import { describeHomelabHandler, DescribeHomelabInputSchema } from "./describeHomelab.js";
+import { CensusStore } from "./censusStore.js";
+import type { Config } from "../config.js";
+
+function makeConfig(censusDir: string, overrides: Partial<Config["census"]> = {}): Config {
+  return {
+    ssh: {
+      host: "10.0.0.10",
+      port: 22,
+      username: "root",
+      privateKeyPath: "",
+      keepaliveInterval: 10_000,
+      reconnectDelay: 3_000,
+      commandTimeoutMs: 30_000,
+      skipHostVerification: true,
+    },
+    backup: {
+      baseDir: censusDir,
+      largeFileBytesThreshold: 1024,
+      largeFilePolicy: "diff",
+      perFileVersionCap: 10,
+      globalSizeCapBytes: 1024 * 1024,
+      diskPressureFailSafe: "warn",
+    },
+    audit: { logPath: path.join(censusDir, "audit.jsonl") },
+    census: {
+      censusDir,
+      snapshotRetentionCap: 30,
+      probeTimeoutMs: 10_000,
+      budgetMs: 120_000,
+      storageDriftPercent: 10,
+      redactionExtraKeys: [],
+      ...overrides,
+    },
+    guardrails: { commandDenylist: [], pathDenylist: [] },
+  } as Config;
+}
+
+function baseTransport(): FakeTransport {
+  const t = new FakeTransport();
+  t.setExecResult("pveversion", { stdout: "pve-manager/8.1.4/abc (running kernel: 6.5.11-7-pve)", stderr: "", exitCode: 0 });
+  t.setExecResult("uptime -p", { stdout: "up 3 days, 2 hours\n", stderr: "", exitCode: 0 });
+  t.setExecResult("nproc", { stdout: "8\n", stderr: "", exitCode: 0 });
+  t.setExecResult("cat /proc/loadavg", { stdout: "0.10 0.20 0.30 1/100 999", stderr: "", exitCode: 0 });
+  t.setExecResult("free -b", { stdout: "Mem: 16766517248 4233470720 8000000000 0 0 12000000000\nSwap: 0 0 0", stderr: "", exitCode: 0 });
+  t.setExecResult("pvesm status", {
+    stdout: "Name Type Status Total Used Available %\nlocal dir active 100660736 7475200 93185536 7.43%",
+    stderr: "",
+    exitCode: 0,
+  });
+  t.setExecResult("ip -br addr", { stdout: "lo UNKNOWN 127.0.0.1/8\nvmbr0 UP 10.0.0.10/24", stderr: "", exitCode: 0 });
+  t.setExecResult("cat /etc/network/interfaces", {
+    stdout: "auto vmbr0\niface vmbr0 inet static\n    address 10.0.0.10/24\n    bridge-ports eno1",
+    stderr: "",
+    exitCode: 0,
+  });
+  t.setExecResult("pct list", {
+    stdout: "VMID Status Lock Name\n101 running gluetun\n102 stopped portainer",
+    stderr: "",
+    exitCode: 0,
+  });
+  t.setExecResult("qm list", {
+    stdout: "VMID NAME STATUS MEM(MB) BOOTDISK(GB) PID\n100 truenas running 8192 32.00 1234",
+    stderr: "",
+    exitCode: 0,
+  });
+  return t;
+}
+
+let tmpDir: string;
+beforeEach(() => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "census-test-"));
+});
+afterEach(() => {
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+function parse(input: unknown) {
+  return DescribeHomelabInputSchema.parse(input);
+}
+
+describe("describeHomelabHandler — summary depth", () => {
+  it("populates all sections without per-guest config", async () => {
+    const t = baseTransport();
+    const store = new CensusStore(tmpDir, 30);
+    const cfg = makeConfig(tmpDir);
+    const snap = await describeHomelabHandler(parse({}), t, store, cfg);
+
+    expect(snap.host).toBe("10.0.0.10");
+    expect(snap.depth).toBe("summary");
+    expect(snap.sections.node?.version).toBe("8.1.4");
+    expect(snap.sections.node?.cpu).toBe(8);
+    expect(snap.sections.storage?.[0]).toMatchObject({ name: "local", active: true });
+    expect(snap.sections.network?.bridges[0]).toMatchObject({ name: "vmbr0" });
+    expect(snap.sections.containers).toHaveLength(2);
+    expect(snap.sections.containers?.[0]).toMatchObject({ vmid: 101, name: "gluetun", status: "running" });
+    expect(snap.sections.containers?.[0]?.config).toBeUndefined(); // summary => no config
+    expect(snap.sections.vms?.[0]).toMatchObject({ vmid: 100, name: "truenas" });
+    expect(snap.errors).toEqual([]);
+    expect(snap.snapshotPath).toBeTruthy();
+    expect(fs.existsSync(snap.snapshotPath!)).toBe(true);
+  });
+
+  it("returns tailscale: null when tailscale is absent (no error)", async () => {
+    const t = baseTransport(); // tailscale probe returns default empty/exit 0
+    const store = new CensusStore(tmpDir, 30);
+    const snap = await describeHomelabHandler(parse({ sections: ["tailscale"] }), t, store, makeConfig(tmpDir));
+    expect(snap.sections.tailscale).toBeNull();
+    expect(snap.errors).toEqual([]);
+  });
+
+  it("honors the sections filter", async () => {
+    const t = baseTransport();
+    const store = new CensusStore(tmpDir, 30);
+    const snap = await describeHomelabHandler(parse({ sections: ["node"] }), t, store, makeConfig(tmpDir));
+    expect(snap.sections.node).toBeDefined();
+    expect(snap.sections.containers).toBeUndefined();
+    expect(snap.sections.storage).toBeUndefined();
+  });
+});
+
+describe("describeHomelabHandler — full depth redaction", () => {
+  it("includes redacted per-guest config and counts redactions", async () => {
+    const t = baseTransport();
+    t.setExecResult("pct config 101", {
+      stdout: [
+        "arch: amd64",
+        "cores: 2",
+        "hostname: gluetun",
+        "memory: 1024",
+        "net0: name=eth0,bridge=vmbr0,ip=dhcp",
+      ].join("\n"),
+      stderr: "",
+      exitCode: 0,
+    });
+    t.setExecResult("pct config 102", {
+      stdout: "arch: amd64\ncores: 1\npassword: supersecret",
+      stderr: "",
+      exitCode: 0,
+    });
+    const store = new CensusStore(tmpDir, 30);
+    const snap = await describeHomelabHandler(parse({ depth: "full", sections: ["containers"] }), t, store, makeConfig(tmpDir));
+
+    const gluetun = snap.sections.containers?.find((c) => c.vmid === 101);
+    expect(gluetun?.config?.cores).toBe("2");
+    expect(gluetun?.config?.hostname).toBe("gluetun");
+
+    const portainer = snap.sections.containers?.find((c) => c.vmid === 102);
+    expect(portainer?.config?.password).toBe("[REDACTED:password]");
+    expect(JSON.stringify(snap)).not.toContain("supersecret");
+    expect(snap.redactions).toBe(1);
+  });
+});
+
+describe("describeHomelabHandler — error isolation", () => {
+  it("records a section error and keeps other sections intact", async () => {
+    const t = baseTransport();
+    t.setExecResult("qm list", { stdout: "", stderr: "qm: command failed", exitCode: 2 });
+    const store = new CensusStore(tmpDir, 30);
+    const snap = await describeHomelabHandler(parse({ sections: ["node", "vms"] }), t, store, makeConfig(tmpDir));
+
+    expect(snap.sections.node?.version).toBe("8.1.4"); // intact
+    expect(snap.sections.vms).toEqual([]); // fallback
+    expect(snap.errors.some((e) => e.section === "vms" && e.probe === "qm list")).toBe(true);
+  });
+});
+
+describe("describeHomelabHandler — global time budget", () => {
+  it("stops early and records a budget error, skipping snapshot save", async () => {
+    const t = baseTransport();
+    const store = new CensusStore(tmpDir, 30);
+    const cfg = makeConfig(tmpDir, { budgetMs: 0 });
+    let tick = 0;
+    const now = () => tick++; // deadline = 0; first probe sees now()=1 > 0
+    const snap = await describeHomelabHandler(parse({}), t, store, cfg, now);
+
+    expect(snap.errors.some((e) => e.probe === "(budget)")).toBe(true);
+    expect(snap.snapshotPath).toBeUndefined(); // not saved on budget hit
+    expect(fs.readdirSync(tmpDir).filter((f) => f.endsWith(".json"))).toHaveLength(0);
+  });
+});
+
+describe("describeHomelabHandler — services", () => {
+  it("reports failed units and docker containers for running containers only", async () => {
+    const t = baseTransport();
+    t.setExecResult(
+      buildPctExecCommand(101, "systemctl list-units --failed --no-legend --plain"),
+      { stdout: "smartd.service loaded failed failed Self Monitoring", stderr: "", exitCode: 0 }
+    );
+    t.setExecResult(
+      buildPctExecCommand(
+        101,
+        'command -v docker >/dev/null 2>&1 && docker ps --format "{{.Names}}\\t{{.Image}}\\t{{.Status}}" || true'
+      ),
+      { stdout: "gluetun\tqmcgaw/gluetun:latest\tUp 3 days", stderr: "", exitCode: 0 }
+    );
+    const store = new CensusStore(tmpDir, 30);
+    const snap = await describeHomelabHandler(parse({ sections: ["services"] }), t, store, makeConfig(tmpDir));
+
+    expect(snap.sections.services).toHaveLength(1); // only vmid 101 is running
+    expect(snap.sections.services?.[0]).toMatchObject({ vmid: 101, failedUnits: ["smartd.service"] });
+    expect(snap.sections.services?.[0]?.docker[0]).toMatchObject({ name: "gluetun" });
+  });
+});
+
+describe("describeHomelabHandler — snapshot persistence + drift", () => {
+  it("saves snapshots, enforces retention, and computes drift vs previous", async () => {
+    const store = new CensusStore(tmpDir, 2);
+    const cfg = makeConfig(tmpDir);
+
+    // First run.
+    let tick = 1_000;
+    await describeHomelabHandler(parse({}), baseTransport(), store, cfg, () => tick);
+
+    // Second run: container 101 stops.
+    const t2 = baseTransport();
+    t2.setExecResult("pct list", {
+      stdout: "VMID Status Lock Name\n101 stopped gluetun\n102 stopped portainer",
+      stderr: "",
+      exitCode: 0,
+    });
+    tick = 2_000_000;
+    const snap2 = await describeHomelabHandler(parse({ compareToPrevious: true }), t2, store, cfg, () => tick);
+
+    expect(snap2.drift).toBeDefined();
+    expect(snap2.drift?.containers.changed).toEqual([{ vmid: 101, from: "running", to: "stopped" }]);
+
+    // Third run to exercise retention cap of 2.
+    tick = 3_000_000;
+    await describeHomelabHandler(parse({}), baseTransport(), store, cfg, () => tick);
+    expect(store.listSnapshots()).toHaveLength(2);
+  });
+});

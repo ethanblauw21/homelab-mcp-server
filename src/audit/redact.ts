@@ -1,39 +1,11 @@
-const REDACTED = "[REDACTED]";
+import { redactString } from "../guardrails/redaction.js";
 
 /**
- * Patterns are matched against raw text (cmd / note fields).
- * Each replacer preserves the key/header name and replaces only the value.
+ * Audit-log redaction. Thin wrapper over the shared, pure redaction module
+ * (`guardrails/redaction.ts`) so the audit path and the census path use one
+ * implementation with one test suite (ADR-002). Operates on free-text fields
+ * (`cmd`, `note`) and returns the redacted string.
  */
-const SECRET_PATTERNS: Array<{ re: RegExp; replace: (m: string) => string }> = [
-  // env-var assignments with secret-sounding names: SECRET=value, TOKEN=value, etc.
-  {
-    re: /\b(password|passwd|secret(?:[_-]?key)?|token|api[_-]?(?:key|secret)|access[_-]?key|auth(?:[_-]?token)?|private[_-]?key|client[_-]?secret|aws[_-]?secret(?:[_-]?access[_-]?key)?|db[_-]?pass(?:word)?|database[_-]?pass(?:word)?)\s*=\s*\S+/gi,
-    replace: (m) => m.slice(0, m.indexOf("=") + 1) + REDACTED,
-  },
-  // HTTP/curl Authorization header and common secret headers — redact everything to end of line
-  {
-    re: /\b(Authorization|x-api-key|x-auth-token)\s*:\s*\S[^\n]*/gi,
-    replace: (m) => {
-      const idx = m.indexOf(":");
-      return m.slice(0, idx + 1) + " " + REDACTED;
-    },
-  },
-  // AWS IAM access key IDs
-  {
-    re: /\bAKIA[0-9A-Z]{16}\b/g,
-    replace: () => REDACTED,
-  },
-  // PEM private key / certificate blocks
-  {
-    re: /-----BEGIN [A-Z0-9 ]*(?:KEY|CERTIFICATE)[A-Z0-9 ]*-----[\s\S]*?-----END [A-Z0-9 ]*(?:KEY|CERTIFICATE)[A-Z0-9 ]*-----/g,
-    replace: () => REDACTED,
-  },
-];
-
 export function redactSecrets(text: string): string {
-  let out = text;
-  for (const { re, replace } of SECRET_PATTERNS) {
-    out = out.replace(re, replace);
-  }
-  return out;
+  return redactString(text).value;
 }

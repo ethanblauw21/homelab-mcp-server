@@ -29,6 +29,19 @@ const ConfigSchema = z.object({
   audit: z.object({
     logPath: z.string(),
   }),
+  census: z.object({
+    censusDir: z.string(),
+    snapshotRetentionCap: z.number().default(30),
+    probeTimeoutMs: z.number().default(10_000),
+    // Global wall-clock budget for one describe_homelab call. The per-guest
+    // config fan-out (depth: "full") runs sequentially over a single SSH
+    // connection; without a ceiling a lab with many guests could turn one tool
+    // call into a multi-minute stall. When exceeded, the census stops early and
+    // records a budget error rather than hanging.
+    budgetMs: z.number().default(120_000),
+    storageDriftPercent: z.number().default(10),
+    redactionExtraKeys: z.array(z.string()).default([]),
+  }),
   guardrails: z.object({
     commandDenylist: z.array(z.string()).default([
       "rm -rf /",
@@ -86,6 +99,22 @@ function loadConfig(): Config {
     },
     audit: {
       logPath: process.env.AUDIT_LOG_PATH ?? path.join(LOCAL_DATA_DIR, "audit.jsonl"),
+    },
+    census: {
+      censusDir: process.env.CENSUS_DIR ?? path.join(LOCAL_DATA_DIR, "census"),
+      snapshotRetentionCap: process.env.CENSUS_RETENTION_CAP
+        ? parseInt(process.env.CENSUS_RETENTION_CAP)
+        : 30,
+      probeTimeoutMs: process.env.CENSUS_PROBE_TIMEOUT_MS
+        ? parseInt(process.env.CENSUS_PROBE_TIMEOUT_MS)
+        : 10_000,
+      budgetMs: process.env.CENSUS_BUDGET_MS ? parseInt(process.env.CENSUS_BUDGET_MS) : 120_000,
+      storageDriftPercent: process.env.CENSUS_STORAGE_DRIFT_PCT
+        ? parseInt(process.env.CENSUS_STORAGE_DRIFT_PCT)
+        : 10,
+      redactionExtraKeys: process.env.REDACTION_EXTRA_KEYS
+        ? process.env.REDACTION_EXTRA_KEYS.split(",").map((s) => s.trim()).filter(Boolean)
+        : [],
     },
     guardrails: {
       commandDenylist: process.env.COMMAND_DENYLIST
