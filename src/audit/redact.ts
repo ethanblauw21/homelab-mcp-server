@@ -10,9 +10,9 @@ const SECRET_PATTERNS: Array<{ re: RegExp; replace: (m: string) => string }> = [
     re: /\b(password|passwd|secret(?:[_-]?key)?|token|api[_-]?(?:key|secret)|access[_-]?key|auth(?:[_-]?token)?|private[_-]?key|client[_-]?secret|aws[_-]?secret(?:[_-]?access[_-]?key)?|db[_-]?pass(?:word)?|database[_-]?pass(?:word)?)\s*=\s*\S+/gi,
     replace: (m) => m.slice(0, m.indexOf("=") + 1) + REDACTED,
   },
-  // HTTP/curl Authorization header and common secret headers
+  // HTTP/curl Authorization header and common secret headers — redact everything to end of line
   {
-    re: /\b(Authorization|x-api-key|x-auth-token)\s*:\s*\S+/gi,
+    re: /\b(Authorization|x-api-key|x-auth-token)\s*:\s*\S[^\n]*/gi,
     replace: (m) => {
       const idx = m.indexOf(":");
       return m.slice(0, idx + 1) + " " + REDACTED;

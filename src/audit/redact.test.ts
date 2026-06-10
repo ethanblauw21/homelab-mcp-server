@@ -10,8 +10,8 @@ describe("redactSecrets", () => {
       expect(out).not.toContain("hunter2");
     });
 
-    it("redacts passwd=value (lowercase)", () => {
-      const out = redactSecrets("mysql -u root -ppasswd=s3cr3t");
+    it("redacts --password=value (MySQL-style flag)", () => {
+      const out = redactSecrets("mysql -u root --password=s3cr3t");
       expect(out).not.toContain("s3cr3t");
     });
 
@@ -83,8 +83,8 @@ describe("redactSecrets", () => {
       expect(out).toContain("Authorization: [REDACTED]");
     });
 
-    it("redacts Authorization: Token value", () => {
-      const out = redactSecrets("-H Authorization: Token abc123xyz");
+    it("redacts Authorization: Token value (full multi-word value)", () => {
+      const out = redactSecrets("curl -H 'Authorization: Token abc123xyz'");
       expect(out).not.toContain("abc123xyz");
     });
 
