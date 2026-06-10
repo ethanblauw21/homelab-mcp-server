@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { SshTransport } from "../ssh/transport.js";
 import type { Config } from "../config.js";
 import { buildPctExecCommand, parsePctList, type PctContainer } from "./pctHelpers.js";
+import { buildQmAgentPingCommand } from "./qmHelpers.js";
 import {
   parsePveVersion,
   parseFreeBytes,
@@ -54,6 +55,20 @@ export type DescribeHomelabInput = z.infer<typeof DescribeHomelabInputSchema>;
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Interpret a `qm config` `agent:` value as enabled/disabled. Proxmox accepts
+ * `agent: 1`, `agent: 0`, or `agent: enabled=1,fstrim_cloned_disks=1`. Absence ⇒
+ * undefined (unknown); a present non-"0"/non-"enabled=0" value ⇒ enabled.
+ */
+function parseAgentEnabled(v: string | undefined): boolean | undefined {
+  if (v === undefined) return undefined;
+  const s = v.trim().toLowerCase();
+  const m = s.match(/enabled=([01])/);
+  if (m) return m[1] === "1";
+  if (s === "0") return false;
+  return true;
 }
 
 export async function describeHomelabHandler(
@@ -193,6 +208,7 @@ export async function describeHomelabHandler(
       const entries: GuestEntry[] = [];
       for (const r of rows) {
         const entry: GuestEntry = { vmid: r.vmid, name: r.name, status: r.status };
+        let agentEnabled: boolean | undefined;
         if (depth === "full") {
           const cfgText = await runProbe(
             runner,
@@ -205,7 +221,22 @@ export async function describeHomelabHandler(
             null as string | null,
             errors
           );
-          if (cfgText !== null) entry.config = parseGuestConfig(cfgText);
+          if (cfgText !== null) {
+            const parsed = parseGuestConfig(cfgText);
+            entry.config = parsed;
+            agentEnabled = parseAgentEnabled(parsed["agent"]);
+          }
+        }
+        // ADR-005 §Part 1: surface qemu-guest-agent coverage on the map (R6 slot).
+        // `running` (responsiveness) comes from a soft ping; `enabled` from the VM
+        // config when available, else inferred from the ping. Only running VMs are
+        // pinged (a stopped VM's agent is trivially unresponsive).
+        if (r.status === "running") {
+          const ping = await runner.soft(buildQmAgentPingCommand(r.vmid));
+          const running = ping !== null;
+          entry.agent = { enabled: agentEnabled ?? running, running };
+        } else if (agentEnabled !== undefined) {
+          entry.agent = { enabled: agentEnabled };
         }
         entries.push(entry);
       }

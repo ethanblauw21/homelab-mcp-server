@@ -121,6 +121,8 @@ The standing safety rule (no live-node contact until tests are green) applies do
 
 Even though agent status is ADR-005 work, the `vms` guest type carries an optional `agent?: { enabled: boolean; running?: boolean }` field now, so its later population is data, not a schema migration that bumps `schemaVersion` for one field.
 
+**Realized by ADR-005 (2026-06-10):** the slot is now populated — `enabled` from the parsed guest config, `running` from `qm_agent_ping` — with no `schemaVersion` change, exactly as forward-defined here.
+
 ## Options Considered
 
 ### Option A: Composite census tool with fixed probes *(chosen)*

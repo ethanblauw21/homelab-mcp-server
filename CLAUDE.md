@@ -8,7 +8,34 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zod`, `vitest`) that connects as `root` over SSH (key auth) to a Proxmox VE node on the LAN and exposes six tools: `execute`, `read_file`, `write_file`, `list_directory`, `pct_exec`, `pct_list`.
+A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zod`, `vitest`) that connects as `root` over SSH (key auth) to a Proxmox VE node on the LAN and exposes an operator toolkit grown across ADRs 001–005:
+
+| Tool | Purpose | ADR |
+|------|---------|-----|
+| `execute` | Run a shell command on the host (root) | 001 |
+| `read_file` | Read a host file (stat-gated, windowed) | 001 / 004 |
+| `write_file` | Write a host file (backup + audit; `dryRun` preview) | 001 / 004 |
+| `list_directory` | List a host directory | 001 |
+| `pct_exec` | Run a command inside an LXC container | 001 |
+| `pct_list` | List LXC containers + status | 001 |
+| `pct_read_file` / `pct_write_file` | Container file I/O via `pct pull`/`pct push` (`dryRun`) | 003 |
+| `revert_file` / `list_backups` | Restore a file from a local backup; list versions | 003 |
+| `snapshot_create` / `_list` / `_rollback` / `_delete` | Server-managed (`mcp-`) guest snapshots | 003 |
+| `describe_homelab` | Read-only secret-redacted census + drift | 002 |
+| `qm_list` | List QEMU/KVM VMs + status | 005 |
+| `qm_agent_ping` | Check a VM's QEMU guest agent responsiveness | 005 |
+| `qm_exec` | Run a command in a VM via the guest agent (denylist + confirm gate) | 005 |
+| `health_check` | Fixed-probe node health → ok/warn/crit, section-isolated | 005 |
+| `tail_log` | Bounded, validated, **always-redacted** journal/file tail (host or LXC) | 005 |
+| `query_audit` | Filter/summarize the local audit log (read-only, not audited) | 005 |
+| `diff_config` | Preview a revert: current → backup diff (read-only, not audited) | 005 |
+
+## VM parity & operator toolkit (ADR-005)
+
+- **`qm_exec` runs through the QEMU guest agent** (`qm guest exec <vmid> --timeout <secs> -- sh -c '<cmd>'`), not SSH. It requires `qemu-guest-agent` installed and running in the guest; `qm_exec` prechecks with an agent ping and fails with a fix-naming error when absent. The inner command passes the **same two-tier denylist** as `execute`/`pct_exec` (`confirm?: boolean` gates CONFIRM-tier). **Honest limit (contrast ADR-004's host `timeout` wrapper):** the agent `--timeout` bounds how long the *server waits*, but cannot guarantee in-guest termination — `parseAgentExec` surfaces `timedOut`/`exitCode: null`/`pid` rather than faking a clean exit. The census `vms[].agent` slot (ADR-002 R6) is populated from `qm_agent_ping` + parsed guest config.
+- **`health_check` is fixed-probe and read-only**, mirroring the census pattern: declarative probes per section (`node`, `storage`, `guests`, `units`, `updates`), **pure evaluators** (`healthEvaluators.ts`) score each against config thresholds, and a `rollupStatus` reports the worst. Per-section `try/catch` isolation — a failed section becomes a recorded error, never an abort. apt staleness is read with `apt-get -s` (simulate); the server **never** runs `apt update` (A5.1).
+- **`tail_log` validates before it interpolates.** Unit names match a strict charset, `since` accepts only ISO or `<n> (min|hour|day) ago`, paths go through `validatePath`, lines clamp to `tools.tailLinesCap`, and `unit` XOR `path` is enforced — anything free-form throws. Output (and error text) **always** passes through the ADR-002 redaction module; over-redaction is the safe failure mode for logs.
+- **`query_audit` + `diff_config` complete the preview/forensics triad:** `dryRun` (before a write) → `diff_config` (before a revert) → `query_audit` (after the fact). Both are pure/read-only and **not** themselves audited. `query_audit` filters `AuditLog.readAll()` (tool/vmid/path/time/large-only), returns a summary + newest-first records bounded by `tools.queryAuditMaxLimit`. `diff_config` reconstructs a backup (resolved by `backupPath` or latest-for-target) and diffs `current → backup` via the shared `computeUnifiedDiff`; metadata-only backups return a structured `revertible: false` instead of a diff.
 
 ## Commands
 
@@ -50,6 +77,15 @@ src/
     listDirectory.ts    # list_directory tool handler
     pctExec.ts          # pct_exec tool handler
     pctList.ts          # pct_list handler + output parser
+    qmHelpers.ts        # Pure: qm command builders + parseQmList / parseAgentExec (ADR-005)
+    qmList.ts           # qm_list handler
+    qmAgentPing.ts      # qm_agent_ping handler + pingAgent
+    qmExec.ts           # qm_exec handler (denylist + confirm gate, agent-exec)
+    healthEvaluators.ts # Pure: threshold evaluators + parsers (load/mem/fs/units/onboot/updates)
+    healthCheck.ts      # health_check handler — fixed probes, section-isolated rollup
+    tailLog.ts          # tail_log handler + pure buildTailCommand (validate → redact)
+    queryAudit.ts       # Pure filterAuditRecords/summarizeAuditRecords + query_audit handler
+    diffConfig.ts       # diff_config handler — current→backup revert preview (read-only)
   guardrails/
     denylist.ts         # Pure fn: command denylist matching (normalizes whitespace/obfuscation)
     pathValidation.ts   # Pure fn: traversal checks, allowlist enforcement

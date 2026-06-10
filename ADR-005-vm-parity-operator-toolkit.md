@@ -28,7 +28,7 @@ This ADR adds VM parity plus four small operator tools. Each tool is individuall
 - Execution: `qm guest exec <vmid> --timeout <secs> -- sh -c '<escaped>'` (shared quoting helper). The agent returns JSON (`exited`, `exitcode`, `out-data`, `err-data`, `out-truncated`); a pure parser maps this onto the ADR-004 `ExecResult` shape: not-exited-within-timeout ⇒ `timedOut: true` with the guest PID recorded in the audit note (the process may still be running in the guest — unlike §ADR-004's host wrapper, the agent cannot guarantee termination; this is stated honestly in the tool description). `out-truncated` surfaces as a result field.
 - Audited like `pct_exec`, with `vmid`.
 
-**Census integration (amends ADR-002):** the `vms` section gains `agent: { enabled: boolean (from config), responsive: boolean (from ping) }` per VM, so `qm_exec` coverage is visible on the map before it's needed.
+**Census integration (amends ADR-002):** the `vms` section carries `agent: { enabled: boolean (from config), responsive: boolean (from ping) }` per VM, so `qm_exec` coverage is visible on the map before it's needed. *(As shipped, this populates the existing ADR-002 R6 forward-slot `agent: { enabled, running? }` — `running` holds the ping-derived "responsive" boolean — which avoids a `schemaVersion` bump. Same information, existing key. See Action Item 3.)*
 
 **Deferred (stretch): `qm_read_file` / `qm_write_file`.** The guest agent supports file read/write (via `pvesh …/agent/file-read|file-write`, base64-bodied, agent-enforced size limits), and ADR-003's target-descriptor scheme extends naturally (`kind: "qm"`). Deferred because VM config edits are rare in this lab relative to container edits; if implemented, reads inherit the ADR-004 size cap and writes run the full ADR-003 pipeline. Listed as a stretch action item rather than a decision.
 
@@ -103,16 +103,16 @@ Deferred as described — demand-driven; the descriptor scheme means no design w
 
 ## Action Items
 
-1. [ ] Implement `qm list` + agent-exec JSON parsers (pure, fixtures first); add `qm` shim to the Docker harness.
-2. [ ] Implement `qm_list`, `qm_agent_ping`, `qm_exec` (denylist v2 + confirm gate on inner command; audit with vmid); extend the `AuditTool` union.
-3. [ ] Amend the census `vms` section with agent status (ADR-002 amendment noted in that doc's changelog).
-4. [ ] Implement health probes + pure evaluators + config thresholds; section error isolation per the census pattern.
-5. [ ] Implement `tail_log` with strict input validation and mandatory redaction pass.
-6. [ ] Implement `query_audit` (pure filters/summary over `readAll()`).
-7. [ ] Implement `diff_config` over backup meta + `computeUnifiedDiff`.
-8. [ ] Config additions: health thresholds, tail-lines cap, query_audit limit cap.
-9. [ ] Update CLAUDE.md tool table and the project overview.
-10. [ ] (Stretch) `qm_read_file`/`qm_write_file` through the ADR-003 pipeline with `kind: "qm"` descriptors and agent size limits.
+1. [x] Implement `qm list` + agent-exec JSON parsers (pure, fixtures first). *(Docker `qm` shim deferred — no Docker on the Windows dev machine; integration coverage is a CI/Linux task.)*
+2. [x] Implement `qm_list`, `qm_agent_ping`, `qm_exec` (denylist v2 + confirm gate on inner command; audit with vmid); extend the `AuditTool` union.
+3. [x] Amend the census `vms` section with agent status (ADR-002 amendment). **Impl note:** populated the existing R6 forward-slot `agent: { enabled, running? }` rather than the `{ enabled, responsive }` shape above, so no `schemaVersion` bump was needed — "responsive (from ping)" maps onto the `running` boolean. The field carries the same information; only the key name differs.
+4. [x] Implement health probes + pure evaluators + config thresholds; section error isolation per the census pattern.
+5. [x] Implement `tail_log` with strict input validation and mandatory redaction pass.
+6. [x] Implement `query_audit` (pure filters/summary over `readAll()`).
+7. [x] Implement `diff_config` over backup meta + `computeUnifiedDiff`.
+8. [x] Config additions: health thresholds, tail-lines cap, query_audit limit cap.
+9. [x] Update CLAUDE.md tool table and the project overview.
+10. [ ] (Stretch — deferred) `qm_read_file`/`qm_write_file` through the ADR-003 pipeline with `kind: "qm"` descriptors and agent size limits. Not implemented; revisit if VM config edits become frequent.
 
 ## References
 
