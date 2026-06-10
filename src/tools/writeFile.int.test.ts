@@ -23,6 +23,7 @@ function makeConfig(backupDir: string, auditPath: string): Config {
       keepaliveInterval: 5_000,
       reconnectDelay: 1_000,
       commandTimeoutMs: 10_000,
+      commandTimeoutGraceMs: 10_000,
       skipHostVerification: true,
     },
     backup: {
@@ -34,6 +35,7 @@ function makeConfig(backupDir: string, auditPath: string): Config {
       diskPressureFailSafe: "warn",
     },
     audit: { logPath: auditPath },
+    tools: { readFileMaxBytes: 2 * 1024 * 1024, dryRunDiffMaxLines: 200 },
     guardrails: {
       commandDenylist: [],
       pathAllowlist: undefined,
@@ -54,6 +56,7 @@ beforeAll(() => {
     keepaliveInterval: 5_000,
     reconnectDelay: 1_000,
     commandTimeoutMs: 10_000,
+    commandTimeoutGraceMs: 10_000,
     skipHostVerification: true,
   });
 });

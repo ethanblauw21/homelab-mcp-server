@@ -16,6 +16,7 @@ beforeAll(() => {
     keepaliveInterval: 5_000,
     reconnectDelay: 1_000,
     commandTimeoutMs: 10_000,
+    commandTimeoutGraceMs: 10_000,
     skipHostVerification: true,
   });
 });
@@ -48,8 +49,12 @@ describeIfDocker("Ssh2Transport (real SSH container)", () => {
       expect(result.stdout.split("\n").filter(Boolean)).toHaveLength(3);
     });
 
-    it("times out a slow command", async () => {
-      await expect(transport.exec("sleep 10", 500)).rejects.toThrow(/timed out/i);
+    it("times out a slow command on the node (timedOut flag, exit 124 mapped)", async () => {
+      // ADR-004 §2/§3: node-side `timeout` kills the command and the transport
+      // surfaces timedOut:true rather than rejecting or coercing 124 to success.
+      const result = await transport.exec("sleep 10", 1_000);
+      expect(result.timedOut).toBe(true);
+      expect(result.exitCode).toBe(124);
     });
   });
 

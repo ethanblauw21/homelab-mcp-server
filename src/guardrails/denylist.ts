@@ -1,47 +1,167 @@
-function normalize(cmd: string): string {
-  return cmd
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
+/**
+ * Command guardrail (ADR-004 §5): segment-anchored, two-tier.
+ *
+ *  - DENY (unconditional): destructive-by-nature patterns. No flag bypasses.
+ *  - CONFIRM (deliberate-action gate): availability-class commands, matched
+ *    ONLY in command position. Refused unless the caller passes confirm:true.
+ *
+ * Honest limit (restated from ADR-001): this is a tripwire against catastrophic
+ * and availability-affecting commands, not a sandbox. Root can still do unbounded
+ * damage with commands that match nothing — e.g. `bash -c "reboot"` hides the
+ * command in an argument and is NOT caught (A4.2 known limit).
+ */
+
+function normalize(s: string): string {
+  return s.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
-// All patterns are matched against the *normalized* (lowercased, whitespace-collapsed) command.
-const BUILT_IN_PATTERNS: RegExp[] = [
-  // rm -rf / or rm -rf /* — path must be exactly "/" optionally followed by "*"
-  /\brm\s+-rf\s+\/(\*|\s|$)/,
+/**
+ * Quote-aware split into command segments (A4.2). Separators recognised:
+ *   ; && || | & newline  and command-substitution introducers $( and backtick.
+ * Separators inside single or double quotes do NOT split. Chosen fidelity: a
+ * lexical scan, not a full shell parser — nested/escaped exotica may under-split,
+ * which is acceptable for a tripwire (it errs toward inspecting more text).
+ */
+export function splitSegments(command: string): string[] {
+  const segments: string[] = [];
+  let cur = "";
+  let quote: '"' | "'" | null = null;
+  let i = 0;
+  const push = () => {
+    segments.push(cur);
+    cur = "";
+  };
+  while (i < command.length) {
+    const c = command[i]!;
+    const c2 = command.slice(i, i + 2);
+    if (quote) {
+      cur += c;
+      if (c === quote) quote = null;
+      i++;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      quote = c;
+      cur += c;
+      i++;
+      continue;
+    }
+    if (c2 === "$(") {
+      push();
+      i += 2;
+      continue;
+    }
+    if (c2 === "&&" || c2 === "||") {
+      push();
+      i += 2;
+      continue;
+    }
+    if (c === "`" || c === ")" || c === ";" || c === "|" || c === "&" || c === "\n") {
+      push();
+      i++;
+      continue;
+    }
+    cur += c;
+    i++;
+  }
+  push();
+  return segments.map((s) => s.trim()).filter(Boolean);
+}
+
+/** The command-position token of a segment, basename-stripped (so /sbin/reboot → reboot). */
+function commandToken(segment: string): string {
+  const first = normalize(segment).split(" ")[0] ?? "";
+  return first.split("/").pop() ?? first;
+}
+
+// DENY patterns are matched against the *normalized full command* — these are
+// destructive-by-nature and we want to catch them wherever they appear.
+const DENY_PATTERNS: RegExp[] = [
+  /\brm\s+-rf\s+\/(\*|\s|$)/, // rm -rf / or rm -rf /*
   /\bmkfs\b/,
   /\bdd\s+if=\/dev\/(zero|random|urandom)/,
-  />\s*\/dev\/(sd[a-z]|nvme\d)/,
-  /:\(\)\s*\{.*\|.*&.*\}/,       // fork bomb
-  // normalize() lowercases, so -R becomes -r
-  /\bchmod\s+-r\s+777\s+\//,
-  /\b(shutdown|reboot|halt|poweroff)\b/,
-  /\binit\s+[06]\b/,
   /\bdd\s+.*of=\/dev\/(sd[a-z]|nvme\d)/,
+  />\s*\/dev\/(sd[a-z]|nvme\d)/, // redirect into a block device
+  /:\(\)\s*\{.*\|.*&.*\}/, // fork bomb
+  /\bchmod\s+-r\s+777\s+\//, // normalize() lowercases -R → -r
 ];
 
-export interface DenylistResult {
-  denied: boolean;
+// CONFIRM commands match only in COMMAND POSITION (segment's leading token).
+const CONFIRM_SIMPLE = new Set(["shutdown", "reboot", "halt", "poweroff"]);
+const SYSTEMCTL_CONFIRM = new Set(["reboot", "poweroff", "halt"]);
+
+export type CommandTier = "allow" | "deny" | "confirm";
+
+export interface CommandVerdict {
+  tier: CommandTier;
   reason?: string;
 }
 
-export function checkDenylist(
-  command: string,
-  extraDenylist: string[] = []
-): DenylistResult {
-  const normalized = normalize(command);
+/** True if a segment's command position is an availability-class (CONFIRM) command. */
+function segmentNeedsConfirm(segment: string): boolean {
+  const norm = normalize(segment);
+  const tokens = norm.split(" ");
+  const cmd = commandToken(segment);
+  if (CONFIRM_SIMPLE.has(cmd)) return true;
+  if (cmd === "init" && (tokens[1] === "0" || tokens[1] === "6")) return true;
+  if (cmd === "systemctl") {
+    // first non-flag argument after `systemctl`
+    const sub = tokens.slice(1).find((t) => !t.startsWith("-"));
+    if (sub && SYSTEMCTL_CONFIRM.has(sub)) return true;
+  }
+  return false;
+}
 
-  for (const pattern of BUILT_IN_PATTERNS) {
-    if (pattern.test(normalized)) {
-      return { denied: true, reason: `matches built-in dangerous pattern: ${pattern}` };
+/**
+ * Evaluate a command against the two-tier guardrail.
+ * Configured `extraDenylist` entries use segment-PREFIX matching (a segment must
+ * start with the normalized entry). An entry prefixed `confirm:` is CONFIRM-tier;
+ * otherwise DENY.
+ */
+export function checkCommand(command: string, extraDenylist: string[] = []): CommandVerdict {
+  const normalizedFull = normalize(command);
+  const segments = splitSegments(command);
+
+  // 1. Built-in DENY (unconditional) — wins over everything.
+  for (const pattern of DENY_PATTERNS) {
+    if (pattern.test(normalizedFull)) {
+      return { tier: "deny", reason: `matches built-in dangerous pattern: ${pattern}` };
     }
   }
 
-  for (const entry of extraDenylist) {
-    if (normalized.includes(normalize(entry))) {
-      return { denied: true, reason: `matches configured denylist entry: ${entry}` };
+  // 2. Configured denylist entries (segment-prefix; default DENY, confirm: → CONFIRM).
+  const normalizedSegments = segments.map(normalize);
+  let configConfirm: string | null = null;
+  for (const raw of extraDenylist) {
+    const isConfirm = raw.toLowerCase().startsWith("confirm:");
+    const entry = normalize(isConfirm ? raw.slice("confirm:".length) : raw);
+    if (!entry) continue;
+    const matched = normalizedSegments.some((seg) => seg === entry || seg.startsWith(entry + " "));
+    if (matched) {
+      if (isConfirm) {
+        configConfirm = raw.slice("confirm:".length).trim();
+      } else {
+        return { tier: "deny", reason: `matches configured denylist entry: ${entry}` };
+      }
     }
   }
 
-  return { denied: false };
+  // 3. Built-in CONFIRM (command-position only).
+  for (const seg of segments) {
+    if (segmentNeedsConfirm(seg)) {
+      return {
+        tier: "confirm",
+        reason: `availability-class command "${commandToken(seg)}" requires confirm:true`,
+      };
+    }
+  }
+
+  if (configConfirm !== null) {
+    return {
+      tier: "confirm",
+      reason: `configured confirm-tier command "${configConfirm}" requires confirm:true`,
+    };
+  }
+
+  return { tier: "allow" };
 }

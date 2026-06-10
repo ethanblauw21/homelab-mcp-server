@@ -7,14 +7,40 @@ import type { BackupStore } from "../backup/store.js";
 import { buildAuditRecord, sha256 } from "../audit/record.js";
 import type { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
+import { computeUnifiedDiff } from "../util/diff.js";
 
 export const WriteFileInputSchema = z.object({
   path: z.string().min(1).describe("Absolute path on the Proxmox host"),
   content: z.string().describe("File content to write"),
   encoding: z.enum(["utf8", "base64"]).default("utf8").describe("Encoding of the content field"),
+  dryRun: z
+    .boolean()
+    .optional()
+    .describe(
+      "Preview only: returns a unified diff + would-be metadata. No write, no backup, no audit."
+    ),
 });
 
 export type WriteFileInput = z.infer<typeof WriteFileInputSchema>;
+
+export interface WriteFileResult {
+  backupPath: string | null;
+  auditId: string;
+  revertible: boolean;
+}
+
+export interface WriteFileDryRunResult {
+  dryRun: true;
+  isNewFile: boolean;
+  kind: string;
+  isLargeChange: boolean;
+  largeChangeReason?: string;
+  prevBytes: number;
+  newBytes: number;
+  diff: string | null;
+  diffTruncated?: boolean;
+  note?: string;
+}
 
 export async function writeFileHandler(
   input: WriteFileInput,
@@ -22,7 +48,7 @@ export async function writeFileHandler(
   audit: AuditLog,
   backupStore: BackupStore,
   cfg: Config
-): Promise<{ backupPath: string | null; auditId: string; revertible: boolean }> {
+): Promise<WriteFileResult | WriteFileDryRunResult> {
   const pathResult = validatePath(input.path, {
     allowlist: cfg.guardrails.pathAllowlist,
     denylist: cfg.guardrails.pathDenylist,
@@ -49,6 +75,44 @@ export async function writeFileHandler(
     isNewFile,
     cfg.backup.largeFileBytesThreshold
   );
+
+  // dryRun: run the full pipeline READ-ONLY and return a preview. No write, no
+  // backup stored, no audit record — a dry run has zero side effects (ADR-004 §6).
+  if (input.dryRun) {
+    const existingHashMap = backupStore.buildExistingHashMap(cfg.backup.baseDir);
+    const kind = await selectBackupKind({
+      newContent,
+      prevContent,
+      prevHash,
+      isText: isTextContent(newContent),
+      largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
+      largeFilePolicy: cfg.backup.largeFilePolicy,
+      existingHashToPaths: existingHashMap,
+    });
+
+    const diffable =
+      isTextContent(newContent) && (isNewFile || (prevContent !== null && isTextContent(prevContent)));
+    const diff = diffable
+      ? computeUnifiedDiff(
+          prevContent ? prevContent.toString("utf8") : "",
+          newContent.toString("utf8"),
+          cfg.tools.dryRunDiffMaxLines
+        )
+      : null;
+
+    return {
+      dryRun: true,
+      isNewFile,
+      kind: kind.type,
+      isLargeChange: largeChange.isLarge,
+      largeChangeReason: largeChange.isLarge ? largeChange.reason : undefined,
+      prevBytes: prevContent?.length ?? 0,
+      newBytes: newContent.length,
+      diff: diff ? diff.diff : null,
+      diffTruncated: diff ? diff.truncated : undefined,
+      note: diff ? undefined : "binary content — diff omitted",
+    };
+  }
 
   // Check disk pressure; apply fail-safe if still over cap after eviction
   if (backupStore.checkDiskPressure()) {

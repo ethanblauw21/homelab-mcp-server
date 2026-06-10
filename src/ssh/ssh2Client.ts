@@ -1,8 +1,12 @@
 import { Client, SFTPWrapper } from "ssh2";
 import { readFileSync } from "fs";
-import type { ExecResult, FileEntry, SshTransport } from "./transport.js";
+import type { ExecResult, FileEntry, FileStat, ReadFileOptions, SshTransport } from "./transport.js";
 import type { Config } from "../config.js";
 import { computeFingerprint, decideHostKey, KnownHostsStore } from "./hostKey.js";
+import { buildTimeoutWrapper, timeoutMsToSecs, TIMEOUT_EXIT_CODE } from "./command.js";
+
+const RECONNECT_BACKOFF_CAP_MS = 60_000;
+const MAX_CONNECT_ATTEMPTS = 5;
 
 export class Ssh2Transport implements SshTransport {
   private client: Client | null = null;
@@ -56,15 +60,61 @@ export class Ssh2Transport implements SshTransport {
     if (this.client) return Promise.resolve();
     if (this.connectingPromise) return this.connectingPromise;
 
-    this.connectingPromise = new Promise((resolve, reject) => {
+    this.connectingPromise = this.connectWithBackoff().then(
+      () => {
+        this.connectingPromise = null;
+      },
+      (err) => {
+        this.connectingPromise = null;
+        throw err;
+      }
+    );
+
+    return this.connectingPromise;
+  }
+
+  /**
+   * Exponential backoff with jitter (item 8 — `reconnectDelay` is now honored).
+   * Delay starts at `reconnectDelay`, doubles each attempt, caps at 60s, and is
+   * jittered to avoid thundering-herd reconnects. Resets implicitly on success.
+   */
+  private async connectWithBackoff(): Promise<void> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < MAX_CONNECT_ATTEMPTS; attempt++) {
+      if (attempt > 0) {
+        const base = Math.min(
+          this.cfg.reconnectDelay * 2 ** (attempt - 1),
+          RECONNECT_BACKOFF_CAP_MS
+        );
+        const jittered = base * (0.5 + Math.random() * 0.5); // 50–100% of base
+        console.error(
+          `[ssh] reconnect attempt ${attempt + 1}/${MAX_CONNECT_ATTEMPTS} to ` +
+            `${this.cfg.host}:${this.cfg.port} in ${Math.round(jittered)}ms`
+        );
+        await this.sleep(jittered);
+      }
+      try {
+        await this.attemptConnectOnce();
+        return;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  private attemptConnectOnce(): Promise<void> {
+    return new Promise((resolve, reject) => {
       const client = new Client();
       client.on("ready", () => {
         this.client = client;
-        this.connectingPromise = null;
         resolve();
       });
       client.on("error", (err) => {
-        this.connectingPromise = null;
         reject(err);
       });
       client.on("close", () => {
@@ -83,8 +133,6 @@ export class Ssh2Transport implements SshTransport {
       };
       client.connect(connectCfg);
     });
-
-    return this.connectingPromise;
   }
 
   private async ensureConnected(): Promise<Client> {
@@ -108,13 +156,30 @@ export class Ssh2Transport implements SshTransport {
     const client = await this.ensureConnected();
     const timeout = timeoutMs ?? this.cfg.commandTimeoutMs;
 
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error(`Command timed out after ${timeout}ms`)),
-        timeout
-      );
+    // Enforcement lives on the node: a client timer cannot reliably kill a
+    // remote process (ADR-004 §2). coreutils `timeout` sends TERM then KILL.
+    const secs = timeoutMsToSecs(timeout);
+    const wrapped = buildTimeoutWrapper(command, secs);
+    // Client-side backstop only for a wedged connection: effective + grace.
+    const backstopMs = timeout + this.cfg.commandTimeoutGraceMs;
 
-      client.exec(command, (err, stream) => {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        // The connection itself is unresponsive — drop it and force a reconnect.
+        this.sftp = null;
+        if (this.client) {
+          this.client.end();
+          this.client = null;
+        }
+        reject(
+          new Error(
+            `Connection backstop fired after ${backstopMs}ms (node-side timeout ` +
+              `was ${secs}s); connection dropped and marked for reconnect`
+          )
+        );
+      }, backstopMs);
+
+      client.exec(wrapped, (err, stream) => {
         if (err) {
           clearTimeout(timer);
           return reject(err);
@@ -123,9 +188,17 @@ export class Ssh2Transport implements SshTransport {
         let stderr = "";
         stream.on("data", (d: Buffer) => { stdout += d.toString(); });
         stream.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
-        stream.on("close", (exitCode: number | null) => {
+        // ssh2 emits (code, signalName); code is null on signal termination.
+        stream.on("close", (exitCode: number | null, signal?: string) => {
           clearTimeout(timer);
-          resolve({ stdout, stderr, exitCode: exitCode ?? 0 });
+          const timedOut = exitCode === TIMEOUT_EXIT_CODE;
+          resolve({
+            stdout,
+            stderr,
+            exitCode, // never coerced — null preserved for signal kills
+            ...(signal ? { signal } : {}),
+            ...(timedOut ? { timedOut: true } : {}),
+          });
         });
         stream.on("error", (e: Error) => {
           clearTimeout(timer);
@@ -135,11 +208,28 @@ export class Ssh2Transport implements SshTransport {
     });
   }
 
-  async readFile(remotePath: string): Promise<Buffer> {
+  async stat(remotePath: string): Promise<FileStat> {
+    const sftp = await this.getSftp();
+    return new Promise((resolve, reject) => {
+      sftp.stat(remotePath, (err, stats) => {
+        if (err) return reject(err);
+        resolve({ size: stats.size });
+      });
+    });
+  }
+
+  async readFile(remotePath: string, opts?: ReadFileOptions): Promise<Buffer> {
     const sftp = await this.getSftp();
     return new Promise((resolve, reject) => {
       const chunks: Buffer[] = [];
-      const stream = sftp.createReadStream(remotePath);
+      const streamOpts: { start?: number; end?: number } = {};
+      if (opts?.start !== undefined) streamOpts.start = opts.start;
+      if (opts?.length !== undefined) {
+        const start = opts.start ?? 0;
+        // createReadStream `end` is inclusive.
+        streamOpts.end = start + opts.length - 1;
+      }
+      const stream = sftp.createReadStream(remotePath, streamOpts);
       stream.on("data", (chunk: Buffer) => chunks.push(chunk));
       stream.on("end", () => resolve(Buffer.concat(chunks)));
       stream.on("error", reject);

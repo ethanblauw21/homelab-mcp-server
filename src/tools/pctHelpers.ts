@@ -1,3 +1,5 @@
+import { shSingleQuote, buildTimeoutWrapper, type WrapperShell } from "../ssh/command.js";
+
 export interface PctContainer {
   vmid: number;
   status: string;
@@ -34,12 +36,36 @@ export function parsePctList(output: string): PctContainer[] {
   });
 }
 
+export interface PctExecCommandOptions {
+  /**
+   * In-container shell. Defaults to "bash" (A4.1): standard LXC templates ship
+   * bash, and wrapping in `sh` (dash on Debian) silently breaks bashisms.
+   * Pass "sh" for minimal guests (e.g. Alpine) that lack bash.
+   */
+  shell?: WrapperShell;
+  /**
+   * When set, the command is wrapped with coreutils `timeout` *inside* the
+   * container so in-guest termination is reliable (the host-side wrapper alone
+   * may not propagate signals through `pct exec`). See ADR-004 §2.
+   */
+  timeoutSecs?: number;
+}
+
 /**
  * Build the `pct exec` command string with proper quoting.
- * Produces: pct exec <vmid> -- sh -c '<escaped-cmd>'
+ * Produces: pct exec <vmid> -- bash -c '<escaped-cmd>'
+ * or, when timeoutSecs is set:
+ *           pct exec <vmid> -- timeout --signal=TERM --kill-after=5 <secs> bash -c '<escaped-cmd>'
  */
-export function buildPctExecCommand(vmid: number, cmd: string): string {
-  // Escape single quotes in the command for the sh -c wrapper
-  const escaped = cmd.replace(/'/g, "'\\''");
-  return `pct exec ${vmid} -- sh -c '${escaped}'`;
+export function buildPctExecCommand(
+  vmid: number,
+  cmd: string,
+  opts: PctExecCommandOptions = {}
+): string {
+  const shell = opts.shell ?? "bash";
+  const inner =
+    opts.timeoutSecs !== undefined
+      ? buildTimeoutWrapper(cmd, opts.timeoutSecs, { shell })
+      : `${shell} -c ${shSingleQuote(cmd)}`;
+  return `pct exec ${vmid} -- ${inner}`;
 }

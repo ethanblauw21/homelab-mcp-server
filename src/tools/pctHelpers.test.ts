@@ -46,19 +46,19 @@ describe("parsePctList", () => {
 });
 
 describe("buildPctExecCommand", () => {
-  it("builds a basic pct exec command", () => {
+  it("builds a basic pct exec command (bash by default, A4.1)", () => {
     const cmd = buildPctExecCommand(100, "ls /");
-    expect(cmd).toBe("pct exec 100 -- sh -c 'ls /'");
+    expect(cmd).toBe("pct exec 100 -- bash -c 'ls /'");
   });
 
   it("escapes single quotes in the command", () => {
     const cmd = buildPctExecCommand(101, "echo 'hello world'");
-    expect(cmd).toBe("pct exec 101 -- sh -c 'echo '\\''hello world'\\'''");
+    expect(cmd).toBe("pct exec 101 -- bash -c 'echo '\\''hello world'\\'''");
   });
 
   it("handles commands with double quotes", () => {
     const cmd = buildPctExecCommand(102, 'grep "error" /var/log/syslog');
-    expect(cmd).toBe('pct exec 102 -- sh -c \'grep "error" /var/log/syslog\'');
+    expect(cmd).toBe('pct exec 102 -- bash -c \'grep "error" /var/log/syslog\'');
   });
 
   it("uses the correct vmid", () => {
@@ -66,8 +66,20 @@ describe("buildPctExecCommand", () => {
     expect(cmd).toMatch(/^pct exec 999/);
   });
 
-  it("wraps command in sh -c", () => {
+  it("wraps command in bash -c", () => {
     const cmd = buildPctExecCommand(100, "uptime");
-    expect(cmd).toContain("sh -c");
+    expect(cmd).toContain("bash -c");
+  });
+
+  it("falls back to sh -c for minimal guests", () => {
+    const cmd = buildPctExecCommand(100, "uptime", { shell: "sh" });
+    expect(cmd).toBe("pct exec 100 -- sh -c 'uptime'");
+  });
+
+  it("composes an in-container timeout wrapper when timeoutSecs is set", () => {
+    const cmd = buildPctExecCommand(100, "sleep 99", { timeoutSecs: 5 });
+    expect(cmd).toBe(
+      "pct exec 100 -- timeout --signal=TERM --kill-after=5 5 bash -c 'sleep 99'"
+    );
   });
 });
