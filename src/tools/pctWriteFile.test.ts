@@ -15,6 +15,7 @@ function makeConfig(tmpDir: string): Config {
     audit: { logPath: path.join(tmpDir, "audit.jsonl") },
     container: { newFileMode: "0644", newFileUid: 0, newFileGid: 0, nodeTempDir: "/tmp" },
     snapshot: { perGuestCap: 3, vmstate: false },
+    tools: { readFileMaxBytes: 2 * 1024 * 1024, dryRunDiffMaxLines: 200 },
     guardrails: { commandDenylist: [], pathAllowlist: undefined, pathDenylist: [] },
   };
 }
@@ -108,5 +109,45 @@ describe("pctWriteFileHandler", () => {
     await expect(
       pctWriteFileHandler({ vmid: 101, path: "/etc/app.conf", content: "x", encoding: "utf8" }, t, audit, backupStore, cfg)
     ).rejects.toThrow(/pct pull failed/i);
+  });
+
+  it("dryRun returns a unified diff and would-be metadata without side effects (ADR-004 §6)", async () => {
+    const t = new FakeTransport();
+    t.setExecResult("pct status 101", { stdout: "status: running", stderr: "", exitCode: 0 });
+    t.setExecResult("mktemp -p '/tmp'", { stdout: "/tmp/tmp.W", stderr: "", exitCode: 0 });
+    t.setExecResult("pct pull 101 '/etc/app.conf' '/tmp/tmp.W'", { stdout: "", stderr: "", exitCode: 0 });
+    t.setFile("/tmp/tmp.W", "a\nb\nc\n");
+
+    const res = (await pctWriteFileHandler(
+      { vmid: 101, path: "/etc/app.conf", content: "a\nB\nc\n", encoding: "utf8", dryRun: true },
+      t, audit, backupStore, cfg
+    )) as Extract<Awaited<ReturnType<typeof pctWriteFileHandler>>, { dryRun: true }>;
+
+    expect(res.dryRun).toBe(true);
+    expect(res.vmid).toBe(101);
+    expect(res.isNewFile).toBe(false);
+    expect(res.diff).toContain("- b");
+    expect(res.diff).toContain("+ B");
+    // No push attempted (no pct push exec result was registered — a push would throw).
+    // No audit record, no backup blobs.
+    expect(audit.readAll()).toHaveLength(0);
+    expect(fs.existsSync(cfg.backup.baseDir)).toBe(false);
+  });
+
+  it("dryRun flags a new file in the preview", async () => {
+    const t = new FakeTransport();
+    t.setExecResult("pct status 101", { stdout: "status: running", stderr: "", exitCode: 0 });
+    t.setExecResult("mktemp -p '/tmp'", { stdout: "/tmp/tmp.W", stderr: "", exitCode: 0 });
+    t.setExecResult("pct pull 101 '/etc/new.conf' '/tmp/tmp.W'", { stdout: "", stderr: "No such file", exitCode: 1 });
+
+    const res = (await pctWriteFileHandler(
+      { vmid: 101, path: "/etc/new.conf", content: "hello\n", encoding: "utf8", dryRun: true },
+      t, audit, backupStore, cfg
+    )) as Extract<Awaited<ReturnType<typeof pctWriteFileHandler>>, { dryRun: true }>;
+
+    expect(res.isNewFile).toBe(true);
+    expect(res.isLargeChange).toBe(true); // new file is a large change
+    expect(res.diff).toContain("+ hello");
+    expect(audit.readAll()).toHaveLength(0);
   });
 });

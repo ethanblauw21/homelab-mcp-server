@@ -14,15 +14,43 @@ import {
   pushContainerFile,
   type GuestPerms,
 } from "./pctFiles.js";
+import { computeUnifiedDiff } from "../util/diff.js";
 
 export const PctWriteFileInputSchema = z.object({
   vmid: z.number().int().positive().describe("LXC container ID"),
   path: z.string().min(1).describe("Absolute path of the file inside the container"),
   content: z.string().describe("File content to write"),
   encoding: z.enum(["utf8", "base64"]).default("utf8").describe("Encoding of the content field"),
+  dryRun: z
+    .boolean()
+    .optional()
+    .describe(
+      "Preview only: returns a unified diff + would-be metadata. No push, no backup, no audit."
+    ),
 });
 
 export type PctWriteFileInput = z.infer<typeof PctWriteFileInputSchema>;
+
+export interface PctWriteFileResult {
+  backupPath: string | null;
+  auditId: string;
+  revertible: boolean;
+  vmid: number;
+}
+
+export interface PctWriteFileDryRunResult {
+  dryRun: true;
+  vmid: number;
+  isNewFile: boolean;
+  kind: string;
+  isLargeChange: boolean;
+  largeChangeReason?: string;
+  prevBytes: number;
+  newBytes: number;
+  diff: string | null;
+  diffTruncated?: boolean;
+  note?: string;
+}
 
 export async function pctWriteFileHandler(
   input: PctWriteFileInput,
@@ -30,7 +58,7 @@ export async function pctWriteFileHandler(
   audit: AuditLog,
   backupStore: BackupStore,
   cfg: Config
-): Promise<{ backupPath: string | null; auditId: string; revertible: boolean; vmid: number }> {
+): Promise<PctWriteFileResult | PctWriteFileDryRunResult> {
   const pathResult = validatePath(input.path, {
     allowlist: cfg.guardrails.pathAllowlist,
     denylist: cfg.guardrails.pathDenylist,
@@ -64,6 +92,45 @@ export async function pctWriteFileHandler(
     isNewFile,
     cfg.backup.largeFileBytesThreshold
   );
+
+  // dryRun: run the full pipeline READ-ONLY and return a preview. No push, no
+  // backup stored, no audit record — a dry run has zero side effects (ADR-004 §6).
+  if (input.dryRun) {
+    const existingHashMap = backupStore.buildExistingHashMap(cfg.backup.baseDir);
+    const kind = await selectBackupKind({
+      newContent,
+      prevContent,
+      prevHash,
+      isText: isTextContent(newContent),
+      largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
+      largeFilePolicy: cfg.backup.largeFilePolicy,
+      existingHashToPaths: existingHashMap,
+    });
+
+    const diffable =
+      isTextContent(newContent) && (isNewFile || (prevContent !== null && isTextContent(prevContent)));
+    const diff = diffable
+      ? computeUnifiedDiff(
+          prevContent ? prevContent.toString("utf8") : "",
+          newContent.toString("utf8"),
+          cfg.tools.dryRunDiffMaxLines
+        )
+      : null;
+
+    return {
+      dryRun: true,
+      vmid: input.vmid,
+      isNewFile,
+      kind: kind.type,
+      isLargeChange: largeChange.isLarge,
+      largeChangeReason: largeChange.isLarge ? largeChange.reason : undefined,
+      prevBytes: prevContent?.length ?? 0,
+      newBytes: newContent.length,
+      diff: diff ? diff.diff : null,
+      diffTruncated: diff ? diff.truncated : undefined,
+      note: diff ? undefined : "binary content — diff omitted",
+    };
+  }
 
   if (backupStore.checkDiskPressure()) {
     if (cfg.backup.diskPressureFailSafe === "refuse") {
