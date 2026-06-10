@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.local
+.env
+*.pem
+*.key
+coverage/
+.int-test-audit.jsonl
+stryker-*.txt
+.claude/settings.local.json

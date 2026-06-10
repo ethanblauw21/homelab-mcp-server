@@ -1,0 +1,14 @@
+services:
+  sshd:
+    build:
+      context: .
+      dockerfile: Dockerfile.sshd
+    ports:
+      - "2222:22"
+    environment:
+      - SSH_PUBLIC_KEY=${SSH_TEST_PUBLIC_KEY}
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ss -tlnp | grep ':22'"]
+      interval: 1s
+      timeout: 3s
+      retries: 15
