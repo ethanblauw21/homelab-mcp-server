@@ -47,6 +47,24 @@ const ConfigSchema = z.object({
     maxItemsPerSection: z.number().default(200),
     maxResponseBytes: z.number().default(512 * 1024),
   }),
+  // ADR-003 Part 1 — container file tools (pct pull/push).
+  container: z.object({
+    // Defaults applied to NEW container files (existing files preserve their
+    // own mode/owner via stat). Mode is an octal string for `pct push --perms`.
+    newFileMode: z.string().default("0644"),
+    newFileUid: z.number().default(0),
+    newFileGid: z.number().default(0),
+    // Where `mktemp` stages pull/push temp files on the node.
+    nodeTempDir: z.string().default("/tmp"),
+  }),
+  // ADR-003 Part 2 — snapshot guard.
+  snapshot: z.object({
+    // Per-guest cap on server-managed (`mcp-`) snapshots; node disk is premium.
+    perGuestCap: z.number().default(3),
+    // A3.2 — include RAM state in VM snapshots (qm --vmstate). Default false:
+    // rollback is disk-only (guest resumes as if from power loss).
+    vmstate: z.boolean().default(false),
+  }),
   guardrails: z.object({
     commandDenylist: z.array(z.string()).default([
       "rm -rf /",
@@ -126,6 +144,22 @@ function loadConfig(): Config {
       maxResponseBytes: process.env.CENSUS_MAX_RESPONSE_BYTES
         ? parseInt(process.env.CENSUS_MAX_RESPONSE_BYTES)
         : 512 * 1024,
+    },
+    container: {
+      newFileMode: process.env.CONTAINER_NEW_FILE_MODE ?? "0644",
+      newFileUid: process.env.CONTAINER_NEW_FILE_UID
+        ? parseInt(process.env.CONTAINER_NEW_FILE_UID)
+        : 0,
+      newFileGid: process.env.CONTAINER_NEW_FILE_GID
+        ? parseInt(process.env.CONTAINER_NEW_FILE_GID)
+        : 0,
+      nodeTempDir: process.env.NODE_TEMP_DIR ?? "/tmp",
+    },
+    snapshot: {
+      perGuestCap: process.env.SNAPSHOT_PER_GUEST_CAP
+        ? parseInt(process.env.SNAPSHOT_PER_GUEST_CAP)
+        : 3,
+      vmstate: process.env.SNAPSHOT_VMSTATE === "true",
     },
     guardrails: {
       commandDenylist: process.env.COMMAND_DENYLIST

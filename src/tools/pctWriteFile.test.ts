@@ -1,0 +1,112 @@
+import { describe, it, expect, beforeEach } from "vitest";
+import { pctWriteFileHandler } from "./pctWriteFile.js";
+import { FakeTransport } from "../ssh/fakeTransport.js";
+import { BackupStore } from "../backup/store.js";
+import { AuditLog } from "../audit/log.js";
+import type { Config } from "../config.js";
+import fs from "fs";
+import os from "os";
+import path from "path";
+
+function makeConfig(tmpDir: string): Config {
+  return {
+    ssh: { host: "h", port: 22, username: "root", privateKeyPath: "", keepaliveInterval: 0, reconnectDelay: 0, commandTimeoutMs: 5000, skipHostVerification: true },
+    backup: { baseDir: path.join(tmpDir, "backups"), largeFileBytesThreshold: 1024 * 1024, largeFilePolicy: "diff", perFileVersionCap: 10, globalSizeCapBytes: 100 * 1024 * 1024, diskPressureFailSafe: "warn" },
+    audit: { logPath: path.join(tmpDir, "audit.jsonl") },
+    container: { newFileMode: "0644", newFileUid: 0, newFileGid: 0, nodeTempDir: "/tmp" },
+    snapshot: { perGuestCap: 3, vmstate: false },
+    guardrails: { commandDenylist: [], pathAllowlist: undefined, pathDenylist: [] },
+  };
+}
+
+describe("pctWriteFileHandler", () => {
+  let tmpDir: string;
+  let cfg: Config;
+  let backupStore: BackupStore;
+  let audit: AuditLog;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pctwrite-"));
+    cfg = makeConfig(tmpDir);
+    backupStore = new BackupStore(cfg.backup);
+    audit = new AuditLog(cfg.audit.logPath);
+  });
+
+  it("writes a NEW file with default perms and audits with vmid", async () => {
+    const t = new FakeTransport();
+    t.setExecResult("pct status 101", { stdout: "status: running", stderr: "", exitCode: 0 });
+    t.setExecResult("mktemp -p '/tmp'", { stdout: "/tmp/tmp.W", stderr: "", exitCode: 0 });
+    t.setExecResult("pct pull 101 '/etc/new.conf' '/tmp/tmp.W'", { stdout: "", stderr: "No such file", exitCode: 1 });
+    t.setExecResult("pct push 101 '/tmp/tmp.W' '/etc/new.conf' --perms '0644' --user 0 --group 0", { stdout: "", stderr: "", exitCode: 0 });
+
+    const res = await pctWriteFileHandler(
+      { vmid: 101, path: "/etc/new.conf", content: "new body", encoding: "utf8" },
+      t, audit, backupStore, cfg
+    );
+
+    expect(res.vmid).toBe(101);
+    expect((await t.readFile("/tmp/tmp.W")).toString()).toBe("new body");
+    const records = audit.readAll();
+    expect(records[0].tool).toBe("pct_write_file");
+    expect(records[0].vmid).toBe(101);
+  });
+
+  it("preserves the existing file's perms via stat on overwrite", async () => {
+    const t = new FakeTransport();
+    t.setExecResult("pct status 101", { stdout: "status: running", stderr: "", exitCode: 0 });
+    t.setExecResult("mktemp -p '/tmp'", { stdout: "/tmp/tmp.W", stderr: "", exitCode: 0 });
+    t.setExecResult("pct pull 101 '/etc/app.conf' '/tmp/tmp.W'", { stdout: "", stderr: "", exitCode: 0 });
+    t.setFile("/tmp/tmp.W", "old body");
+    t.setExecResult("pct exec 101 -- stat -c '%a %u %g' '/etc/app.conf'", { stdout: "640 0 33", stderr: "", exitCode: 0 });
+    t.setExecResult("pct push 101 '/tmp/tmp.W' '/etc/app.conf' --perms '640' --user 0 --group 33", { stdout: "", stderr: "", exitCode: 0 });
+
+    const res = await pctWriteFileHandler(
+      { vmid: 101, path: "/etc/app.conf", content: "new body", encoding: "utf8" },
+      t, audit, backupStore, cfg
+    );
+
+    expect(res.backupPath).toBeTruthy();
+    // The push used the stat'd perms (640 0:33) — assert by the bytes staged.
+    expect((await t.readFile("/tmp/tmp.W")).toString()).toBe("new body");
+    const records = audit.readAll();
+    expect(records[0].prevSha256).toBeTruthy();
+  });
+
+  it("stores the backup under a pct: file key (distinct from the host path)", async () => {
+    const t = new FakeTransport();
+    t.setExecResult("pct status 101", { stdout: "status: running", stderr: "", exitCode: 0 });
+    t.setExecResult("mktemp -p '/tmp'", { stdout: "/tmp/tmp.W", stderr: "", exitCode: 0 });
+    t.setExecResult("pct pull 101 '/etc/app.conf' '/tmp/tmp.W'", { stdout: "", stderr: "No such file", exitCode: 1 });
+    t.setExecResult("pct push 101 '/tmp/tmp.W' '/etc/app.conf' --perms '0644' --user 0 --group 0", { stdout: "", stderr: "", exitCode: 0 });
+
+    await pctWriteFileHandler(
+      { vmid: 101, path: "/etc/app.conf", content: "body", encoding: "utf8" },
+      t, audit, backupStore, cfg
+    );
+
+    // The pct target should list a backup version; a host target for the same
+    // path should not collide with it.
+    const pctVersions = backupStore.listBackupsForPath({ kind: "pct", vmid: 101, remotePath: "/etc/app.conf" });
+    const hostVersions = backupStore.listBackupsForPath({ kind: "host", remotePath: "/etc/app.conf" });
+    expect(pctVersions.length).toBeGreaterThan(0);
+    expect(hostVersions.length).toBe(0);
+  });
+
+  it("refuses to write to a stopped container (A3.1)", async () => {
+    const t = new FakeTransport();
+    t.setExecResult("pct status 101", { stdout: "status: stopped", stderr: "", exitCode: 0 });
+    await expect(
+      pctWriteFileHandler({ vmid: 101, path: "/etc/app.conf", content: "x", encoding: "utf8" }, t, audit, backupStore, cfg)
+    ).rejects.toThrow(/not running/i);
+  });
+
+  it("surfaces a non-not-found pull error instead of treating it as a new file", async () => {
+    const t = new FakeTransport();
+    t.setExecResult("pct status 101", { stdout: "status: running", stderr: "", exitCode: 0 });
+    t.setExecResult("mktemp -p '/tmp'", { stdout: "/tmp/tmp.W", stderr: "", exitCode: 0 });
+    t.setExecResult("pct pull 101 '/etc/app.conf' '/tmp/tmp.W'", { stdout: "", stderr: "permission denied", exitCode: 1 });
+    await expect(
+      pctWriteFileHandler({ vmid: 101, path: "/etc/app.conf", content: "x", encoding: "utf8" }, t, audit, backupStore, cfg)
+    ).rejects.toThrow(/pct pull failed/i);
+  });
+});
