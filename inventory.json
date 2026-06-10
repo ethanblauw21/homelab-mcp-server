@@ -1,0 +1,106 @@
+{
+  "_cleanupTodo": "Committed deliberately for an agent handoff (2026-06-10). Contains LAN IPs/MACs/infra layout (no secrets). Remove from version control once the handoff is done; re-run describe_homelab for fresh data.",
+  "schemaVersion": 1,
+  "generatedAt": "2026-06-10T23:44:42Z",
+  "source": {
+    "tool": "describe_homelab",
+    "depth": "full",
+    "host": "10.0.0.10",
+    "redactions": 0,
+    "probeErrors": []
+  },
+  "node": {
+    "pveVersion": "9.2.3",
+    "cpuCores": 8,
+    "memBytes": 16413732864,
+    "zfs": { "present": false, "detail": "no pools" }
+  },
+  "storage": [
+    {
+      "name": "local",
+      "type": "dir",
+      "active": true,
+      "totalBytes": 100861726720,
+      "usedBytes": 80838791168,
+      "availBytes": 14852198400,
+      "usedPct": 80.1
+    },
+    {
+      "name": "local-lvm",
+      "type": "lvmthin",
+      "active": true,
+      "totalBytes": 374538764288,
+      "usedBytes": 142699269120,
+      "availBytes": 231839494144,
+      "usedPct": 38.1
+    }
+  ],
+  "network": {
+    "mgmtBridge": {
+      "name": "vmbr0",
+      "address": "10.0.0.10/24",
+      "ports": ["nic0"]
+    },
+    "gateway": "10.0.0.1"
+  },
+  "containers": [
+    {
+      "vmid": 100,
+      "name": "adguard-dns",
+      "status": "running",
+      "unprivileged": true,
+      "cores": 1,
+      "memoryMB": 512,
+      "swapMB": 512,
+      "ostype": "debian",
+      "ip": "10.0.0.51/24",
+      "mac": "BC:24:11:A9:93:CF",
+      "rootfs": "local-lvm:vm-100-disk-0,size=8G",
+      "features": "nesting=1"
+    },
+    {
+      "vmid": 101,
+      "name": "dockerBoss",
+      "status": "running",
+      "unprivileged": true,
+      "cores": 2,
+      "memoryMB": 4096,
+      "swapMB": 512,
+      "ostype": "debian",
+      "ip": "10.0.0.52/24",
+      "mac": "BC:24:11:0E:E6:07",
+      "rootfs": "local-lvm:vm-101-disk-0,size=140G",
+      "features": "nesting=1",
+      "notes": "VPN tunnel passthrough; GPU passthrough (Ice Lake i7-1065G7); id mapping (bridging group 993)",
+      "passthrough": {
+        "apparmor": "unconfined",
+        "cgroupDevicesAllow": "c 226:128 rwm",
+        "idmap": "g 994 100994 64542",
+        "mountEntry": "/dev/dri/renderD128 dev/dri/renderD128 none bind,optional,create=file",
+        "bindMount": "/mnt/media -> /data"
+      }
+    }
+  ],
+  "vms": [],
+  "dockerStacks": {
+    "101": [
+      { "name": "jellyfin", "image": "jellyfin/jellyfin:latest", "status": "Up 11 days (healthy)" },
+      { "name": "flaresolverr", "image": "ghcr.io/flaresolverr/flaresolverr:latest", "status": "Up 11 days" },
+      { "name": "radarr", "image": "lscr.io/linuxserver/radarr:latest", "status": "Up 11 days" },
+      { "name": "gluetun", "image": "qmcgaw/gluetun:latest", "status": "Up 11 days (healthy)" },
+      { "name": "qbittorrent", "image": "lscr.io/linuxserver/qbittorrent:latest", "status": "Up 11 days" },
+      { "name": "prowlarr", "image": "lscr.io/linuxserver/prowlarr:latest", "status": "Up 11 days" },
+      { "name": "jellyseerr", "image": "fallenbagel/jellyseerr:latest", "status": "Up 11 days" },
+      { "name": "sonarr", "image": "lscr.io/linuxserver/sonarr:latest", "status": "Up 11 days" },
+      { "name": "homepage", "image": "ghcr.io/gethomepage/homepage:latest", "status": "Up 11 days (healthy)" },
+      { "name": "qnexus", "image": "qnexus:local", "status": "Up 11 days" },
+      { "name": "tailscale", "image": "tailscale/tailscale:latest", "status": "Up 11 days" },
+      { "name": "watchtower", "image": "containrrr/watchtower", "status": "Restarting (1) — crash-looping" },
+      { "name": "portainer", "image": "portainer/portainer-ce:latest", "status": "Up 11 days" }
+    ]
+  },
+  "attention": [
+    "storage 'local' at ~80.1% — at/over the 80% health_check warn threshold",
+    "CT 101 docker 'watchtower' is crash-looping (Restarting) across consecutive census runs"
+  ]
+}
