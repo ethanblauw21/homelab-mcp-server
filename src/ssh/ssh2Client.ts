@@ -2,6 +2,7 @@ import { Client, SFTPWrapper } from "ssh2";
 import { readFileSync } from "fs";
 import type { ExecResult, FileEntry, SshTransport } from "./transport.js";
 import type { Config } from "../config.js";
+import { computeFingerprint, decideHostKey, KnownHostsStore } from "./hostKey.js";
 
 export class Ssh2Transport implements SshTransport {
   private client: Client | null = null;
@@ -9,9 +10,46 @@ export class Ssh2Transport implements SshTransport {
   // Single in-flight connect promise so concurrent callers all wait on the same attempt
   private connectingPromise: Promise<void> | null = null;
   private readonly cfg: Config["ssh"];
+  private readonly knownHosts: KnownHostsStore;
 
   constructor(cfg: Config["ssh"]) {
     this.cfg = cfg;
+    this.knownHosts = new KnownHostsStore(cfg.knownHostsPath);
+  }
+
+  /**
+   * Build the ssh2 hostVerifier. Always supplied (fail-closed by default).
+   * Note: all diagnostics go to STDERR — stdout is the MCP stdio channel.
+   */
+  private makeHostVerifier(): (key: Buffer) => boolean {
+    const hostPort = `${this.cfg.host}:${this.cfg.port}`;
+    return (key: Buffer): boolean => {
+      if (this.cfg.skipHostVerification) {
+        console.error(
+          `[ssh] WARNING: host key verification SKIPPED for ${hostPort} (skipHostVerification=true)`
+        );
+        return true;
+      }
+      const presented = computeFingerprint(key);
+      const decision = decideHostKey({
+        presented,
+        pinned: this.cfg.hostKeyFingerprint,
+        stored: this.knownHosts.get(hostPort),
+        hostPort,
+      });
+      if (decision.accept) {
+        if (decision.persist) {
+          this.knownHosts.set(decision.persist.hostPort, decision.persist.fingerprint);
+          console.error(
+            `[ssh] WARNING: ${hostPort} host key pinned on first use: ${presented}. ` +
+              `Verify this out of band (e.g. \`ssh-keyscan -t ed25519 ${this.cfg.host} | ssh-keygen -lf -\`).`
+          );
+        }
+        return true;
+      }
+      console.error(`[ssh] host key verification FAILED for ${hostPort}:\n${decision.reason}`);
+      return false;
+    };
   }
 
   private connect(): Promise<void> {
@@ -40,10 +78,9 @@ export class Ssh2Transport implements SshTransport {
         username: this.cfg.username,
         privateKey: readFileSync(this.cfg.privateKeyPath),
         keepaliveInterval: this.cfg.keepaliveInterval,
+        // Always verify (fail-closed) unless explicitly skipped; see makeHostVerifier.
+        hostVerifier: this.makeHostVerifier(),
       };
-      if (this.cfg.skipHostVerification) {
-        connectCfg.hostVerifier = () => true;
-      }
       client.connect(connectCfg);
     });
 

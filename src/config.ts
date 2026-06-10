@@ -17,6 +17,12 @@ const ConfigSchema = z.object({
     reconnectDelay: z.number().default(3_000),
     commandTimeoutMs: z.number().default(30_000),
     skipHostVerification: z.boolean().default(false),
+    // Explicit host-key pin (recommended). Accepts a bare base64 digest, a
+    // "SHA256:..." token, or a full `ssh-keygen -lf` line.
+    hostKeyFingerprint: z.string().optional(),
+    // Trust-on-first-use store path. Optional so test config literals can omit
+    // it; loadConfig always supplies a default.
+    knownHostsPath: z.string().optional(),
   }),
   backup: z.object({
     baseDir: z.string(),
@@ -105,6 +111,9 @@ function loadConfig(): Config {
       reconnectDelay: 3_000,
       commandTimeoutMs: 30_000,
       skipHostVerification: process.env.SSH_SKIP_HOST_VERIFICATION === "true",
+      hostKeyFingerprint: process.env.SSH_HOST_KEY_FINGERPRINT || undefined,
+      knownHostsPath:
+        process.env.SSH_KNOWN_HOSTS_PATH ?? path.join(LOCAL_DATA_DIR, "known_hosts.json"),
     },
     backup: {
       baseDir: process.env.BACKUP_DIR ?? path.join(LOCAL_DATA_DIR, "backups"),
