@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { randomUUID } from "crypto";
+import { redactSecrets } from "./redact.js";
 
 export type AuditTool =
   | "execute"
@@ -37,6 +38,8 @@ export function buildAuditRecord(fields: Omit<AuditRecord, "id" | "ts">): AuditR
     id: randomUUID(),
     ts: new Date().toISOString(),
     ...fields,
+    ...(fields.cmd !== undefined && { cmd: redactSecrets(fields.cmd) }),
+    ...(fields.note !== undefined && { note: redactSecrets(fields.note) }),
   };
 }
 
