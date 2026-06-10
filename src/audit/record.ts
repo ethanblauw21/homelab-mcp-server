@@ -9,7 +9,13 @@ export type AuditTool =
   | "list_directory"
   | "pct_exec"
   | "pct_list"
-  | "revert_file";
+  | "revert_file"
+  | "pct_read_file"
+  | "pct_write_file"
+  | "snapshot_create"
+  | "snapshot_list"
+  | "snapshot_rollback"
+  | "snapshot_delete";
 
 export interface AuditRecord {
   id: string;
