@@ -87,6 +87,11 @@ const ConfigSchema = z.object({
     // ADR-005 — query_audit result bounds (default returned, hard ceiling).
     queryAuditDefaultLimit: z.number().default(50),
     queryAuditMaxLimit: z.number().default(200),
+    // ADR-005 stretch — qm_write_file content cap. The QEMU guest-agent
+    // file-write endpoint bounds a single write (~60 KB of raw content); a
+    // larger write is refused with a pointer to qm_exec instead of silently
+    // truncating in the guest.
+    qmWriteMaxBytes: z.number().default(60000),
   }),
   // ADR-005 Part 2 — health_check thresholds (config-driven; no hardcoding).
   health: z.object({
@@ -220,6 +225,9 @@ function loadConfig(): Config {
       queryAuditMaxLimit: process.env.QUERY_AUDIT_MAX_LIMIT
         ? parseInt(process.env.QUERY_AUDIT_MAX_LIMIT)
         : 200,
+      qmWriteMaxBytes: process.env.QM_WRITE_MAX_BYTES
+        ? parseInt(process.env.QM_WRITE_MAX_BYTES)
+        : 60000,
     },
     health: {
       loadWarnRatio: process.env.HEALTH_LOAD_WARN_RATIO

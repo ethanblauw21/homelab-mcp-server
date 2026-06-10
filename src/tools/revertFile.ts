@@ -12,6 +12,7 @@ import {
   pushContainerFile,
   type GuestPerms,
 } from "./pctFiles.js";
+import { assertAgentAvailable, resolveNodeName, readVmFile, writeVmFile } from "./qmFiles.js";
 
 export const RevertFileInputSchema = z.object({
   backupPath: z.string().min(1).describe(
@@ -70,6 +71,9 @@ export async function revertFileHandler(
   // reverse-diff backups.
   let currentContent: Buffer | undefined;
   let prevHash: string | undefined;
+  // Resolved lazily for qm targets and reused for the write-back below so the
+  // node name is looked up once per revert.
+  let qmNode: string | undefined;
 
   if (target.kind === "pct") {
     if (target.vmid === undefined) {
@@ -83,6 +87,17 @@ export async function revertFileHandler(
       cfg.container.nodeTempDir,
       timeoutMs
     );
+    if (content) {
+      currentContent = content;
+      prevHash = sha256(content);
+    }
+  } else if (target.kind === "qm") {
+    if (target.vmid === undefined) {
+      throw new Error("VM backup is missing its vmid; cannot route revert");
+    }
+    await assertAgentAvailable(transport, target.vmid, timeoutMs);
+    qmNode = await resolveNodeName(transport, timeoutMs);
+    const { content } = await readVmFile(transport, qmNode, target.vmid, target.remotePath, timeoutMs);
     if (content) {
       currentContent = content;
       prevHash = sha256(content);
@@ -117,14 +132,20 @@ export async function revertFileHandler(
       cfg.container.nodeTempDir,
       timeoutMs
     );
+  } else if (target.kind === "qm") {
+    // Agent precheck + node resolution already happened during the read above;
+    // reuse the resolved node. (No perm preservation — the agent write takes none.)
+    await writeVmFile(transport, qmNode!, target.vmid!, target.remotePath, restored, timeoutMs);
   } else {
     await transport.writeFile(target.remotePath, restored);
   }
 
+  const vmid = target.kind === "pct" || target.kind === "qm" ? target.vmid : undefined;
+
   const record = buildAuditRecord({
     tool: "revert_file",
     host: cfg.ssh.host,
-    vmid: target.kind === "pct" ? target.vmid : undefined,
+    vmid,
     path: target.remotePath,
     prevSha256: prevHash,
     newSha256: sha256(restored),
@@ -138,6 +159,6 @@ export async function revertFileHandler(
     auditId: record.id,
     restoredFrom: input.backupPath,
     bytes: restored.length,
-    vmid: target.kind === "pct" ? target.vmid : undefined,
+    vmid,
   };
 }

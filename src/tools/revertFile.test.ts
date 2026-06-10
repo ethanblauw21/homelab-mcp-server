@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { revertFileHandler } from "./revertFile.js";
 import { pctWriteFileHandler } from "./pctWriteFile.js";
+import { buildAgentFileReadCommand, buildAgentFileWriteCommand } from "./qmFiles.js";
 import { FakeTransport } from "../ssh/fakeTransport.js";
 import { BackupStore } from "../backup/store.js";
 import { AuditLog } from "../audit/log.js";
@@ -223,5 +224,38 @@ describe("revertFileHandler — meta-routed targets", () => {
     expect((await t.readFile("/tmp/tmp.RT")).toString()).toBe("OLD");
     const rec = audit.readAll().find((r) => r.tool === "revert_file");
     expect(rec?.vmid).toBe(101);
+  });
+
+  it("routes a VM backup revert through the guest-agent write flow", async () => {
+    const t = new FakeTransport();
+    // Stash a qm-targeted backup holding "OLD" (the content to restore).
+    const stored = await backupStore.storeBackup(
+      { kind: "qm", vmid: 200, remotePath: "/etc/app.conf" },
+      { type: "gzip-full", blob: zlib.gzipSync(Buffer.from("OLD")) },
+      "h"
+    );
+
+    // Revert flow: ping (agent) → hostname (node) → file-read (current) → file-write (restore).
+    t.setExecResult("qm agent 200 ping", { stdout: "", stderr: "", exitCode: 0 });
+    t.setExecResult("hostname", { stdout: "pve\n", stderr: "", exitCode: 0 });
+    t.setExecResult(buildAgentFileReadCommand("pve", 200, "/etc/app.conf"), {
+      stdout: JSON.stringify({ content: "NEW", truncated: false }),
+      stderr: "",
+      exitCode: 0,
+    });
+    t.setExecResult(buildAgentFileWriteCommand("pve", 200, "/etc/app.conf", Buffer.from("OLD").toString("base64")), {
+      stdout: "", stderr: "", exitCode: 0,
+    });
+
+    const result = await revertFileHandler(
+      { backupPath: stored.backupPath! },
+      t, audit, backupStore, cfg
+    );
+
+    expect(result.vmid).toBe(200);
+    expect(result.bytes).toBe(3); // "OLD"
+    const rec = audit.readAll().find((r) => r.tool === "revert_file");
+    expect(rec?.vmid).toBe(200);
+    expect(rec?.prevSha256).toBeTruthy(); // current "NEW" was hashed before restore
   });
 });
