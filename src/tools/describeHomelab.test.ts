@@ -211,6 +211,39 @@ describe("describeHomelabHandler — services", () => {
   });
 });
 
+describe("describeHomelabHandler — vms agent status (ADR-005 A3)", () => {
+  it("reports agent responsiveness from ping and enabled from config", async () => {
+    const t = baseTransport();
+    // Two running VMs + one stopped. 100 responds to ping; 200 does not.
+    t.setExecResult("qm list", {
+      stdout:
+        "VMID NAME STATUS MEM(MB) BOOTDISK(GB) PID\n" +
+        "100 truenas running 8192 32.00 1234\n" +
+        "200 winvm running 4096 64.00 5678\n" +
+        "300 oldvm stopped 2048 16.00 -",
+      stderr: "",
+      exitCode: 0,
+    });
+    t.setExecResult("qm agent 100 ping", { stdout: "", stderr: "", exitCode: 0 });
+    t.setExecResult("qm agent 200 ping", { stdout: "", stderr: "QEMU guest agent is not running", exitCode: 255 });
+    t.setExecResult("qm config 100", { stdout: "agent: enabled=1,fstrim_cloned_disks=1\ncores: 4", stderr: "", exitCode: 0 });
+    t.setExecResult("qm config 200", { stdout: "agent: 0\ncores: 2", stderr: "", exitCode: 0 });
+
+    const store = new CensusStore(tmpDir, 30);
+    const snap = await describeHomelabHandler(parse({ depth: "full", sections: ["vms"] }), t, store, makeConfig(tmpDir));
+
+    const v100 = snap.sections.vms?.find((v) => v.vmid === 100);
+    const v200 = snap.sections.vms?.find((v) => v.vmid === 200);
+    const v300 = snap.sections.vms?.find((v) => v.vmid === 300);
+
+    expect(v100?.agent).toEqual({ enabled: true, running: true });
+    // 200 is running but the agent does not answer: running false; config says disabled.
+    expect(v200?.agent).toEqual({ enabled: false, running: false });
+    // Stopped VM is not pinged; with no config-derived enabled we leave agent unset.
+    expect(v300?.agent).toBeUndefined();
+  });
+});
+
 describe("describeHomelabHandler — snapshot persistence + drift", () => {
   it("saves snapshots, enforces retention, and computes drift vs previous", async () => {
     const store = new CensusStore(tmpDir, 2);

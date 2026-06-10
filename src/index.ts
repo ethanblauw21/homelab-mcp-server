@@ -27,6 +27,13 @@ import {
   SnapshotDeleteInputSchema,
   snapshotDeleteHandler,
 } from "./tools/snapshotTools.js";
+import { QmListInputSchema, qmListHandler } from "./tools/qmList.js";
+import { QmAgentPingInputSchema, qmAgentPingHandler } from "./tools/qmAgentPing.js";
+import { QmExecInputSchema, qmExecHandler } from "./tools/qmExec.js";
+import { HealthCheckInputSchema, healthCheckHandler } from "./tools/healthCheck.js";
+import { TailLogInputSchema, tailLogHandler } from "./tools/tailLog.js";
+import { QueryAuditInputSchema, queryAuditHandler } from "./tools/queryAudit.js";
+import { DiffConfigInputSchema, diffConfigHandler } from "./tools/diffConfig.js";
 
 const server = new McpServer({
   name: "homelab-ssh-mcp",
@@ -272,6 +279,124 @@ server.registerTool(
   async (input) => {
     try {
       const result = await snapshotDeleteHandler(input, sshTransport, audit, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+server.registerTool(
+  "qm_list",
+  {
+    description: "List QEMU/KVM virtual machines and their status via qm list.",
+    inputSchema: QmListInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await qmListHandler(input, sshTransport);
+      return { content: [{ type: "text", text: JSON.stringify(result.vms) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+server.registerTool(
+  "qm_agent_ping",
+  {
+    description:
+      "Check whether a VM's QEMU guest agent is responsive (qm agent <vmid> ping). " +
+      "Returns { available, error? }; agent-dependent tools require this to pass.",
+    inputSchema: QmAgentPingInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await qmAgentPingHandler(input, sshTransport);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+server.registerTool(
+  "qm_exec",
+  {
+    description:
+      "Run a command inside a VM via the QEMU guest agent (qm guest exec). Requires the guest " +
+      "agent (qemu-guest-agent) to be installed and running. The inner command passes the same " +
+      "two-tier denylist as execute/pct_exec; CONFIRM-tier commands require confirm: true. " +
+      "Honest exit semantics: a non-terminating agent timeout cannot guarantee in-guest kill.",
+    inputSchema: QmExecInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await qmExecHandler(input, sshTransport, audit, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+server.registerTool(
+  "health_check",
+  {
+    description:
+      "Read-only node health check: runs a fixed set of probes (load, memory, ZFS, filesystem/" +
+      "storage usage, failed systemd units, onboot-but-stopped guests, pending apt updates) and " +
+      "rolls them up to ok/warn/crit against configured thresholds. Sections are error-isolated; " +
+      "apt staleness is read via apt-get -s (simulate), never apt update.",
+    inputSchema: HealthCheckInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await healthCheckHandler(input, sshTransport, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+server.registerTool(
+  "tail_log",
+  {
+    description:
+      "Read the tail of a systemd unit journal (journalctl) or a log file (tail), on the host or " +
+      "inside an LXC container. Strict input validation (unit charset, since grammar, path allowlist, " +
+      "line cap). Output ALWAYS passes through secret redaction before return.",
+    inputSchema: TailLogInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await tailLogHandler(input, sshTransport, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+server.registerTool(
+  "query_audit",
+  {
+    description:
+      "Query the local audit log. Filter by tool, vmid, path substring, time range, or large-change " +
+      "flag; returns a summary (counts by tool/vmid, time span) plus the newest-first matching records " +
+      "(bounded by a configurable limit). Read-only, not itself audited.",
+    inputSchema: QueryAuditInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = queryAuditHandler(input, audit, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+server.registerTool(
+  "diff_config",
+  {
+    description:
+      "Preview what reverting a file would change: reconstructs a backup's content and diffs it " +
+      "against the file's current content (current → backup). Resolve by backupPath, or by path " +
+      "(+vmid for containers) to use the latest backup. Read-only, not audited; the revert it " +
+      "precedes is what gets logged.",
+    inputSchema: DiffConfigInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await diffConfigHandler(input, sshTransport, backupStore, config);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }

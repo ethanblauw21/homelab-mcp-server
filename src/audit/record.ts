@@ -15,7 +15,8 @@ export type AuditTool =
   | "snapshot_create"
   | "snapshot_list"
   | "snapshot_rollback"
-  | "snapshot_delete";
+  | "snapshot_delete"
+  | "qm_exec";
 
 export interface AuditRecord {
   id: string;

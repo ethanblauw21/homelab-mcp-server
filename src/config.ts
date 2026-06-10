@@ -80,8 +80,30 @@ const ConfigSchema = z.object({
     // read_file refuses files larger than this (ADR-004 §4); use offset/maxBytes
     // for deliberate windowed reads, or execute with head/tail/grep/wc.
     readFileMaxBytes: z.number().default(2 * 1024 * 1024), // 2 MB
-    // Unified-diff line cap for dryRun previews (ADR-004 §6).
+    // Unified-diff line cap for dryRun previews (ADR-004 §6) and diff_config (ADR-005).
     dryRunDiffMaxLines: z.number().default(200),
+    // ADR-005 — tail_log line cap (requests above this are clamped).
+    tailLinesCap: z.number().default(500),
+    // ADR-005 — query_audit result bounds (default returned, hard ceiling).
+    queryAuditDefaultLimit: z.number().default(50),
+    queryAuditMaxLimit: z.number().default(200),
+  }),
+  // ADR-005 Part 2 — health_check thresholds (config-driven; no hardcoding).
+  health: z.object({
+    // Load: 1m loadavg / cores. warn ≥ 0.8×, crit ≥ 1.5×.
+    loadWarnRatio: z.number().default(0.8),
+    loadCritRatio: z.number().default(1.5),
+    // Memory + filesystem/store usage percentages.
+    memWarnPercent: z.number().default(85),
+    memCritPercent: z.number().default(95),
+    fsWarnPercent: z.number().default(80),
+    fsCritPercent: z.number().default(90),
+    // Failed units: any ⇒ warn; a failed unit on this list escalates to crit.
+    failedUnitsCritList: z.array(z.string()).default([]),
+    // Pending updates are informational; warn strictly above this count.
+    pendingUpdatesWarnCount: z.number().default(50),
+    // Per-probe exec timeout for health probes.
+    probeTimeoutMs: z.number().default(10_000),
   }),
   guardrails: z.object({
     commandDenylist: z.array(z.string()).default([
@@ -191,6 +213,34 @@ function loadConfig(): Config {
       dryRunDiffMaxLines: process.env.DRY_RUN_DIFF_MAX_LINES
         ? parseInt(process.env.DRY_RUN_DIFF_MAX_LINES)
         : 200,
+      tailLinesCap: process.env.TAIL_LINES_CAP ? parseInt(process.env.TAIL_LINES_CAP) : 500,
+      queryAuditDefaultLimit: process.env.QUERY_AUDIT_DEFAULT_LIMIT
+        ? parseInt(process.env.QUERY_AUDIT_DEFAULT_LIMIT)
+        : 50,
+      queryAuditMaxLimit: process.env.QUERY_AUDIT_MAX_LIMIT
+        ? parseInt(process.env.QUERY_AUDIT_MAX_LIMIT)
+        : 200,
+    },
+    health: {
+      loadWarnRatio: process.env.HEALTH_LOAD_WARN_RATIO
+        ? parseFloat(process.env.HEALTH_LOAD_WARN_RATIO)
+        : 0.8,
+      loadCritRatio: process.env.HEALTH_LOAD_CRIT_RATIO
+        ? parseFloat(process.env.HEALTH_LOAD_CRIT_RATIO)
+        : 1.5,
+      memWarnPercent: process.env.HEALTH_MEM_WARN_PCT ? parseInt(process.env.HEALTH_MEM_WARN_PCT) : 85,
+      memCritPercent: process.env.HEALTH_MEM_CRIT_PCT ? parseInt(process.env.HEALTH_MEM_CRIT_PCT) : 95,
+      fsWarnPercent: process.env.HEALTH_FS_WARN_PCT ? parseInt(process.env.HEALTH_FS_WARN_PCT) : 80,
+      fsCritPercent: process.env.HEALTH_FS_CRIT_PCT ? parseInt(process.env.HEALTH_FS_CRIT_PCT) : 90,
+      failedUnitsCritList: process.env.HEALTH_FAILED_UNITS_CRIT
+        ? process.env.HEALTH_FAILED_UNITS_CRIT.split(",").map((s) => s.trim()).filter(Boolean)
+        : [],
+      pendingUpdatesWarnCount: process.env.HEALTH_PENDING_UPDATES_WARN
+        ? parseInt(process.env.HEALTH_PENDING_UPDATES_WARN)
+        : 50,
+      probeTimeoutMs: process.env.HEALTH_PROBE_TIMEOUT_MS
+        ? parseInt(process.env.HEALTH_PROBE_TIMEOUT_MS)
+        : 10_000,
     },
     guardrails: {
       commandDenylist: process.env.COMMAND_DENYLIST
