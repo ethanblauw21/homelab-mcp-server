@@ -13,6 +13,8 @@ import { PctExecInputSchema, pctExecHandler } from "./tools/pctExec.js";
 import { PctListInputSchema, pctListHandler } from "./tools/pctList.js";
 import { RevertFileInputSchema, revertFileHandler } from "./tools/revertFile.js";
 import { ListBackupsInputSchema, listBackupsHandler } from "./tools/listBackups.js";
+import { DescribeHomelabInputSchema, describeHomelabHandler } from "./tools/describeHomelab.js";
+import { CensusStore } from "./tools/censusStore.js";
 
 const server = new McpServer({
   name: "homelab-ssh-mcp",
@@ -22,6 +24,7 @@ const server = new McpServer({
 const sshTransport = new Ssh2Transport(config.ssh);
 const audit = new AuditLog(config.audit.logPath);
 const backupStore = new BackupStore(config.backup);
+const censusStore = new CensusStore(config.census.censusDir, config.census.snapshotRetentionCap);
 
 function errResult(err: unknown) {
   const msg = err instanceof Error ? err.message : String(err);
@@ -140,6 +143,24 @@ server.registerTool(
   async (input) => {
     try {
       const result = await listBackupsHandler(input, backupStore, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+server.registerTool(
+  "describe_homelab",
+  {
+    description:
+      "Read-only homelab census: walks the Proxmox node via a fixed set of probe " +
+      "commands and returns a structured, secret-redacted inventory (node, storage, " +
+      "network, containers, vms, services, tailscale). Optionally persists a snapshot " +
+      "and reports drift vs the previous one. No caller-supplied commands.",
+    inputSchema: DescribeHomelabInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await describeHomelabHandler(input, sshTransport, censusStore, config);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }

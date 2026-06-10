@@ -1,3 +1,4 @@
+// eslint-disable-next-line @typescript-eslint/triple-slash-reference -- ambient vitest ProvidedContext augmentation
 /// <reference path="./setup-types.d.ts" />
 import { execSync, spawnSync } from "child_process";
 import type { GlobalSetupContext } from "vitest/node";

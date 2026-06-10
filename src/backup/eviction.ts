@@ -46,7 +46,7 @@ export function planEviction(
   }
 
   const deleteSet = new Set(toDelete.map((e) => e.path));
-  let toKeep = sorted.filter((e) => !deleteSet.has(e.path));
+  const toKeep = sorted.filter((e) => !deleteSet.has(e.path));
 
   // Global size cap: evict oldest until total ≤ cap
   let total = toKeep.reduce((sum, e) => sum + e.sizeBytes, 0);

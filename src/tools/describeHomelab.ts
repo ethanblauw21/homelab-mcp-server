@@ -1,0 +1,281 @@
+import { z } from "zod";
+import type { SshTransport } from "../ssh/transport.js";
+import type { Config } from "../config.js";
+import { buildPctExecCommand, parsePctList, type PctContainer } from "./pctHelpers.js";
+import {
+  parsePveVersion,
+  parseFreeBytes,
+  parseLoadAvg,
+  parseGuestConfig,
+  parseQmList,
+  parsePvesmStatus,
+  parseIpBrief,
+  parseInterfacesBridges,
+  parseTailscaleStatus,
+  parseZpoolStatusX,
+  parseFailedUnits,
+  parseDockerPs,
+} from "./censusParsers.js";
+import { ALL_SECTIONS, CENSUS_SCHEMA_VERSION } from "./censusTypes.js";
+import type {
+  CensusSections,
+  CensusError,
+  CensusSection,
+  GuestEntry,
+  ServiceEntry,
+  NodeSection,
+} from "./censusTypes.js";
+import { CensusStore } from "./censusStore.js";
+import { diffSnapshots } from "./censusDrift.js";
+import { ProbeRunner, runProbe, BudgetExceeded } from "./censusProbe.js";
+import {
+  finalizeInventory,
+  type RawCensusSnapshot,
+  type RedactedCensusSnapshot,
+} from "./censusInventory.js";
+
+export const DescribeHomelabInputSchema = z.object({
+  sections: z
+    .array(z.enum(["node", "storage", "network", "containers", "vms", "services", "tailscale"]))
+    .optional()
+    .describe("Sections to include; defaults to all"),
+  depth: z
+    .enum(["summary", "full"])
+    .default("summary")
+    .describe("summary (default): identity + status; full: includes redacted per-guest config"),
+  saveSnapshot: z.boolean().default(true).describe("Persist the snapshot locally (default true)"),
+  compareToPrevious: z
+    .boolean()
+    .default(false)
+    .describe("Include a drift diff vs the latest stored snapshot"),
+});
+
+export type DescribeHomelabInput = z.infer<typeof DescribeHomelabInputSchema>;
+
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+export async function describeHomelabHandler(
+  input: DescribeHomelabInput,
+  transport: SshTransport,
+  store: CensusStore,
+  cfg: Config,
+  now: () => number = Date.now
+): Promise<RedactedCensusSnapshot> {
+  const requested = new Set<CensusSection>(input.sections ?? ALL_SECTIONS);
+  const depth = input.depth;
+  const runner = new ProbeRunner(transport, cfg.census.probeTimeoutMs, cfg.census.budgetMs, now);
+
+  const sections: CensusSections = {};
+  const errors: CensusError[] = [];
+  let budgetHit = false;
+
+  // Container rows feed both `containers` and `services`; fetch+cache once.
+  let pctRows: PctContainer[] | null = null;
+  async function getPctRows(section: CensusSection): Promise<PctContainer[]> {
+    if (pctRows === null) {
+      pctRows = await runProbe(
+        runner,
+        { section, key: "pct list", command: "pct list", parser: parsePctList },
+        [],
+        errors
+      );
+    }
+    return pctRows;
+  }
+
+  try {
+    if (requested.has("node")) {
+      const node: NodeSection = {
+        version: await runProbe(
+          runner,
+          { section: "node", key: "pveversion", command: "pveversion", parser: parsePveVersion },
+          "",
+          errors
+        ),
+        uptime: await runProbe(
+          runner,
+          { section: "node", key: "uptime -p", command: "uptime -p", parser: (s) => s.trim() },
+          "",
+          errors
+        ),
+        cpu: await runProbe(
+          runner,
+          { section: "node", key: "nproc", command: "nproc", parser: (s) => parseInt(s.trim(), 10) || 0 },
+          0,
+          errors
+        ),
+        memBytes: 0,
+        memUsedBytes: 0,
+        load: await runProbe(
+          runner,
+          { section: "node", key: "loadavg", command: "cat /proc/loadavg", parser: parseLoadAvg },
+          [],
+          errors
+        ),
+      };
+      const mem = await runProbe(
+        runner,
+        { section: "node", key: "free -b", command: "free -b", parser: parseFreeBytes },
+        { totalBytes: 0, usedBytes: 0 },
+        errors
+      );
+      node.memBytes = mem.totalBytes;
+      node.memUsedBytes = mem.usedBytes;
+      const zpool = await runner.soft("zpool status -x");
+      if (zpool !== null) node.zpool = parseZpoolStatusX(zpool);
+      sections.node = node;
+    }
+
+    if (requested.has("storage")) {
+      sections.storage = await runProbe(
+        runner,
+        { section: "storage", key: "pvesm status", command: "pvesm status", parser: parsePvesmStatus },
+        [],
+        errors
+      );
+    }
+
+    if (requested.has("network")) {
+      const ifaces = await runProbe(
+        runner,
+        { section: "network", key: "ip -br addr", command: "ip -br addr", parser: parseIpBrief },
+        [],
+        errors
+      );
+      const bridges = await runProbe(
+        runner,
+        {
+          section: "network",
+          key: "/etc/network/interfaces",
+          command: "cat /etc/network/interfaces",
+          parser: parseInterfacesBridges,
+        },
+        [],
+        errors
+      );
+      sections.network = { ifaces, bridges };
+    }
+
+    if (requested.has("containers")) {
+      const rows = await getPctRows("containers");
+      const entries: GuestEntry[] = [];
+      for (const r of rows) {
+        const entry: GuestEntry = { vmid: r.vmid, name: r.name, status: r.status, lock: r.lock };
+        if (depth === "full") {
+          const cfgText = await runProbe(
+            runner,
+            {
+              section: "containers",
+              key: `pct config ${r.vmid}`,
+              command: `pct config ${r.vmid}`,
+              parser: (s) => s,
+            },
+            null as string | null,
+            errors
+          );
+          // Raw (unredacted) here; redaction happens once in finalizeInventory.
+          if (cfgText !== null) entry.config = parseGuestConfig(cfgText);
+        }
+        entries.push(entry);
+      }
+      sections.containers = entries;
+    }
+
+    if (requested.has("vms")) {
+      const rows = await runProbe(
+        runner,
+        { section: "vms", key: "qm list", command: "qm list", parser: parseQmList },
+        [],
+        errors
+      );
+      const entries: GuestEntry[] = [];
+      for (const r of rows) {
+        const entry: GuestEntry = { vmid: r.vmid, name: r.name, status: r.status };
+        if (depth === "full") {
+          const cfgText = await runProbe(
+            runner,
+            {
+              section: "vms",
+              key: `qm config ${r.vmid}`,
+              command: `qm config ${r.vmid}`,
+              parser: (s) => s,
+            },
+            null as string | null,
+            errors
+          );
+          if (cfgText !== null) entry.config = parseGuestConfig(cfgText);
+        }
+        entries.push(entry);
+      }
+      sections.vms = entries;
+    }
+
+    if (requested.has("services")) {
+      const rows = await getPctRows("services");
+      const running = rows.filter((r) => r.status === "running");
+      const svc: ServiceEntry[] = [];
+      for (const r of running) {
+        const failedOut = await runner.soft(
+          buildPctExecCommand(r.vmid, "systemctl list-units --failed --no-legend --plain")
+        );
+        const dockerOut = await runner.soft(
+          buildPctExecCommand(
+            r.vmid,
+            'command -v docker >/dev/null 2>&1 && docker ps --format "{{.Names}}\\t{{.Image}}\\t{{.Status}}" || true'
+          )
+        );
+        svc.push({
+          vmid: r.vmid,
+          failedUnits: failedOut ? parseFailedUnits(failedOut) : [],
+          docker: dockerOut ? parseDockerPs(dockerOut) : [],
+        });
+      }
+      sections.services = svc;
+    }
+
+    if (requested.has("tailscale")) {
+      const ts = await runner.soft("tailscale status --json");
+      sections.tailscale = ts ? parseTailscaleStatus(ts) : null;
+    }
+  } catch (e) {
+    if (e instanceof BudgetExceeded) {
+      budgetHit = true;
+      errors.push({ section: "node", probe: "(budget)", error: errMsg(e) });
+    } else {
+      throw e;
+    }
+  }
+
+  // Assemble the RAW snapshot (per-guest configs still unredacted). Load the
+  // previous snapshot BEFORE finalize so drift compares against history; drift
+  // never reads configs, so running it on raw is safe.
+  const raw: RawCensusSnapshot = {
+    schemaVersion: CENSUS_SCHEMA_VERSION,
+    ts: new Date(now()).toISOString(),
+    host: cfg.ssh.host,
+    depth,
+    sections,
+    errors,
+    redactions: 0,
+  };
+
+  const prev = input.compareToPrevious ? store.loadLatest() : null;
+  if (prev) {
+    raw.drift = diffSnapshots(prev, raw, { storageDriftPercent: cfg.census.storageDriftPercent });
+  }
+
+  // THE redaction chokepoint (R2): the only path from raw → branded redacted.
+  const snapshot = finalizeInventory(raw, {
+    extraKeys: cfg.census.redactionExtraKeys,
+    maxItemsPerSection: cfg.census.maxItemsPerSection,
+    maxResponseBytes: cfg.census.maxResponseBytes,
+  });
+
+  if (input.saveSnapshot && !budgetHit) {
+    snapshot.snapshotPath = store.save(snapshot);
+  }
+
+  return snapshot;
+}

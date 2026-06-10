@@ -81,7 +81,7 @@ describeIfDocker("writeFile end-to-end (real SSH + local backup/audit)", () => {
   const v2 = "version two content — changed";
 
   it("writes a file and creates a backup + audit entry", async () => {
-    const { cfg, backupStore, audit, backupDir, auditPath } = makeDeps(tmpDir);
+    const { cfg, backupStore, audit, auditPath } = makeDeps(tmpDir);
 
     const result = await writeFileHandler(
       { path: remotePath, content: v1, encoding: "utf8" },
@@ -220,7 +220,7 @@ describeIfDocker("cleanup / retention (real filesystem)", () => {
   const remotePath = "/tmp/mcp-int-retention-test.txt";
 
   it("evicts oldest entries when over per-file cap", async () => {
-    const { cfg, backupStore, backupDir } = makeDeps(tmpDir);
+    const { cfg, backupDir } = makeDeps(tmpDir);
     const tightCfg: Config = {
       ...cfg,
       backup: { ...cfg.backup, perFileVersionCap: 3, globalSizeCapBytes: 50 * 1024 * 1024 },
