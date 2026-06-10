@@ -1,0 +1,9 @@
+# Normalize line endings to LF in the repo; check out as-is on all platforms
+* text=auto eol=lf
+
+# Force LF for shell scripts (CRLF breaks bash)
+*.sh text eol=lf
+
+# Treat compiled output and binary formats as binary
+*.js.map binary
+dist/** binary
