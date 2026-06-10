@@ -4,6 +4,7 @@ import type { CensusSnapshot } from "./censusTypes.js";
 
 function snap(partial: Partial<CensusSnapshot["sections"]>, ts = "2026-06-01T00:00:00.000Z"): CensusSnapshot {
   return {
+    schemaVersion: 1,
     ts,
     host: "pve",
     depth: "summary",
@@ -88,5 +89,28 @@ describe("diffSnapshots", () => {
     expect(d.containers.added).toEqual([]);
     expect(d.storage.changed).toEqual([]);
     expect(d).not.toHaveProperty("node");
+  });
+
+  it("degrades to a schemaMismatch report when schema versions differ (R3)", () => {
+    const prev = snap({ containers: [{ vmid: 101, name: "a", status: "running" }] });
+    const next = snap({ containers: [{ vmid: 102, name: "b", status: "running" }] }, "2026-06-02T00:00:00.000Z");
+    next.schemaVersion = 999;
+    const d = diffSnapshots(prev, next, { storageDriftPercent: 10 });
+    expect(d.schemaMismatch).toBe(true);
+    expect(d.containers).toEqual({ added: [], removed: [], changed: [] });
+    expect(d.comparedTo).toBe("2026-06-01T00:00:00.000Z");
+  });
+
+  it("suppresses 'removed' for a section the newer snapshot truncated (R5)", () => {
+    const prev = snap({
+      containers: [
+        { vmid: 101, name: "a", status: "running" },
+        { vmid: 102, name: "b", status: "running" },
+      ],
+    });
+    const next = snap({ containers: [{ vmid: 101, name: "a", status: "running" }] }, "2026-06-02T00:00:00.000Z");
+    next.truncations = [{ section: "containers", reason: "capped", omitted: 1 }];
+    const d = diffSnapshots(prev, next, { storageDriftPercent: 10 });
+    expect(d.containers.removed).toEqual([]); // 102 not reported removed — it may have been truncated
   });
 });

@@ -41,6 +41,11 @@ const ConfigSchema = z.object({
     budgetMs: z.number().default(120_000),
     storageDriftPercent: z.number().default(10),
     redactionExtraKeys: z.array(z.string()).default([]),
+    // R5 — explicit truncation contract. Per-section item cap and a total
+    // response byte budget; both surfaced as explicit `truncations` in output,
+    // never silently dropped.
+    maxItemsPerSection: z.number().default(200),
+    maxResponseBytes: z.number().default(512 * 1024),
   }),
   guardrails: z.object({
     commandDenylist: z.array(z.string()).default([
@@ -115,6 +120,12 @@ function loadConfig(): Config {
       redactionExtraKeys: process.env.REDACTION_EXTRA_KEYS
         ? process.env.REDACTION_EXTRA_KEYS.split(",").map((s) => s.trim()).filter(Boolean)
         : [],
+      maxItemsPerSection: process.env.CENSUS_MAX_ITEMS_PER_SECTION
+        ? parseInt(process.env.CENSUS_MAX_ITEMS_PER_SECTION)
+        : 200,
+      maxResponseBytes: process.env.CENSUS_MAX_RESPONSE_BYTES
+        ? parseInt(process.env.CENSUS_MAX_RESPONSE_BYTES)
+        : 512 * 1024,
     },
     guardrails: {
       commandDenylist: process.env.COMMAND_DENYLIST

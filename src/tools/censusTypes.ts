@@ -26,6 +26,25 @@ export const ALL_SECTIONS: CensusSection[] = [
   "tailscale",
 ];
 
+/**
+ * R3 — snapshot schema version. Bumped only on a breaking shape change. The
+ * drift differ refuses-or-degrades when two snapshots disagree (see
+ * `censusDrift.ts`), so cross-version diffs never produce garbage.
+ */
+export const CENSUS_SCHEMA_VERSION = 1;
+
+/**
+ * R3 — the single annotation of volatile (cosmetic, always-changing) fields.
+ * Both the differ and any future renderer consult THIS rather than carrying
+ * their own ad-hoc ignore-lists. The node section is omitted from drift in its
+ * entirety precisely because every field listed here lives on it (plus `ts` on
+ * the envelope).
+ */
+export const VOLATILE_FIELDS = {
+  snapshot: ["ts"],
+  node: ["uptime", "load", "memUsedBytes"],
+} as const;
+
 export interface NodeSection {
   version: string;
   uptime: string;
@@ -48,6 +67,12 @@ export interface GuestEntry {
   lock?: string;
   /** Present only at depth "full"; redacted. */
   config?: GuestConfig;
+  /**
+   * R6 — forward-slot for ADR-005's qemu-guest-agent status. Defined now so
+   * ADR-005 only populates data and never bumps `schemaVersion` for one field.
+   * Meaningful for `vms` entries; left undefined for containers.
+   */
+  agent?: { enabled: boolean; running?: boolean };
 }
 
 export interface ServiceEntry {
@@ -72,13 +97,30 @@ export interface CensusSections {
   tailscale?: TailscaleSummary | null;
 }
 
+/**
+ * R5 — every dropped item is explicit. A `section` of `"_response"` means the
+ * whole-response byte budget forced per-guest configs to be dropped (vs a
+ * per-section item cap).
+ */
+export interface Truncation {
+  section: CensusSection | "_response";
+  reason: string;
+  omitted: number;
+}
+
 export interface CensusSnapshot {
+  /** R3 — schema version of this envelope. See CENSUS_SCHEMA_VERSION. */
+  schemaVersion: number;
   ts: string;
   host: string;
   depth: "summary" | "full";
   sections: CensusSections;
   errors: CensusError[];
   redactions: number;
+  /** R5 — true when any section or the response budget dropped data. */
+  truncated?: boolean;
+  /** R5 — one entry per truncation; never silent. */
+  truncations?: Truncation[];
   snapshotPath?: string;
   drift?: DriftReport;
 }
@@ -108,4 +150,9 @@ export interface DriftReport {
   network: NetworkDrift;
   tailscale?: { from: number; to: number };
   comparedTo: string; // ts of the previous snapshot
+  /**
+   * R3 — set when the two snapshots' `schemaVersion`s disagree. Detailed
+   * diffing is skipped (all sub-diffs empty) rather than producing garbage.
+   */
+  schemaMismatch?: boolean;
 }

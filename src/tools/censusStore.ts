@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { planEviction, type BackupEntry } from "../backup/eviction.js";
 import type { CensusSnapshot } from "./censusTypes.js";
+import type { RedactedCensusSnapshot } from "./censusInventory.js";
 
 /**
  * Local, timestamped census snapshot storage (ADR-002). Snapshots are written
@@ -41,8 +42,12 @@ export class CensusStore {
     }
   }
 
-  /** Persist a snapshot (filename derived from its ts) and run retention. Returns the path. */
-  save(snapshot: CensusSnapshot): string {
+  /**
+   * Persist a snapshot (filename derived from its ts) and run retention.
+   * Accepts ONLY the branded `RedactedCensusSnapshot` (R2): a snapshot that has
+   * not been through `finalizeInventory` is a compile error here.
+   */
+  save(snapshot: RedactedCensusSnapshot): string {
     this.ensureDir();
     const fname = `${snapshot.ts.replace(/[:.]/g, "-")}.json`;
     const fullPath = path.join(this.censusDir, fname);

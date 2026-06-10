@@ -36,6 +36,8 @@ function makeConfig(censusDir: string, overrides: Partial<Config["census"]> = {}
       budgetMs: 120_000,
       storageDriftPercent: 10,
       redactionExtraKeys: [],
+      maxItemsPerSection: 200,
+      maxResponseBytes: 512 * 1024,
       ...overrides,
     },
     guardrails: { commandDenylist: [], pathDenylist: [] },

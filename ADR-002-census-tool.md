@@ -88,6 +88,39 @@ A **strictly read-only composite tool**. It runs a fixed, hardcoded set of probe
 
 Patterns are config-extendable (`REDACTION_EXTRA_KEYS` env, comma-separated) but the built-ins cannot be disabled. The same module is the one the audit-log redaction work consumes.
 
+## Design Refinements (2026-06-09, post-review)
+
+Six structural decisions adopted after first implementation, to keep the census extensible and its redaction guarantee load-bearing rather than discipline-based. These are normative.
+
+### R1 — Probes are data, not code
+
+Probes are rows in a declarative table (`{ section, key, command, parser, timeoutMs?, soft? }`) consumed by one generic runner, not fifteen hand-rolled call sites. Two scheduled changes — ADR-005's agent-status on the `vms` section and ADR-003's snapshot-capability-per-storage — must land as **a new row plus a parser**, not surgery on a bespoke handler. The dynamic fan-outs (per-guest `config`, per-running-container `services`) stay code, but run through the same runner.
+
+Corollary: every probe result routes through one `expectSuccess(result)` helper instead of inline `exitCode === 0` checks. When ADR-004's `ExecResult` migration lands (`exitCode: number | null`, `timedOut: boolean`), it changes that one function, not every probe.
+
+### R2 — Redaction enforced by the type system
+
+The failure mode to design against is not the redactor missing a pattern — it is a future probe whose output never reaches the redactor. One chokepoint: the handler assembles a `RawCensusSnapshot`; exactly one function `finalizeInventory(raw): RedactedCensusSnapshot` redacts it; and snapshot persistence + the MCP response accept **only** the branded `RedactedCensusSnapshot`. The brand is a module-private symbol, so "add a probe, forget redaction" is a compile error at the persist/return boundary rather than a credential leak. `finalizeInventory` is the single site that may construct the branded type.
+
+### R3 — Versioned, stabilized snapshot schema
+
+Drift diffing compares snapshots across time, hence across code versions. Therefore:
+- `schemaVersion` (currently `1`) is in the envelope from day one; the differ **refuses-or-degrades gracefully** on mismatch (returns a `schemaMismatch` marker and skips detailed diffing rather than producing garbage).
+- Ordering is deterministic: containers/vms sorted by `vmid`, storage by `name`, interfaces by name, services by `vmid`, and guest-config keys sorted — so diffs reflect reality, not iteration order.
+- Field volatility is annotated once (`VOLATILE_FIELDS`: snapshot `ts`; node `uptime`/`load`/`memUsedBytes`) and both the differ (which omits the node section for this reason) and any future renderer consult that single annotation rather than carrying ad-hoc ignore-lists.
+
+### R4 — Fixture-fed dev loop; capture fixtures as a deliberate manual step
+
+The standing safety rule (no live-node contact until tests are green) applies doubly to an unattended agent loop. Sequence: **(a)** run the probe commands by hand over SSH once, **(b)** sanitize the outputs and commit them as fixtures (this is what forces the redaction fixtures to be real-shaped, e.g. a sanitized Gluetun config), **(c)** develop parsers + handler against fixtures and `FakeTransport` only. The census's first contact with the real node is a **supervised smoke run** after the loop, where `redactions > 0` is eyeballed before anything is persisted or committed.
+
+### R5 — Explicit truncation contract
+
+"Bounded output" is given numbers: a per-section item cap (`maxItemsPerSection`, default 200) and a total response budget (`maxResponseBytes`, default 512 KiB). Every truncation is **explicit** in the output — a `truncations: [{ section, reason, omitted }]` array and a `truncated` boolean — never silent. Over budget at `full` depth drops per-guest configs first (recorded as a `_response` truncation). The explicit flags are what let the drift differ distinguish "container removed" from "container truncated": a section flagged truncated in the newer snapshot suppresses `removed` reporting for that section.
+
+### R6 — Forward-define `vms.agent?`
+
+Even though agent status is ADR-005 work, the `vms` guest type carries an optional `agent?: { enabled: boolean; running?: boolean }` field now, so its later population is data, not a schema migration that bumps `schemaVersion` for one field.
+
 ## Options Considered
 
 ### Option A: Composite census tool with fixed probes *(chosen)*
