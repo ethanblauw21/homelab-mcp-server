@@ -18,7 +18,8 @@ export type AuditTool =
   | "snapshot_delete"
   | "qm_exec"
   | "qm_read_file"
-  | "qm_write_file";
+  | "qm_write_file"
+  | "config_sweep";
 
 export interface AuditRecord {
   id: string;
@@ -43,6 +44,10 @@ export interface AuditRecord {
   confirmGated?: boolean;
   isLargeChange?: boolean;
   isRevertible?: boolean;
+  // ADR-006 — whether the config-history mirror captured this change. Best-effort:
+  // false means git was absent/failed (the write itself still succeeded), the
+  // mutation target has no mirror layout (qm), or the subsystem is disabled.
+  historyCommitted?: boolean;
   note?: string;
 }
 

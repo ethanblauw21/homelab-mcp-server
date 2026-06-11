@@ -132,6 +132,36 @@ const ConfigSchema = z.object({
       "/dev",
     ]),
   }),
+  // ADR-006 — git-backed config history (mirror repo + sweeps).
+  history: z.object({
+    // The single local mirror repo. Lives beside the backup store on the Windows
+    // host; its trust level equals the backup blob store's (unredacted content).
+    configHistoryDir: z.string(),
+    // Push is a tri-mode config with a zero-exposure default. local-only never
+    // touches a remote; push-lan/push-encrypted move unredacted data (documented
+    // at this config site). A plain unencrypted cloud remote is NOT a supported
+    // mode and must not be added — the repo contains unredacted secrets.
+    pushMode: z.enum(["local-only", "push-lan", "push-encrypted"]).default("local-only"),
+    // Remote URL for push-lan (SSH/file remote on the NAS) or push-encrypted
+    // (git-remote-gcrypt URL). Ignored in local-only.
+    remote: z.string().optional(),
+    // Watched sets for config_sweep. Host default includes /etc (and thus
+    // /etc/pve, which pmxcfs surfaces under /etc). Per-container default /etc.
+    hostWatchPaths: z.array(z.string()).default(["/etc"]),
+    containerWatchPaths: z.array(z.string()).default(["/etc"]),
+    // Exclude globs applied in the (pure) sweep planner: lockfiles, sockets, and
+    // mtab-style runtime symlinks that are noise or hostile to mirroring.
+    excludePatterns: z.array(z.string()).default([
+      "**/*.lock",
+      "**/*.sock",
+      "/etc/mtab",
+      "/etc/.pwd.lock",
+      "/etc/lvm/cache/*",
+    ]),
+    // Per-file size cap for sweeps; over-cap files are SKIPPED and noted in the
+    // manifest, never silently dropped.
+    sweepFileSizeCapBytes: z.number().default(1024 * 1024), // 1 MB
+  }),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -260,6 +290,27 @@ function loadConfig(): Config {
       pathDenylist: process.env.PATH_DENYLIST
         ? process.env.PATH_DENYLIST.split(",")
         : undefined,
+    },
+    history: {
+      configHistoryDir:
+        process.env.CONFIG_HISTORY_DIR ?? path.join(LOCAL_DATA_DIR, "config-history"),
+      pushMode: (process.env.GIT_HISTORY_PUSH_MODE ?? "local-only") as
+        | "local-only"
+        | "push-lan"
+        | "push-encrypted",
+      remote: process.env.GIT_HISTORY_REMOTE || undefined,
+      hostWatchPaths: process.env.HISTORY_HOST_WATCH_PATHS
+        ? process.env.HISTORY_HOST_WATCH_PATHS.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined,
+      containerWatchPaths: process.env.HISTORY_CONTAINER_WATCH_PATHS
+        ? process.env.HISTORY_CONTAINER_WATCH_PATHS.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined,
+      excludePatterns: process.env.HISTORY_EXCLUDE_PATTERNS
+        ? process.env.HISTORY_EXCLUDE_PATTERNS.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined,
+      sweepFileSizeCapBytes: process.env.HISTORY_SWEEP_FILE_SIZE_CAP_BYTES
+        ? parseInt(process.env.HISTORY_SWEEP_FILE_SIZE_CAP_BYTES)
+        : 1024 * 1024,
     },
   };
   return ConfigSchema.parse(raw);

@@ -8,6 +8,7 @@ import { buildAuditRecord, sha256 } from "../audit/record.js";
 import type { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
 import { computeUnifiedDiff } from "../util/diff.js";
+import type { ConfigHistory } from "../history/configHistory.js";
 
 export const WriteFileInputSchema = z.object({
   path: z.string().min(1).describe("Absolute path on the Proxmox host"),
@@ -47,7 +48,8 @@ export async function writeFileHandler(
   transport: SshTransport,
   audit: AuditLog,
   backupStore: BackupStore,
-  cfg: Config
+  cfg: Config,
+  history?: ConfigHistory
 ): Promise<WriteFileResult | WriteFileDryRunResult> {
   const pathResult = validatePath(input.path, {
     allowlist: cfg.guardrails.pathAllowlist,
@@ -155,6 +157,20 @@ export async function writeFileHandler(
     isRevertible: backupResult.revertible,
     note: largeChange.isLarge ? largeChange.reason : undefined,
   });
+
+  // ADR-006 capture path A: append one history step (best-effort, never fails
+  // the write). The blob backup above is the operational revert mechanism; this
+  // is the archaeology layer.
+  if (history) {
+    record.historyCommitted = await history.recordMutation(
+      transport,
+      { kind: "host", remotePath: input.path },
+      newContent,
+      "write_file",
+      record.id,
+      cfg.ssh.commandTimeoutMs
+    );
+  }
 
   await audit.append(record);
 

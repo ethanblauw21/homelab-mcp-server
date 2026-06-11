@@ -13,6 +13,7 @@ import {
   type GuestPerms,
 } from "./pctFiles.js";
 import { assertAgentAvailable, resolveNodeName, readVmFile, writeVmFile } from "./qmFiles.js";
+import type { ConfigHistory } from "../history/configHistory.js";
 
 export const RevertFileInputSchema = z.object({
   backupPath: z.string().min(1).describe(
@@ -34,7 +35,8 @@ export async function revertFileHandler(
   transport: SshTransport,
   audit: AuditLog,
   backupStore: BackupStore,
-  cfg: Config
+  cfg: Config,
+  history?: ConfigHistory
 ): Promise<{ auditId: string; restoredFrom: string; bytes: number; vmid?: number }> {
   // Resolve where this backup belongs (host SFTP vs. container push) from the
   // meta descriptor — the caller need only pass backupPath. When no meta exists
@@ -152,6 +154,19 @@ export async function revertFileHandler(
     bytes: restored.length,
     note: `Reverted from backup: ${input.backupPath}`,
   });
+
+  // ADR-006 capture path A: a revert is a write, so it gets a history step too
+  // (best-effort; qm targets have no mirror layout and are skipped by recordMutation).
+  if (history) {
+    record.historyCommitted = await history.recordMutation(
+      transport,
+      target,
+      restored,
+      "revert_file",
+      record.id,
+      timeoutMs
+    );
+  }
 
   await audit.append(record);
 
