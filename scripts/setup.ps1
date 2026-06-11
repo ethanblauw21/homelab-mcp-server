@@ -1,4 +1,4 @@
-﻿<#
+&#xFEFF;<#
 .SYNOPSIS
   One-time setup ceremony for the homelab MCP server (ADR-007 §5).
 
@@ -30,6 +30,10 @@
   authorized_keys line and deletes the local private key.
 
 .EXAMPLE
+  # Fully interactive — prompts for all required inputs:
+  .\scripts\setup.ps1
+
+  # Flag-based (skips prompts):
   .\scripts\setup.ps1 -Tier observe   -NodeHost 192.168.1.100
   .\scripts\setup.ps1 -Tier operate   -NodeHost 192.168.1.100 -BootstrapMode paste
   .\scripts\setup.ps1 -Tier companion -NodeHost 192.168.1.100
@@ -37,15 +41,13 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
     [ValidateSet("observe", "operate", "companion")]
     [string]$Tier,
 
-    [Parameter(Mandatory = $true)]
     [string]$NodeHost,
 
     [ValidateSet("auto", "paste")]
-    [string]$BootstrapMode = "auto",
+    [string]$BootstrapMode,
 
     [string]$SshKeyPath = "$env:USERPROFILE\.ssh\homelab_mcp",
 
@@ -63,23 +65,115 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
+function Write-Ok($t)    { Write-Host "    [ok] $t" -ForegroundColor Green }
+function Write-Warn2($t) { Write-Host "    [!]  $t" -ForegroundColor Yellow }
+
+$rank = @{ observe = 0; operate = 1; companion = 2 }
+
+# Phase counter — companion runs 4 phases, observe/operate run 3.
+# Set after $Tier is resolved.
+$totalSteps  = 0
+$currentStep = 0
+function Write-Phase($title) {
+    $script:currentStep++
+    Write-Host ""
+    Write-Host "  [$script:currentStep/$script:totalSteps]  $title" -ForegroundColor Cyan
+}
+
+# ---------------------------------------------------------------------------
+# Title
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "  homelab MCP server  --  setup" -ForegroundColor Cyan
+Write-Host ""
+
+# ---------------------------------------------------------------------------
+# Interactive questionnaire (skipped when flags are provided)
+# ---------------------------------------------------------------------------
+$wasInteractive = -not $PSBoundParameters.ContainsKey('Tier')
+
+if (-not $Tier) {
+    Write-Host "  Choose a tier (each is a strict superset of the one below):"
+    Write-Host ""
+    Write-Host "    [1] observe    Read-only: list VMs, containers, storage, health checks"
+    Write-Host "                   Enforced by Proxmox RBAC -- the node refuses anything beyond this."
+    Write-Host ""
+    Write-Host "    [2] operate    + start, stop, restart guests"
+    Write-Host "                   Enforced by Proxmox RBAC."
+    Write-Host ""
+    Write-Host "    [3] companion  + exec inside guests, file I/O, snapshots, config history"
+    Write-Host "                   Enforced by MCP server guardrails."
+    Write-Host ""
+    Write-Host "  Start at observe if you are not sure." -ForegroundColor DarkGray
+    Write-Host ""
+    $tierInput = (Read-Host "  Tier [1/2/3]").Trim()
+    $Tier = switch ($tierInput) {
+        "1"         { "observe" }
+        "2"         { "operate" }
+        "3"         { "companion" }
+        "observe"   { "observe" }
+        "operate"   { "operate" }
+        "companion" { "companion" }
+        default     { Write-Error "Invalid choice '$tierInput'. Enter 1, 2, 3 or the tier name."; exit 1 }
+    }
+    Write-Host ""
+}
+
+if (-not $NodeHost) {
+    $NodeHost = (Read-Host "  Proxmox node hostname or IP").Trim()
+    if ([string]::IsNullOrWhiteSpace($NodeHost)) { Write-Error "NodeHost is required."; exit 1 }
+    Write-Host ""
+}
+
+if ($wasInteractive -and -not $BootstrapMode) {
+    Write-Host "  Bootstrap mode:"
+    Write-Host ""
+    Write-Host "    [1] auto   one SSH root password prompt, then fully automated"
+    Write-Host "    [2] paste  print a script to run in the Proxmox web shell"
+    Write-Host "               (no root password touches this machine)"
+    Write-Host ""
+    $modeInput = (Read-Host "  Mode [1/2, default: auto]").Trim()
+    $BootstrapMode = switch ($modeInput) {
+        "1"     { "auto" }
+        "2"     { "paste" }
+        "auto"  { "auto" }
+        "paste" { "paste" }
+        ""      { "auto" }
+        default { Write-Error "Invalid choice '$modeInput'. Enter 1 or 2."; exit 1 }
+    }
+    Write-Host ""
+} elseif (-not $BootstrapMode) {
+    $BootstrapMode = "auto"
+}
+
+# ---------------------------------------------------------------------------
+# Confirmed configuration block
+# ---------------------------------------------------------------------------
+$totalSteps = if ($Tier -eq "companion") { 4 } else { 3 }
+
+Write-Host "  ------------------------------------------" -ForegroundColor DarkGray
+Write-Host "  Tier    $Tier"
+Write-Host "  Node    $NodeHost"
+Write-Host "  Mode    $(if ($DryRun) { "$BootstrapMode (dry run)" } else { $BootstrapMode })"
+Write-Host "  ------------------------------------------" -ForegroundColor DarkGray
+
+# ---------------------------------------------------------------------------
+# Derived values (set after interactive prompts are resolved)
+# ---------------------------------------------------------------------------
 $tokenName = "mcp-$Tier"
 $tokenId   = "$PveUser!$tokenName"
 $ApiBase   = "https://${NodeHost}:$ApiPort/api2/json"
 $role      = "MCPOperate"
 
-function Write-Section($t) { Write-Host ""; Write-Host "=== $t ===" -ForegroundColor Cyan }
-function Write-Ok($t)      { Write-Host "  [ok] $t" -ForegroundColor Green }
-function Write-Warn2($t)   { Write-Host "  [!] $t"  -ForegroundColor Yellow }
-
-# Tier rank for superset / downgrade decisions.
-$rank = @{ observe = 0; operate = 1; companion = 2 }
-
 # ---------------------------------------------------------------------------
-# 1. Build the Proxmox-side provisioning blob (idempotent; re-run = tier change).
-#    Computes the TLS cert fingerprint in the SAME "SHA256:<base64>" form the
-#    server's pinnedTrust module produces (see src/trust/pinnedTrust.ts), so the
-#    pasted value matches without reformatting.
+# Build the Proxmox-side provisioning blob (idempotent; re-run = tier change).
+# Computes the TLS cert fingerprint in the SAME "SHA256:<base64>" form the
+# server's pinnedTrust module produces (see src/trust/pinnedTrust.ts), so the
+# pasted value matches without reformatting.
 # ---------------------------------------------------------------------------
 function Get-ProvisionBlob {
     param([string]$pubKey)
@@ -146,11 +240,11 @@ function Get-DeprovisionBlob {
 }
 
 # ---------------------------------------------------------------------------
-# 2. SSH keypair (companion only).
+# Phase 1 (companion only): SSH keypair
 # ---------------------------------------------------------------------------
 $pubKey = $null
 if ($Tier -eq "companion") {
-    Write-Section "SSH keypair (companion)"
+    Write-Phase "SSH keypair"
     if (-not (Test-Path $SshKeyPath)) {
         if ($DryRun) {
             Write-Warn2 "DryRun: would generate Ed25519 key at $SshKeyPath"
@@ -169,11 +263,11 @@ if ($Tier -eq "companion") {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Run (or print) the provisioning blob.
+# Phase 2 (or 1): Proxmox provisioning
 # ---------------------------------------------------------------------------
 $blob = Get-ProvisionBlob -pubKey $pubKey
 
-Write-Section "Proxmox provisioning ($BootstrapMode)"
+Write-Phase "Proxmox provisioning"
 $resultText = $null
 
 if ($DryRun) {
@@ -186,20 +280,26 @@ if ($DryRun) {
 }
 
 if ($BootstrapMode -eq "auto") {
-    Write-Host "Running provisioning over a one-time ssh root@$NodeHost (you will be prompted for the root password)..."
-    # Pipe the blob to a remote bash. Host key is TOFU for this one-time bootstrap;
-    # the persistent connection later uses the pinned fingerprint we capture below.
+    Write-Host "    Connecting as root@$NodeHost (you will be prompted for the root password)..."
     $resultText = ($blob | & ssh -o StrictHostKeyChecking=accept-new "root@$NodeHost" "bash -s") 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Error "Remote provisioning failed (exit $LASTEXITCODE):`n$resultText"; exit 1 }
+    Write-Ok "provisioning complete"
 } else {
-    Write-Host "PASTE PATH — copy the block below into the Proxmox web shell (Datacenter > node > Shell):" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "----------------------------8<----------------------------"
+    Write-Host "    Paste mode -- no root password required on this machine." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "    1. Open the Proxmox web shell:"
+    Write-Host "       Datacenter  ->  $NodeHost  ->  Shell"
+    Write-Host ""
+    Write-Host "    2. Copy and run the script below:"
+    Write-Host ""
+    Write-Host "    -------- copy from here ----------------------------------------"
     Write-Host $blob
-    Write-Host "----------------------------8<----------------------------"
+    Write-Host "    -------- to here ------------------------------------------------"
     Write-Host ""
-    Write-Host "Then paste EVERYTHING between ===MCP-SETUP-RESULT=== and ===END-MCP-SETUP-RESULT=== back here."
-    Write-Host "Finish with an empty line:"
+    Write-Host "    3. The script will print a results block. Copy everything between"
+    Write-Host "       ===MCP-SETUP-RESULT=== and ===END-MCP-SETUP-RESULT=== and"
+    Write-Host "       paste it here. Press Enter twice on a blank line when done:"
     $buf = @()
     while ($true) {
         $line = Read-Host
@@ -210,7 +310,7 @@ if ($BootstrapMode -eq "auto") {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Parse captured values.
+# Parse captured values
 # ---------------------------------------------------------------------------
 function Get-ResultValue($text, $key) {
     $m = [regex]::Match($text, "(?m)^\s*$key=(.*)$")
@@ -224,20 +324,20 @@ $sshFp       = Get-ResultValue $resultText "SSH_FINGERPRINT"
 $nodeName    = Get-ResultValue $resultText "NODE_NAME"
 
 if (-not $tokenSecret) {
-    Write-Error "Did not capture a token secret. If this is a re-run without -RotateToken, the secret is only shown at creation — re-run with -RotateToken to mint a fresh one.`nRaw output:`n$resultText"
+    Write-Error "Did not capture a token secret. If this is a re-run without -RotateToken, the secret is only shown at creation -- re-run with -RotateToken to mint a fresh one.`nRaw output:`n$resultText"
     exit 1
 }
-if (-not $tlsFp)    { Write-Warn2 "No TLS fingerprint captured — the API will TOFU-pin on first connect (verify out of band)." }
-if (-not $nodeName) { Write-Warn2 "No node name captured — set PVE_API_NODE manually." }
+if (-not $tlsFp)    { Write-Warn2 "No TLS fingerprint captured -- the API will TOFU-pin on first connect (verify out of band)." }
+if (-not $nodeName) { Write-Warn2 "No node name captured -- set PVE_API_NODE manually." }
 Write-Ok "captured token secret + trust anchors"
 
 # ---------------------------------------------------------------------------
-# 5. Verification: API smoke + the 403 negative test (privsep is ENFORCING).
+# Phase 3 (or 2): Verification
 # ---------------------------------------------------------------------------
-Write-Section "Verification"
+Write-Phase "Verification"
 
-# Use curl with an explicit pin where possible; fall back to -k (we already pinned
-# the fingerprint, and this is a one-shot smoke, not the persistent channel).
+# Use curl with -k for the one-shot smoke; the fingerprint we just captured
+# is what the persistent server channel will pin going forward.
 $authHeader = "Authorization: PVEAPIToken=$tokenId=$tokenSecret"
 
 function Invoke-PveGet($path) {
@@ -247,38 +347,35 @@ function Invoke-PveGet($path) {
 }
 
 $verCode = Invoke-PveGet "/version"
-if ($verCode -eq "200") { Write-Ok "API /version smoke -> 200" }
+if ($verCode -eq "200") { Write-Ok "API /version -> 200" }
 else { Write-Error "API smoke failed (HTTP $verCode). Token or connectivity problem."; exit 1 }
 
 # Negative test: an endpoint ABOVE the tier must be refused by Proxmox (403),
 # proving privilege separation is enforcing, not merely configured.
 if ($Tier -ne "companion") {
-    # A guest 'create' (POST) is well above observe/operate-read; we expect 403.
-    # Use a harmless status write target that the role lacks: node 'stop' tasks
-    # endpoint requires Sys.PowerMgmt which neither tier holds.
-    $negUrl = "$ApiBase/nodes/$nodeName/status"
+    $negUrl  = "$ApiBase/nodes/$nodeName/status"
     $negCode = & curl.exe -sS -k -o NUL -w "%{http_code}" -X POST -H $authHeader --data "command=reboot" $negUrl 2>&1
     if ($negCode -eq "403") {
-        Write-Ok "negative test: privileged POST refused with 403 (privsep enforcing)"
+        Write-Ok "privilege separation confirmed (privileged POST refused with 403)"
     } else {
-        Write-Warn2 "negative test returned HTTP $negCode (expected 403). Review the role grants before trusting this tier."
+        Write-Warn2 "negative test returned HTTP $negCode (expected 403) -- review role grants before trusting this tier."
     }
 }
 
 # companion: SSH smoke against the pinned host key.
 if ($Tier -eq "companion") {
     $sshOut = & ssh -i $SshKeyPath -o BatchMode=yes -o StrictHostKeyChecking=accept-new "root@$NodeHost" "echo MCP_SSH_OK" 2>&1 | Out-String
-    if ($sshOut -match "MCP_SSH_OK") { Write-Ok "SSH key smoke -> connected" }
+    if ($sshOut -match "MCP_SSH_OK") { Write-Ok "SSH key accepted" }
     else { Write-Warn2 "SSH smoke did not return the marker:`n$sshOut" }
 }
 
 # ---------------------------------------------------------------------------
-# 6. Emit the `claude mcp add` registration with the tier's env.
+# Phase 4 (or 3): Claude Code registration
 # ---------------------------------------------------------------------------
-Write-Section "Claude Code registration"
+Write-Phase "Claude Code registration"
 
 if (-not (Test-Path $EntryPoint)) {
-    Write-Warn2 "Entry point not found: $EntryPoint — run 'npm run build', then re-run registration below."
+    Write-Warn2 "Entry point not found: $EntryPoint -- run 'npm run build' first, then re-run."
 }
 $resolvedEntry = if (Test-Path $EntryPoint) { (Resolve-Path $EntryPoint).Path } else { $EntryPoint }
 
@@ -295,34 +392,42 @@ if ($Tier -eq "companion") {
     if ($sshFp) { $envArgs += @("-e", "SSH_HOST_KEY_FINGERPRINT=$sshFp") }
 }
 
-Write-Host "Registering 'homelab' MCP server (tier=$Tier)..."
 & claude mcp remove homelab --scope user 2>$null | Out-Null
 & claude mcp add homelab --scope user @envArgs -- node $resolvedEntry
 if ($LASTEXITCODE -ne 0) {
-    Write-Warn2 "claude mcp add failed (exit $LASTEXITCODE). The env values above are still valid — register manually."
+    Write-Warn2 "claude mcp add failed (exit $LASTEXITCODE) -- env values above are still valid; register manually."
 } else {
-    Write-Ok "registered"
+    Write-Ok "registered as 'homelab' (user scope)"
 }
 
 # ---------------------------------------------------------------------------
-# 7. Summary + the root-tier warning (informational only; never set here).
+# Summary
 # ---------------------------------------------------------------------------
-Write-Section "Done — tier: $Tier"
-Write-Host "  Enforcement grade: " -NoNewline
-if ($rank[$Tier] -lt $rank["companion"]) {
-    Write-Host "Proxmox RBAC (the node refuses anything above the token's privileges)." -ForegroundColor Green
+$enforcedBy = if ($rank[$Tier] -lt $rank["companion"]) {
+    "Proxmox RBAC  (the node refuses anything above the token's privileges)"
 } else {
-    Write-Host "MCP server (registration filtering + ADR-004 guardrails — tripwires, not a sandbox)." -ForegroundColor Yellow
+    "MCP server guardrails  (registration filter + denylist + confirm gate)"
 }
+
 Write-Host ""
-Write-Host "  Token:   $tokenId"
-if ($nodeName) { Write-Host "  Node:    $nodeName" }
-if ($Tier -eq "companion") { Write-Host "  SSH key: $SshKeyPath" }
+Write-Host "  Setup complete" -ForegroundColor Green
+Write-Host "  ------------------------------------------" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "  Restart Claude Code to pick up the new tier."
+Write-Host "  Tier       $Tier"
+Write-Host "  Enforced   $enforcedBy"
+Write-Host "  Token      $tokenId"
+if ($nodeName) { Write-Host "  Node       $nodeName" }
+if ($Tier -eq "companion") { Write-Host "  SSH key    $SshKeyPath" }
 Write-Host ""
-Write-Host "  ROOT TIER (host-wide exec/file access) is NOT set by this script. To enable it on a" -ForegroundColor DarkYellow
-Write-Host "  companion install, set this EXACT value and restart — any other value disables it:" -ForegroundColor DarkYellow
+Write-Host "  -> Restart Claude Code to activate the 'homelab' server." -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  ------------------------------------------" -ForegroundColor DarkGray
+Write-Host "  Root tier (host shell + file access) is NOT enabled by this script." -ForegroundColor DarkYellow
+Write-Host "  To opt in on a companion install, set this exact env var and restart." -ForegroundColor DarkYellow
+Write-Host "  Any other value (including 'true') disables it. No runtime escalation." -ForegroundColor DarkYellow
+Write-Host ""
 Write-Host "    MCP_HOST_ROOT_ENABLED=I-understand-Claude-gets-root-and-can-break-this-node" -ForegroundColor DarkYellow
-Write-Host "  There is no runtime escalation path; raising the tier always means re-running setup or" -ForegroundColor DarkYellow
-Write-Host "  editing config + restarting (ADR-007 §4)." -ForegroundColor DarkYellow
+Write-Host ""
+Write-Host "  To upgrade to a higher tier, re-run this script at the new tier." -ForegroundColor DarkGray
+Write-Host "  ------------------------------------------" -ForegroundColor DarkGray
+Write-Host ""
