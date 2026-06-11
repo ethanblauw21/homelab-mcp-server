@@ -15,6 +15,7 @@ import {
   type GuestPerms,
 } from "./pctFiles.js";
 import { computeUnifiedDiff } from "../util/diff.js";
+import type { ConfigHistory } from "../history/configHistory.js";
 
 export const PctWriteFileInputSchema = z.object({
   vmid: z.number().int().positive().describe("LXC container ID"),
@@ -57,7 +58,8 @@ export async function pctWriteFileHandler(
   transport: SshTransport,
   audit: AuditLog,
   backupStore: BackupStore,
-  cfg: Config
+  cfg: Config,
+  history?: ConfigHistory
 ): Promise<PctWriteFileResult | PctWriteFileDryRunResult> {
   const pathResult = validatePath(input.path, {
     allowlist: cfg.guardrails.pathAllowlist,
@@ -195,6 +197,18 @@ export async function pctWriteFileHandler(
     isRevertible: backupResult.revertible,
     note: largeChange.isLarge ? largeChange.reason : undefined,
   });
+
+  // ADR-006 capture path A (best-effort; never fails the push).
+  if (history) {
+    record.historyCommitted = await history.recordMutation(
+      transport,
+      { kind: "pct", vmid: input.vmid, remotePath: input.path },
+      newContent,
+      "pct_write_file",
+      record.id,
+      timeoutMs
+    );
+  }
 
   await audit.append(record);
 

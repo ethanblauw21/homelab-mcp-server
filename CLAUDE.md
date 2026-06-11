@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zod`, `vitest`) that connects as `root` over SSH (key auth) to a Proxmox VE node on the LAN and exposes an operator toolkit grown across ADRs 001–005:
+A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zod`, `vitest`) that connects as `root` over SSH (key auth) to a Proxmox VE node on the LAN and exposes an operator toolkit grown across ADRs 001–006:
 
 | Tool | Purpose | ADR |
 |------|---------|-----|
@@ -30,6 +30,9 @@ A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zo
 | `tail_log` | Bounded, validated, **always-redacted** journal/file tail (host or LXC) | 005 |
 | `query_audit` | Filter/summarize the local audit log (read-only, not audited) | 005 |
 | `diff_config` | Preview a revert: current → backup diff (read-only, not audited) | 005 |
+| `config_sweep` | Hash-compare-before-fetch sweep of watched paths into the git mirror; captures out-of-band edits (one commit per sweep) | 006 |
+
+> `config_sweep` is registered **only when git is on PATH**. With git absent the whole config-history subsystem is disabled (writes still succeed, `historyCommitted: false`) and `config_sweep` is unregistered.
 
 ## VM parity & operator toolkit (ADR-005)
 
@@ -38,6 +41,16 @@ A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zo
 - **`tail_log` validates before it interpolates.** Unit names match a strict charset, `since` accepts only ISO or `<n> (min|hour|day) ago`, paths go through `validatePath`, lines clamp to `tools.tailLinesCap`, and `unit` XOR `path` is enforced — anything free-form throws. Output (and error text) **always** passes through the ADR-002 redaction module; over-redaction is the safe failure mode for logs.
 - **`qm_read_file` / `qm_write_file` move VM files through the guest agent** (`pvesh .../agent/file-read|file-write`), not SSH — a VM exposes no hypervisor-level filesystem the way `pct` does for a container. They mirror the `pct_*` file tools (validated path, agent precheck, ADR-004 read cap + `offset`/`maxBytes` window on read; full ADR-003 backup + audit pipeline and `dryRun` preview on write) with two honest agent-imposed limits made explicit in `qmFiles.ts`: the endpoints are **text-oriented** (binary is lossy/refused — use for config files, not blobs), and the write endpoint takes **no mode/owner so perms are not preserved** (the file lands with the guest's default umask; contrast `pct push`). Writes are bounded by `tools.qmWriteMaxBytes` (a payload over the cap is refused, never truncated in the guest — use `qm_exec` for larger edits). Backups key on a `qm:<vmid>:<path>` descriptor (no host/`pct` collision), and `revert_file` routes `kind === "qm"` back through `writeVmFile`. The PVE node name for `pvesh` paths is resolved from `hostname` (Proxmox pins it) and charset-validated before interpolation.
 - **`query_audit` + `diff_config` complete the preview/forensics triad:** `dryRun` (before a write) → `diff_config` (before a revert) → `query_audit` (after the fact). Both are pure/read-only and **not** themselves audited. `query_audit` filters `AuditLog.readAll()` (tool/vmid/path/time/large-only), returns a summary + newest-first records bounded by `tools.queryAuditMaxLimit`. `diff_config` reconstructs a backup (resolved by `backupPath` or latest-for-target) and diffs `current → backup` via the shared `computeUnifiedDiff`; metadata-only backups return a structured `revertible: false` instead of a diff.
+
+## Git-backed config history (ADR-006)
+
+**"Blobs revert, git remembers."** The local backup store (ADR-003) is still the **operational revert mechanism** — `revert_file` reads a blob, not git. The mirror repo under `src/history/` is a separate **archaeology layer**: a single local git repo that mirrors target descriptors (`host/<path>`, `pct/<vmid>/<path>`) plus etckeeper-style permission manifests (`manifests/<key>.json` mapping path→`{mode,uid,gid}`). Two independent capture paths feed it; git is never on the write's critical path.
+
+- **Capture path A — mutation commits (`configHistory.ts` → `recordMutation`).** After a successful `write_file` / `pct_write_file` / `revert_file`, the handler appends one best-effort history step (mirror the bytes it already holds → refresh the manifest via a batched `stat` → commit → push). It **never throws and never fails the write**: the blob backup already succeeded, so a git error is logged and reported only as the audit record's `historyCommitted: false`. `qm` targets have **no mirror layout** (a VM exposes no descriptor-stable filesystem) and are skipped — `isHistoryTarget` returns false, `recordMutation` returns false.
+- **Capture path B — `config_sweep` (`configSweep.ts`).** The file-level counterpart of the census drift diff: enumerate a watched set (`find -printf '%s\t%p'`), apply excludes + a size cap (`sweepPlanner.ts`, pure), **hash-compare (`sha256sum`) before fetching** so only changed/new files move, then **one commit per sweep**. This is the only thing that sees out-of-band changes (hand edits, package upgrades) the audit log and blob backups never witness. Per-target work is **error-isolated** (a failed target → recorded error, never an abort) and **stopped containers are skipped with a structured note** (A3.1 — `pct pull` needs a running guest). The sweep itself is audited (`tool: "config_sweep"`); the audit uuid is built *first* so it can join the commit message.
+- **All git work is shelled out through one serialized `GitEngine`** (`child_process.spawn`, argv arrays — never shell strings — `-C <repo>`, a promise-chain queue). Graceful absence is a first-class state: `init()` runs `git --version`; if git is missing it logs one stderr line, leaves `enabled = false`, and `index.ts` never registers `config_sweep`. Repo bootstrap sets **repo-local** identity/config only (never the user's global git), `commit.gpgsign false`, and — for byte-faithful storage on Windows — `core.autocrlf false` + a `.gitattributes` of `* -text`.
+- **Push is tri-mode and fail-soft (`push()`):** `local-only` (default, never pushes), `push-lan`, `push-encrypted`. The repo holds **unredacted secrets**, so a plain unencrypted cloud remote MUST NOT be configured — the two push modes differ only in the remote URL's transport (git handles it). A push failure is logged and retried on the next commit; the local repo stays the source of truth.
+- **Config:** `history.*` in `config.ts` — `configHistoryDir` (default `%LOCALAPPDATA%\claude-mcp\config-history`), `pushMode`, `remote`, `hostWatchPaths`/`containerWatchPaths` (default `/etc`), `excludePatterns`, `sweepFileSizeCapBytes`.
 
 ## Commands
 
@@ -91,6 +104,14 @@ src/
     tailLog.ts          # tail_log handler + pure buildTailCommand (validate → redact)
     queryAudit.ts       # Pure filterAuditRecords/summarizeAuditRecords + query_audit handler
     diffConfig.ts       # diff_config handler — current→backup revert preview (read-only)
+    configSweep.ts      # config_sweep handler + pure find/sha256 builders (ADR-006 path B)
+  history/              # ADR-006 git-backed config mirror (optional, fail-soft)
+    paths.ts            # Pure: target→mirror path mapping (host/<p>, pct/<vmid>/<p>; qm excluded)
+    commitMessage.ts    # Pure: mutation/sweep commit message + target descriptors
+    manifest.ts         # Pure: stat-batch builder/parser, manifest (de)serialize
+    sweepPlanner.ts     # Pure: glob match, classifyEnumeration, diffAgainstMirror, parsers
+    gitEngine.ts        # Serialized git spawn wrapper (argv arrays, -C repo, version detect)
+    configHistory.ts    # Orchestrator: init, recordMutation, mirror primitives, commit, push
   guardrails/
     denylist.ts         # Pure fn: command denylist matching (normalizes whitespace/obfuscation)
     pathValidation.ts   # Pure fn: traversal checks, allowlist enforcement
@@ -104,7 +125,7 @@ src/
     record.ts           # Pure fn: audit record construction + SHA-256 hashing
 ```
 
-**Key invariant:** `guardrails/`, `backup/policy.ts`, `backup/eviction.ts`, and `audit/record.ts` are **pure functions with no I/O** — the only way unit tests stay fast and trustworthy.
+**Key invariant:** `guardrails/`, `backup/policy.ts`, `backup/eviction.ts`, `audit/record.ts`, and `history/{paths,commitMessage,manifest,sweepPlanner}.ts` are **pure functions with no I/O** — the only way unit tests stay fast and trustworthy. (The `history/configHistory.ts` + `gitEngine.ts` git layer is tested against a real git repo in a temp dir, skipped where git is absent.)
 
 **Dependency direction:** tool handlers → `SshTransport` interface (injected). Never import `ssh2Client.ts` from tool handlers directly.
 

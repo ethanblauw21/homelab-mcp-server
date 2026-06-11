@@ -36,6 +36,8 @@ import { HealthCheckInputSchema, healthCheckHandler } from "./tools/healthCheck.
 import { TailLogInputSchema, tailLogHandler } from "./tools/tailLog.js";
 import { QueryAuditInputSchema, queryAuditHandler } from "./tools/queryAudit.js";
 import { DiffConfigInputSchema, diffConfigHandler } from "./tools/diffConfig.js";
+import { ConfigHistory } from "./history/configHistory.js";
+import { ConfigSweepInputSchema, configSweepHandler } from "./tools/configSweep.js";
 
 const server = new McpServer({
   name: "homelab-ssh-mcp",
@@ -46,6 +48,10 @@ const sshTransport = new Ssh2Transport(config.ssh);
 const audit = new AuditLog(config.audit.logPath);
 const backupStore = new BackupStore(config.backup);
 const censusStore = new CensusStore(config.census.censusDir, config.census.snapshotRetentionCap);
+// ADR-006 — config-history mirror repo. Initialized below (detects git; stays
+// disabled and no-ops if git is absent). Mutation commits are best-effort; the
+// config_sweep tool is registered only when the subsystem is enabled.
+const configHistory = new ConfigHistory(config.history);
 
 function errResult(err: unknown) {
   const msg = err instanceof Error ? err.message : String(err);
@@ -89,7 +95,7 @@ server.registerTool(
   },
   async (input) => {
     try {
-      const result = await writeFileHandler(input, sshTransport, audit, backupStore, config);
+      const result = await writeFileHandler(input, sshTransport, audit, backupStore, config, configHistory);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }
@@ -147,7 +153,7 @@ server.registerTool(
   },
   async (input) => {
     try {
-      const result = await revertFileHandler(input, sshTransport, audit, backupStore, config);
+      const result = await revertFileHandler(input, sshTransport, audit, backupStore, config, configHistory);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }
@@ -214,7 +220,7 @@ server.registerTool(
   },
   async (input) => {
     try {
-      const result = await pctWriteFileHandler(input, sshTransport, audit, backupStore, config);
+      const result = await pctWriteFileHandler(input, sshTransport, audit, backupStore, config, configHistory);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }
@@ -437,6 +443,32 @@ server.registerTool(
     } catch (err) { return errResult(err); }
   }
 );
+
+// ADR-006 — initialize the config-history mirror (detect git, bootstrap repo).
+// On absence the subsystem stays disabled and config_sweep is NOT registered, so
+// the model never sees a tool it cannot run. Mutation commits remain best-effort.
+await configHistory.init();
+
+if (configHistory.enabled) {
+  server.registerTool(
+    "config_sweep",
+    {
+      description:
+        "Sweep a watched config set (host /etc + running containers by default) into the git-backed " +
+        "config-history mirror. Hash-compares before fetching so only changed/new files are pulled; " +
+        "records deletions, refreshes the perms manifest, and makes one commit per sweep. Captures " +
+        "out-of-band changes (hand edits, package upgrades) that the audit log and backups never see. " +
+        "Read-only against the node; stopped containers are skipped with a note.",
+      inputSchema: ConfigSweepInputSchema,
+    },
+    async (input) => {
+      try {
+        const result = await configSweepHandler(input, sshTransport, configHistory, audit, config);
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } catch (err) { return errResult(err); }
+    }
+  );
+}
 
 const stdioTransport = new StdioServerTransport();
 await server.connect(stdioTransport);
