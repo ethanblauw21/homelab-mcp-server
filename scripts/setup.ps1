@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   One-time setup ceremony for the homelab MCP server (ADR-007 §5).
 
