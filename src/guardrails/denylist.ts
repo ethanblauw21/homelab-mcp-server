@@ -74,6 +74,21 @@ function commandToken(segment: string): string {
   return first.split("/").pop() ?? first;
 }
 
+// ADR-007 §4 — the Protected Set. Destructive operations against /etc/pve
+// (pmxcfs: node identity + cluster config) and cluster membership are DENY at
+// EVERY tier including root, with NO confirm bypass. Recovering a node's identity
+// is always a human-at-the-console action. Honest limit: like the rest of the
+// denylist this is a tripwire over shell commands — it does NOT cover the SFTP
+// write_file path (which is root-tier and path-validated separately). Read access
+// to /etc/pve (cat/grep) is deliberately NOT blocked.
+const PROTECTED_PATTERNS: RegExp[] = [
+  /\b(rm|rmdir|shred|unlink)\b[^\n]*\/etc\/pve(\/|\b)/, // delete under /etc/pve
+  /\bmv\b[^\n]*\/etc\/pve(\/|\b)/, // move into/out of /etc/pve
+  /\btruncate\b[^\n]*\/etc\/pve(\/|\b)/,
+  />\s*\/etc\/pve\//, // redirect/truncate into /etc/pve
+  /\bpvecm\s+(add|addnode|delnode|qdevice)\b/, // cluster membership mutation
+];
+
 // DENY patterns are matched against the *normalized full command* — these are
 // destructive-by-nature and we want to catch them wherever they appear.
 const DENY_PATTERNS: RegExp[] = [
@@ -121,6 +136,19 @@ function segmentNeedsConfirm(segment: string): boolean {
 export function checkCommand(command: string, extraDenylist: string[] = []): CommandVerdict {
   const normalizedFull = normalize(command);
   const segments = splitSegments(command);
+
+  // 0. Protected set (ADR-007 §4) — DENY at every tier, no confirm bypass. Checked
+  // first so its reason text is the one surfaced for /etc/pve + cluster ops.
+  for (const pattern of PROTECTED_PATTERNS) {
+    if (pattern.test(normalizedFull)) {
+      return {
+        tier: "deny",
+        reason:
+          `protected set (ADR-007 §4): /etc/pve and cluster membership are off-limits ` +
+          `at every tier including root (matched ${pattern})`,
+      };
+    }
+  }
 
   // 1. Built-in DENY (unconditional) — wins over everything.
   for (const pattern of DENY_PATTERNS) {
