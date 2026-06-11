@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "ts": "2026-06-11T01:50:54.734Z",
+  "host": "",
+  "depth": "summary",
+  "sections": {
+    "node": {
+      "version": "pve-manager/9.2.3/d0fde103346cf89a",
+      "uptime": "up 12d 22h 17m",
+      "cpu": 8,
+      "memBytes": 16413732864,
+      "memUsedBytes": 3795550208,
+      "load": [
+        0.17,
+        0.08,
+        0.02
+      ]
+    },
+    "storage": [
+      {
+        "name": "local",
+        "type": "dir",
+        "active": true,
+        "totalBytes": 100861726720,
+        "usedBytes": 80840650752,
+        "availBytes": 14850338816
+      },
+      {
+        "name": "local-lvm",
+        "type": "lvmthin",
+        "active": true,
+        "totalBytes": 374538764288,
+        "usedBytes": 142699269193,
+        "availBytes": 231839495095
+      }
+    ],
+    "containers": [
+      {
+        "vmid": 100,
+        "name": "adguard-dns",
+        "status": "running"
+      },
+      {
+        "vmid": 101,
+        "name": "dockerBoss",
+        "status": "running"
+      }
+    ],
+    "vms": [],
+    "network": {
+      "unavailableAtTier": "companion"
+    },
+    "services": {
+      "unavailableAtTier": "companion"
+    },
+    "tailscale": {
+      "unavailableAtTier": "companion"
+    }
+  },
+  "errors": [],
+  "redactions": 0,
+  "drift": {
+    "containers": {
+      "added": [],
+      "removed": [],
+      "changed": []
+    },
+    "vms": {
+      "added": [],
+      "removed": [],
+      "changed": []
+    },
+    "storage": {
+      "added": [],
+      "removed": [],
+      "changed": []
+    },
+    "network": {
+      "added": [],
+      "removed": [],
+      "changed": []
+    },
+    "comparedTo": "2026-06-10T23:44:42.253Z"
+  }
+}
