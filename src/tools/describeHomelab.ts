@@ -25,6 +25,7 @@ import type {
   GuestEntry,
   ServiceEntry,
   NodeSection,
+  Unavailable,
 } from "./censusTypes.js";
 import { CensusStore } from "./censusStore.js";
 import { diffSnapshots } from "./censusDrift.js";
@@ -34,6 +35,8 @@ import {
   type RawCensusSnapshot,
   type RedactedCensusSnapshot,
 } from "./censusInventory.js";
+import type { NodeOps } from "../node/nodeOps.js";
+import { tierAtLeast, type Tier } from "../tiers/registry.js";
 
 export const DescribeHomelabInputSchema = z.object({
   sections: z
@@ -71,12 +74,31 @@ function parseAgentEnabled(v: string | undefined): boolean | undefined {
   return true;
 }
 
+/** Human uptime string from seconds (ADR-007 §6 API census path). */
+function formatUptime(secs?: number): string {
+  if (!secs || secs <= 0) return "";
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const parts: string[] = [];
+  if (d) parts.push(`${d}d`);
+  if (h) parts.push(`${h}h`);
+  if (m || parts.length === 0) parts.push(`${m}m`);
+  return "up " + parts.join(" ");
+}
+
 export async function describeHomelabHandler(
   input: DescribeHomelabInput,
   transport: SshTransport,
   store: CensusStore,
   cfg: Config,
-  now: () => number = Date.now
+  now: () => number = Date.now,
+  // ADR-007 §6 — below companion the census has no SSH; metadata sections
+  // (node/storage/containers/vms) are served through the API backend and the
+  // exec-bound sections (network/services/tailscale) report `unavailableAtTier`.
+  // Defaults preserve the pre-tier (companion+) SSH path for existing callers.
+  nodeOps: NodeOps | null = null,
+  tier: Tier = "companion"
 ): Promise<RedactedCensusSnapshot> {
   const requested = new Set<CensusSection>(input.sections ?? ALL_SECTIONS);
   const depth = input.depth;
@@ -85,6 +107,9 @@ export async function describeHomelabHandler(
   const sections: CensusSections = {};
   const errors: CensusError[] = [];
   let budgetHit = false;
+
+  // ADR-007 §6 — API census path (below companion: no SSH key on the wire).
+  const apiOnly = !tierAtLeast(tier, "companion");
 
   // Container rows feed both `containers` and `services`; fetch+cache once.
   let pctRows: PctContainer[] | null = null;
@@ -100,6 +125,9 @@ export async function describeHomelabHandler(
     return pctRows;
   }
 
+  if (apiOnly) {
+    await buildApiCensus(input, nodeOps, requested, sections, errors);
+  } else
   try {
     if (requested.has("node")) {
       const node: NodeSection = {
@@ -309,4 +337,103 @@ export async function describeHomelabHandler(
   }
 
   return snapshot;
+}
+
+/**
+ * ADR-007 §6 — build the census from the API backend (observe/operate tiers).
+ *
+ * `node`, `storage`, `containers`, `vms` are **API-complete** — one structured
+ * call each through NodeOps, no exec. The exec-bound sections (`network`,
+ * `services`, `tailscale`) cannot be served by an API token (they parse
+ * in-guest/host command output), so they report `{ unavailableAtTier: "companion" }`
+ * — a structured status the differ treats as "not observed", never "removed".
+ *
+ * Per-section try/catch isolation mirrors the SSH path: a failed section becomes
+ * a recorded `CensusError`, never an abort (a 403 here is Proxmox RBAC, surfaced
+ * verbatim by `mapApiError`).
+ */
+async function buildApiCensus(
+  input: DescribeHomelabInput,
+  nodeOps: NodeOps | null,
+  requested: Set<CensusSection>,
+  sections: CensusSections,
+  errors: CensusError[]
+): Promise<void> {
+  if (!nodeOps) {
+    throw new Error(
+      "describe_homelab below companion requires the API backend, but none is configured " +
+        "(set PVE_API_BASE_URL / PVE_API_TOKEN_ID / PVE_API_TOKEN_SECRET / PVE_API_NODE)."
+    );
+  }
+  const unavailable: Unavailable = { unavailableAtTier: "companion" };
+
+  // Guests feed both `containers` and `vms`; fetch once.
+  let guests: Awaited<ReturnType<NodeOps["listGuests"]>> | null = null;
+  async function getGuests(section: CensusSection): Promise<typeof guests> {
+    if (guests === null) {
+      try {
+        guests = await nodeOps!.listGuests();
+      } catch (e) {
+        errors.push({ section, probe: "listGuests", error: errMsg(e) });
+        guests = [];
+      }
+    }
+    return guests;
+  }
+
+  if (requested.has("node")) {
+    try {
+      const s = await nodeOps.nodeStatus();
+      const node: NodeSection = {
+        version: s.version ?? "",
+        uptime: formatUptime(s.uptimeSecs),
+        cpu: s.cpuCount ?? 0,
+        memBytes: s.memoryTotal ?? 0,
+        memUsedBytes: s.memoryUsed ?? 0,
+        load: s.loadavg ?? [],
+      };
+      sections.node = node;
+    } catch (e) {
+      errors.push({ section: "node", probe: "nodeStatus", error: errMsg(e) });
+    }
+  }
+
+  if (requested.has("storage")) {
+    try {
+      const st = await nodeOps.storageStatus();
+      sections.storage = st.map((s) => ({
+        name: s.storage,
+        type: s.type,
+        active: s.active,
+        totalBytes: s.totalBytes,
+        usedBytes: s.usedBytes,
+        availBytes: s.availBytes,
+      }));
+    } catch (e) {
+      errors.push({ section: "storage", probe: "storageStatus", error: errMsg(e) });
+    }
+  }
+
+  if (requested.has("containers")) {
+    const rows = (await getGuests("containers")) ?? [];
+    sections.containers = rows
+      .filter((g) => g.type === "lxc")
+      .map<GuestEntry>((g) => ({ vmid: g.vmid, name: g.name, status: g.status }));
+  }
+
+  if (requested.has("vms")) {
+    const rows = (await getGuests("vms")) ?? [];
+    sections.vms = rows
+      .filter((g) => g.type === "qemu")
+      .map<GuestEntry>((g) => ({ vmid: g.vmid, name: g.name, status: g.status }));
+  }
+
+  // Exec-bound sections: not observable through the API token.
+  if (requested.has("network")) sections.network = unavailable;
+  if (requested.has("services")) sections.services = unavailable;
+  if (requested.has("tailscale")) sections.tailscale = unavailable;
+
+  // `depth: "full"` per-guest configs are an SSH/agent capability (companion+);
+  // the API census is summary-grade by construction.
+  void input;
 }

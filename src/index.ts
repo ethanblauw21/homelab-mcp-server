@@ -38,11 +38,36 @@ import { QueryAuditInputSchema, queryAuditHandler } from "./tools/queryAudit.js"
 import { DiffConfigInputSchema, diffConfigHandler } from "./tools/diffConfig.js";
 import { ConfigHistory } from "./history/configHistory.js";
 import { ConfigSweepInputSchema, configSweepHandler } from "./tools/configSweep.js";
+import { isToolEnabled, type Tier } from "./tiers/registry.js";
+import { resolveTier, rootBanner } from "./tiers/rootFlag.js";
+import type { NodeOps } from "./node/nodeOps.js";
+import { ApiBackend } from "./node/apiBackend.js";
+import { makeApiHttp } from "./node/apiClient.js";
+import { SshBackend } from "./node/sshBackend.js";
+import {
+  GuestStartInputSchema,
+  guestStartHandler,
+  GuestStopInputSchema,
+  guestStopHandler,
+  GuestRestartInputSchema,
+  guestRestartHandler,
+} from "./tools/lifecycle.js";
 
 const server = new McpServer({
   name: "homelab-ssh-mcp",
   version: "0.1.0",
 });
+
+// ADR-007 — resolve the active permission tier. `level` (observe/operate/companion)
+// comes from MCP_TIER; the root flag (exact-string-gated) is the ONLY way to reach
+// root. There is no runtime escalation path. Tools above the active tier are never
+// registered, so the model never sees a tool it cannot run.
+const activeTier: Tier = resolveTier(config.tier.level, config.tier.rootEnabled);
+const isRootTier = activeTier === "root";
+if (config.tier.rootEnabled) {
+  // Loud, every start. stdout is the MCP channel — diagnostics go to stderr.
+  process.stderr.write(rootBanner() + "\n");
+}
 
 const sshTransport = new Ssh2Transport(config.ssh);
 const audit = new AuditLog(config.audit.logPath);
@@ -53,12 +78,34 @@ const censusStore = new CensusStore(config.census.censusDir, config.census.snaps
 // config_sweep tool is registered only when the subsystem is enabled.
 const configHistory = new ConfigHistory(config.history);
 
+// ADR-007 §3 — NodeOps backend selection. The API backend rides every tier and is
+// preferred whenever fully configured (it's the only path that works at observe/
+// operate, which have no SSH key); otherwise fall back to the SSH backend
+// (companion+). "The transport follows the tool, not the tier."
+const nodeOps: NodeOps =
+  config.api.baseUrl && config.api.tokenId && config.api.tokenSecret && config.api.node
+    ? new ApiBackend(makeApiHttp(config.api), { node: config.api.node })
+    : new SshBackend(sshTransport, config.ssh.commandTimeoutMs);
+
 function errResult(err: unknown) {
   const msg = err instanceof Error ? err.message : String(err);
   return { isError: true as const, content: [{ type: "text" as const, text: msg }] };
 }
 
-server.registerTool(
+/**
+ * Tier-gated registration (ADR-007 §1): register a tool only when the active tier
+ * is at or above its declared minimum. This is the enforcement boundary for the
+ * MCP-enforced tiers and the zero-attack-surface guarantee for absent tiers.
+ *
+ * Typed AS `server.registerTool` so each call site keeps its own Zod-shape
+ * inference; the gate short-circuits before the SDK ever sees a too-high tool.
+ */
+const register = ((name: string, def: unknown, cb: unknown) => {
+  if (!isToolEnabled(name, activeTier)) return undefined;
+  return (server.registerTool as (n: string, d: unknown, c: unknown) => unknown)(name, def, cb);
+}) as typeof server.registerTool;
+
+register(
   "execute",
   {
     description: "Run a shell command on the Proxmox host as root",
@@ -66,13 +113,13 @@ server.registerTool(
   },
   async (input) => {
     try {
-      const result = await executeHandler(input, sshTransport, audit, config);
+      const result = await executeHandler(input, sshTransport, audit, config, isRootTier);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }
 );
 
-server.registerTool(
+register(
   "read_file",
   {
     description: "Read a file from the Proxmox host filesystem",
@@ -86,7 +133,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "write_file",
   {
     description:
@@ -95,13 +142,13 @@ server.registerTool(
   },
   async (input) => {
     try {
-      const result = await writeFileHandler(input, sshTransport, audit, backupStore, config, configHistory);
+      const result = await writeFileHandler(input, sshTransport, audit, backupStore, config, configHistory, isRootTier);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }
 );
 
-server.registerTool(
+register(
   "list_directory",
   {
     description: "List the contents of a directory on the Proxmox host",
@@ -115,7 +162,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "pct_exec",
   {
     description: "Run a command inside an LXC container via pct exec",
@@ -129,7 +176,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "pct_list",
   {
     description: "List LXC containers and their status via pct list",
@@ -143,7 +190,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "revert_file",
   {
     description:
@@ -159,7 +206,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "list_backups",
   {
     description:
@@ -175,7 +222,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "describe_homelab",
   {
     description:
@@ -187,13 +234,21 @@ server.registerTool(
   },
   async (input) => {
     try {
-      const result = await describeHomelabHandler(input, sshTransport, censusStore, config);
+      const result = await describeHomelabHandler(
+        input,
+        sshTransport,
+        censusStore,
+        config,
+        Date.now,
+        nodeOps,
+        activeTier
+      );
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }
 );
 
-server.registerTool(
+register(
   "pct_read_file",
   {
     description:
@@ -209,7 +264,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "pct_write_file",
   {
     description:
@@ -226,7 +281,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "snapshot_create",
   {
     description:
@@ -243,7 +298,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "snapshot_list",
   {
     description:
@@ -258,7 +313,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "snapshot_rollback",
   {
     description:
@@ -276,7 +331,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "snapshot_delete",
   {
     description:
@@ -292,7 +347,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "qm_list",
   {
     description: "List QEMU/KVM virtual machines and their status via qm list.",
@@ -306,7 +361,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "qm_agent_ping",
   {
     description:
@@ -322,7 +377,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "qm_exec",
   {
     description:
@@ -340,7 +395,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "qm_read_file",
   {
     description:
@@ -357,7 +412,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "qm_write_file",
   {
     description:
@@ -374,7 +429,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "health_check",
   {
     description:
@@ -386,13 +441,13 @@ server.registerTool(
   },
   async (input) => {
     try {
-      const result = await healthCheckHandler(input, sshTransport, config);
+      const result = await healthCheckHandler(input, sshTransport, config, nodeOps, activeTier);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }
 );
 
-server.registerTool(
+register(
   "tail_log",
   {
     description:
@@ -409,7 +464,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "query_audit",
   {
     description:
@@ -426,7 +481,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
+register(
   "diff_config",
   {
     description:
@@ -444,13 +499,64 @@ server.registerTool(
   }
 );
 
+// ADR-007 — guest lifecycle tools (operate tier, API-native via NodeOps). At
+// observe/operate these ride the API backend and Proxmox RBAC is the real
+// enforcement; the registry gates registration so they appear only at operate+.
+register(
+  "guest_start",
+  {
+    description:
+      "Start a guest (LXC container or VM) by vmid. API-native operate-tier control; the guest type " +
+      "is auto-detected. Audited.",
+    inputSchema: GuestStartInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await guestStartHandler(input, nodeOps, audit, config, isRootTier);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "guest_stop",
+  {
+    description:
+      "Stop a guest (LXC container or VM) by vmid. Confirm-gated: a stop is an immediate power-off, " +
+      "not a graceful shutdown. Use guest_restart for a graceful cycle. Audited.",
+    inputSchema: GuestStopInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await guestStopHandler(input, nodeOps, audit, config, isRootTier);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "guest_restart",
+  {
+    description:
+      "Restart a guest (LXC container or VM) by vmid via a graceful reboot (shutdown + start). " +
+      "Auto-detects guest type. Audited.",
+    inputSchema: GuestRestartInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await guestRestartHandler(input, nodeOps, audit, config, isRootTier);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
 // ADR-006 — initialize the config-history mirror (detect git, bootstrap repo).
 // On absence the subsystem stays disabled and config_sweep is NOT registered, so
 // the model never sees a tool it cannot run. Mutation commits remain best-effort.
 await configHistory.init();
 
 if (configHistory.enabled) {
-  server.registerTool(
+  register(
     "config_sweep",
     {
       description:

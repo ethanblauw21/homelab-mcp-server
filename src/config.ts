@@ -1,6 +1,7 @@
 import { z } from "zod";
 import os from "os";
 import path from "path";
+import { parseRootFlag } from "./tiers/rootFlag.js";
 
 const LOCAL_DATA_DIR = path.join(
   process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"),
@@ -27,6 +28,38 @@ const ConfigSchema = z.object({
     // Trust-on-first-use store path. Optional so test config literals can omit
     // it; loadConfig always supplies a default.
     knownHostsPath: z.string().optional(),
+  }),
+  // ADR-007 — permission tiers. The tier model is data (see tiers/registry.ts);
+  // this only carries the operator's selection + the root acknowledgment.
+  tier: z.object({
+    // Selectable in setup: observe (API token, RBAC-enforced) / operate (API
+    // token + custom role) / companion (+ root SSH key, MCP-enforced). root is
+    // NOT selectable here — it is reached only via the acknowledgment flag below.
+    // Default companion preserves the ADR-001 install (root SSH, no tier var) per
+    // the ADR-007 migration; setup.ps1 always writes an explicit tier and
+    // recommends observe for new installs.
+    level: z.enum(["observe", "operate", "companion"]).default("companion"),
+    // True ONLY when MCP_HOST_ROOT_ENABLED holds the exact acknowledgment string
+    // (tiers/rootFlag.ts). Any other value, including "true", is disabled.
+    rootEnabled: z.boolean().default(false),
+  }),
+  // ADR-007 — PVE API backend (the API path of the hybrid transport). Required
+  // for observe/operate (no SSH key exists at those tiers); optional but preferred
+  // at companion/root (API rides every tier for what it can express).
+  api: z.object({
+    // e.g. "https://10.0.0.10:8006". Empty disables the API backend (SSH-only).
+    baseUrl: z.string().optional(),
+    // Token id "user@realm!tokenname" + secret. Privilege-separated per tier.
+    tokenId: z.string().optional(),
+    tokenSecret: z.string().optional(),
+    // Pinned TLS cert fingerprint ("SHA256:..."), captured at setup. Fail-closed
+    // on mismatch (shared pinnedTrust module — same model as the SSH host key).
+    tlsFingerprint: z.string().optional(),
+    // TOFU store for the API cert, mirroring known_hosts.json for SSH.
+    knownCertsPath: z.string().optional(),
+    // PVE node name for /nodes/<node>/... paths. Resolved at setup or from census.
+    node: z.string().optional(),
+    requestTimeoutMs: z.number().default(15_000),
   }),
   backup: z.object({
     baseDir: z.string(),
@@ -185,6 +218,24 @@ function loadConfig(): Config {
       hostKeyFingerprint: process.env.SSH_HOST_KEY_FINGERPRINT || undefined,
       knownHostsPath:
         process.env.SSH_KNOWN_HOSTS_PATH ?? path.join(LOCAL_DATA_DIR, "known_hosts.json"),
+    },
+    tier: {
+      // MCP_TIER absent ⇒ companion (legacy migration). An out-of-range value
+      // (e.g. "root") is rejected by the enum on purpose — root is flag-only.
+      level: (process.env.MCP_TIER ?? "companion") as "observe" | "operate" | "companion",
+      rootEnabled: parseRootFlag(process.env.MCP_HOST_ROOT_ENABLED),
+    },
+    api: {
+      baseUrl: process.env.PVE_API_BASE_URL || undefined,
+      tokenId: process.env.PVE_API_TOKEN_ID || undefined,
+      tokenSecret: process.env.PVE_API_TOKEN_SECRET || undefined,
+      tlsFingerprint: process.env.PVE_API_TLS_FINGERPRINT || undefined,
+      knownCertsPath:
+        process.env.PVE_API_KNOWN_CERTS_PATH ?? path.join(LOCAL_DATA_DIR, "known_certs.json"),
+      node: process.env.PVE_API_NODE || undefined,
+      requestTimeoutMs: process.env.PVE_API_TIMEOUT_MS
+        ? parseInt(process.env.PVE_API_TIMEOUT_MS)
+        : 15_000,
     },
     backup: {
       baseDir: process.env.BACKUP_DIR ?? path.join(LOCAL_DATA_DIR, "backups"),

@@ -6,6 +6,27 @@ import type {
   TailscaleSummary,
   DockerContainer,
 } from "./censusParsers.js";
+import type { Tier } from "../tiers/registry.js";
+
+/**
+ * ADR-007 §6 — a section that cannot be served at the active tier because it
+ * needs in-guest/host exec (companion+) the API token does not grant. This is a
+ * **structured status, never an error**: the census ran fine, the section is
+ * simply "not observed at this tier". The drift differ (`observed()` below)
+ * treats it as not-observed — never as "removed".
+ */
+export interface Unavailable {
+  unavailableAtTier: Tier;
+}
+
+export function isUnavailable(v: unknown): v is Unavailable {
+  return typeof v === "object" && v !== null && "unavailableAtTier" in v;
+}
+
+/** Collapse an `Unavailable` marker (or undefined) to undefined for the differ. */
+export function observed<T>(v: T | Unavailable | undefined): T | undefined {
+  return v === undefined || isUnavailable(v) ? undefined : (v as T);
+}
 
 export type CensusSection =
   | "node"
@@ -90,11 +111,14 @@ export interface CensusError {
 export interface CensusSections {
   node?: NodeSection;
   storage?: StorageInfo[];
-  network?: NetworkSection;
+  // ADR-007 §6 — exec-bound sections may carry an `Unavailable` marker below
+  // companion (the API token cannot run in-guest/host commands). Metadata
+  // sections (node/storage/containers/vms) are API-complete at observe.
+  network?: NetworkSection | Unavailable;
   containers?: GuestEntry[];
   vms?: GuestEntry[];
-  services?: ServiceEntry[];
-  tailscale?: TailscaleSummary | null;
+  services?: ServiceEntry[] | Unavailable;
+  tailscale?: TailscaleSummary | null | Unavailable;
 }
 
 /**

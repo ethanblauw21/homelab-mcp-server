@@ -40,24 +40,28 @@ export const TOOL_MIN_TIER: Record<string, Tier> = {
   pct_list: "observe",
   qm_list: "observe",
   qm_agent_ping: "observe",
-  snapshot_list: "observe",
   describe_homelab: "observe",
   health_check: "observe",
   query_audit: "observe",
   list_backups: "observe",
 
-  // operate — guest lifecycle + snapshots, still Proxmox-RBAC-enforced via the
-  // API backend (snapshot endpoints exist per guest).
+  // operate — guest lifecycle, Proxmox-RBAC-enforced via the API backend. These
+  // are the API-native operate-tier guest controls (previously raw `execute`).
   guest_start: "operate",
   guest_stop: "operate",
   guest_restart: "operate",
-  snapshot_create: "operate",
-  snapshot_rollback: "operate",
-  snapshot_delete: "operate",
 
-  // companion — everything *inside guests* (needs the root SSH key; MCP-enforced).
+  // companion — everything that needs the root SSH key (MCP-enforced).
+  // Snapshot tools remain SSH-routed for now (the mcp-prefix protection, retention
+  // eviction, and stop/rollback/restart orchestration live in the SSH handlers);
+  // the ApiBackend already implements the per-guest snapshot endpoints, so moving
+  // them to an operate-tier API path is a documented follow-up (ADR-007 §2 note).
   // diff_config / revert_file are registered here but a HOST target additionally
   // requires root (see assertTargetTier): their floor follows the target kind.
+  snapshot_list: "companion",
+  snapshot_create: "companion",
+  snapshot_rollback: "companion",
+  snapshot_delete: "companion",
   pct_exec: "companion",
   qm_exec: "companion",
   pct_read_file: "companion",

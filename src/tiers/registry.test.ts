@@ -38,30 +38,22 @@ describe("tool → tier registration", () => {
         "qm_agent_ping",
         "qm_list",
         "query_audit",
-        "snapshot_list",
       ].sort()
     );
   });
 
-  it("operate adds lifecycle + snapshot mutation, nothing else", () => {
+  it("operate adds exactly the API-native lifecycle tools, nothing else", () => {
     const added = toolsForTier("operate").filter((t) => !toolsForTier("observe").includes(t));
-    expect(added.sort()).toEqual(
-      [
-        "guest_restart",
-        "guest_start",
-        "guest_stop",
-        "snapshot_create",
-        "snapshot_delete",
-        "snapshot_rollback",
-      ].sort()
-    );
+    expect(added.sort()).toEqual(["guest_restart", "guest_start", "guest_stop"].sort());
   });
 
-  it("companion adds in-guest tools but NOT host exec/file tools", () => {
+  it("companion adds in-guest tools + the SSH-routed snapshot set but NOT host exec/file tools", () => {
     const companion = toolsForTier("companion");
     expect(companion).toContain("pct_exec");
     expect(companion).toContain("qm_exec");
     expect(companion).toContain("config_sweep");
+    expect(companion).toContain("snapshot_create");
+    expect(companion).toContain("snapshot_list");
     expect(companion).not.toContain("execute");
     expect(companion).not.toContain("write_file");
     expect(companion).not.toContain("read_file");

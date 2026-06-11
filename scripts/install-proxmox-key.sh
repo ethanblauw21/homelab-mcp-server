@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 # scripts/install-proxmox-key.sh
+#
+# DEPRECATED (ADR-007 §5): superseded by scripts/setup.ps1, which installs the key
+# as part of the companion-tier ceremony (and removes it on downgrade). Use:
+#     .\scripts\setup.ps1 -Tier companion -NodeHost <proxmox-ip>
+# Kept only for the SSH-only / manual key-install path.
+#
 # Install the homelab_mcp public key into Proxmox's /root/.ssh/authorized_keys.
 #
 # Usage A — remote install (requires password auth or existing SSH access):
