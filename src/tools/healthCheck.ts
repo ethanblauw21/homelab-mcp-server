@@ -11,6 +11,8 @@ import {
   parseQmList,
 } from "./censusParsers.js";
 import { parsePctList } from "./pctHelpers.js";
+import type { NodeOps } from "../node/nodeOps.js";
+import { tierAtLeast, type Tier } from "../tiers/registry.js";
 import {
   evaluateLoad,
   evaluateMemory,
@@ -47,6 +49,11 @@ export interface HealthCheckResult {
   status: HealthStatus;
   findings: HealthFinding[];
   errors: Array<{ section: HealthSection; error: string }>;
+  /**
+   * ADR-007 §6 — sections that need exec (host/in-guest config) the API token
+   * cannot run, reported below companion as a structured status (not an error).
+   */
+  unavailable?: Array<{ section: HealthSection; unavailableAtTier: Tier }>;
 }
 
 function errMsg(e: unknown): string {
@@ -63,9 +70,19 @@ function errMsg(e: unknown): string {
 export async function healthCheckHandler(
   input: HealthCheckInput,
   transport: SshTransport,
-  cfg: Config
+  cfg: Config,
+  // ADR-007 §6 — below companion (no SSH) probes route through the API backend;
+  // exec-bound sections (units, onboot guests) report `unavailableAtTier`.
+  // Defaults preserve the pre-tier SSH path for existing callers.
+  nodeOps: NodeOps | null = null,
+  tier: Tier = "companion"
 ): Promise<HealthCheckResult> {
   const requested = new Set<HealthSection>(input.sections ?? HEALTH_SECTIONS);
+
+  if (!tierAtLeast(tier, "companion")) {
+    return apiHealthCheck(requested, nodeOps, cfg);
+  }
+
   const findings: HealthFinding[] = [];
   const errors: Array<{ section: HealthSection; error: string }> = [];
   const timeout = cfg.health.probeTimeoutMs;
@@ -173,4 +190,88 @@ export async function healthCheckHandler(
   }
 
   return { status: rollupStatus(findings), findings, errors };
+}
+
+/**
+ * ADR-007 §6 — API-backed health check (observe/operate tiers).
+ *
+ * `node` (load/memory), `storage` (PVE stores), and `updates` (apt simulate) are
+ * served through NodeOps. The exec-bound sections — `units` (host `systemctl
+ * --failed`) and `guests` onboot-stopped detection (needs `/etc/pve/*.conf`) —
+ * report `{ unavailableAtTier: "companion" }`. ZFS and per-filesystem `df` usage
+ * have no token-grade API and are simply omitted (not errors).
+ */
+async function apiHealthCheck(
+  requested: Set<HealthSection>,
+  nodeOps: NodeOps | null,
+  cfg: Config
+): Promise<HealthCheckResult> {
+  const findings: HealthFinding[] = [];
+  const errors: Array<{ section: HealthSection; error: string }> = [];
+  const unavailable: Array<{ section: HealthSection; unavailableAtTier: Tier }> = [];
+  const add = (section: HealthSection, ...checks: CheckResult[]): void => {
+    for (const c of checks) findings.push({ section, ...c });
+  };
+
+  if (!nodeOps) {
+    throw new Error(
+      "health_check below companion requires the API backend, but none is configured " +
+        "(set PVE_API_BASE_URL / PVE_API_TOKEN_ID / PVE_API_TOKEN_SECRET / PVE_API_NODE)."
+    );
+  }
+
+  if (requested.has("node")) {
+    try {
+      const s = await nodeOps.nodeStatus();
+      add(
+        "node",
+        evaluateLoad(s.loadavg?.[0] ?? 0, s.cpuCount ?? 0, {
+          warnRatio: cfg.health.loadWarnRatio,
+          critRatio: cfg.health.loadCritRatio,
+        }),
+        evaluateMemory(s.memoryUsed ?? 0, s.memoryTotal ?? 0, {
+          warnPercent: cfg.health.memWarnPercent,
+          critPercent: cfg.health.memCritPercent,
+        })
+      );
+    } catch (e) {
+      errors.push({ section: "node", error: errMsg(e) });
+    }
+  }
+
+  if (requested.has("storage")) {
+    try {
+      const fsThresholds = { warnPercent: cfg.health.fsWarnPercent, critPercent: cfg.health.fsCritPercent };
+      for (const s of await nodeOps.storageStatus()) {
+        if (!s.active) {
+          add("storage", { check: `store:${s.storage}`, status: "warn", finding: `store ${s.storage} is not active` });
+          continue;
+        }
+        add("storage", evaluateUsage(`store:${s.storage}`, s.usedBytes, s.totalBytes, fsThresholds));
+      }
+    } catch (e) {
+      errors.push({ section: "storage", error: errMsg(e) });
+    }
+  }
+
+  if (requested.has("updates")) {
+    try {
+      // A5.1: aptUpdates simulates (`apt-get -s`); never `apt update`.
+      const count = (await nodeOps.aptUpdates()).length;
+      add("updates", evaluatePendingUpdates(count, cfg.health.pendingUpdatesWarnCount));
+    } catch (e) {
+      errors.push({ section: "updates", error: errMsg(e) });
+    }
+  }
+
+  // Exec-bound: onboot config (/etc/pve/*.conf) and host failed units.
+  if (requested.has("guests")) unavailable.push({ section: "guests", unavailableAtTier: "companion" });
+  if (requested.has("units")) unavailable.push({ section: "units", unavailableAtTier: "companion" });
+
+  return {
+    status: rollupStatus(findings),
+    findings,
+    errors,
+    ...(unavailable.length > 0 ? { unavailable } : {}),
+  };
 }

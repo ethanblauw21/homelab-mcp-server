@@ -7,6 +7,64 @@ import { buildPctExecCommand } from "./pctHelpers.js";
 import { describeHomelabHandler, DescribeHomelabInputSchema } from "./describeHomelab.js";
 import { CensusStore } from "./censusStore.js";
 import type { Config } from "../config.js";
+import type { NodeOps, Guest, NodeStatusInfo, StorageStatusInfo, AptUpdateInfo } from "../node/nodeOps.js";
+
+/** Minimal API-backend stand-in for the observe/operate census path (§6). */
+function fakeNode(overrides: Partial<NodeOps> = {}): NodeOps {
+  const base: NodeOps = {
+    kind: "api",
+    async listGuests(): Promise<Guest[]> {
+      return [
+        { vmid: 101, name: "gluetun", type: "lxc", status: "running" },
+        { vmid: 102, name: "portainer", type: "lxc", status: "stopped" },
+        { vmid: 100, name: "truenas", type: "qemu", status: "running" },
+      ];
+    },
+    async guestStatus() {
+      return { status: "running" };
+    },
+    async startGuest() {
+      return { upid: "x" };
+    },
+    async stopGuest() {
+      return { upid: "x" };
+    },
+    async rebootGuest() {
+      return { upid: "x" };
+    },
+    async listSnapshots() {
+      return [];
+    },
+    async createSnapshot() {
+      return { upid: "x" };
+    },
+    async rollbackSnapshot() {
+      return { upid: "x" };
+    },
+    async deleteSnapshot() {
+      return { upid: "x" };
+    },
+    async nodeStatus(): Promise<NodeStatusInfo> {
+      return {
+        loadavg: [0.1, 0.2, 0.3],
+        memoryTotal: 16766517248,
+        memoryUsed: 4233470720,
+        uptimeSecs: 266400,
+        version: "pve-manager/8.1.4",
+        cpuCount: 8,
+      };
+    },
+    async storageStatus(): Promise<StorageStatusInfo[]> {
+      return [
+        { storage: "local", type: "dir", enabled: true, active: true, totalBytes: 100660736, usedBytes: 7475200, availBytes: 93185536 },
+      ];
+    },
+    async aptUpdates(): Promise<AptUpdateInfo[]> {
+      return [];
+    },
+  };
+  return { ...base, ...overrides };
+}
 
 function makeConfig(censusDir: string, overrides: Partial<Config["census"]> = {}): Config {
   return {
@@ -241,6 +299,72 @@ describe("describeHomelabHandler — vms agent status (ADR-005 A3)", () => {
     expect(v200?.agent).toEqual({ enabled: false, running: false });
     // Stopped VM is not pinged; with no config-derived enabled we leave agent unset.
     expect(v300?.agent).toBeUndefined();
+  });
+});
+
+describe("describeHomelabHandler — API census path (ADR-007 §6, observe tier)", () => {
+  it("serves metadata via NodeOps and marks exec-bound sections unavailableAtTier", async () => {
+    const store = new CensusStore(tmpDir, 30);
+    const cfg = makeConfig(tmpDir);
+    // A throwing SSH transport proves the API path never touches SSH below companion.
+    const ssh = new FakeTransport();
+    const snap = await describeHomelabHandler(parse({}), ssh, store, cfg, Date.now, fakeNode(), "observe");
+
+    expect(snap.sections.node?.version).toBe("pve-manager/8.1.4");
+    expect(snap.sections.node?.cpu).toBe(8);
+    expect(snap.sections.node?.memBytes).toBe(16766517248);
+    expect(snap.sections.storage?.[0]).toMatchObject({ name: "local", active: true });
+    expect(snap.sections.containers).toHaveLength(2);
+    expect(snap.sections.vms?.[0]).toMatchObject({ vmid: 100, name: "truenas" });
+
+    // Exec-bound sections are a structured status, not an error.
+    expect(snap.sections.network).toEqual({ unavailableAtTier: "companion" });
+    expect(snap.sections.services).toEqual({ unavailableAtTier: "companion" });
+    expect(snap.sections.tailscale).toEqual({ unavailableAtTier: "companion" });
+    expect(snap.errors).toEqual([]);
+  });
+
+  it("isolates an API section failure as a recorded error (403 RBAC)", async () => {
+    const store = new CensusStore(tmpDir, 30);
+    const node = fakeNode({
+      async storageStatus(): Promise<StorageStatusInfo[]> {
+        throw new Error("API permission denied (403) on storage status");
+      },
+    });
+    const snap = await describeHomelabHandler(
+      parse({ sections: ["node", "storage"] }),
+      new FakeTransport(),
+      store,
+      makeConfig(tmpDir),
+      Date.now,
+      node,
+      "operate"
+    );
+    expect(snap.sections.node?.cpu).toBe(8); // intact
+    expect(snap.sections.storage).toBeUndefined();
+    expect(snap.errors.some((e) => e.section === "storage" && /403/.test(e.error))).toBe(true);
+  });
+
+  it("treats an unavailable section as not-observed in drift (never 'removed')", async () => {
+    const store = new CensusStore(tmpDir, 30);
+    const cfg = makeConfig(tmpDir);
+    let tick = 1_000;
+    // First run: companion (SSH) census has a full network section.
+    await describeHomelabHandler(parse({}), baseTransport(), store, cfg, () => tick);
+    // Second run: observe tier — network is unavailableAtTier.
+    tick = 2_000_000;
+    const snap2 = await describeHomelabHandler(
+      parse({ compareToPrevious: true }),
+      new FakeTransport(),
+      store,
+      cfg,
+      () => tick,
+      fakeNode(),
+      "observe"
+    );
+    expect(snap2.drift).toBeDefined();
+    // The previous run saw vmbr0; the unavailable marker must NOT report it removed.
+    expect(snap2.drift?.network.removed).toEqual([]);
   });
 });
 

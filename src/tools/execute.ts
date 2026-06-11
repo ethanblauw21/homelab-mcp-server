@@ -22,7 +22,10 @@ export async function executeHandler(
   input: ExecuteInput,
   transport: SshTransport,
   audit: AuditLog,
-  cfg: Config
+  cfg: Config,
+  // ADR-007 §4 — stamps rootTier:true on the audit record when the server is
+  // running at the flag-gated root tier, making root-level exec attributable.
+  rootTier = false
 ): Promise<ExecResult> {
   const verdict = checkCommand(input.command, cfg.guardrails.commandDenylist);
   if (verdict.tier === "deny") {
@@ -47,6 +50,7 @@ export async function executeHandler(
       timedOut: result.timedOut,
       timeoutSecs,
       confirmGated: confirmGated || undefined,
+      ...(rootTier ? { rootTier: true } : {}),
       isLargeChange: heavy.isLarge,
       isRevertible: false,
       note: heavy.isLarge ? heavy.reason : undefined,

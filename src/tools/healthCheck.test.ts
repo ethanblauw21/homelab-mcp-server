@@ -2,6 +2,50 @@ import { describe, it, expect } from "vitest";
 import { healthCheckHandler } from "./healthCheck.js";
 import { FakeTransport } from "../ssh/fakeTransport.js";
 import type { Config } from "../config.js";
+import type { NodeOps, NodeStatusInfo, StorageStatusInfo, AptUpdateInfo } from "../node/nodeOps.js";
+
+function fakeNode(overrides: Partial<NodeOps> = {}): NodeOps {
+  const base: NodeOps = {
+    kind: "api",
+    async listGuests() {
+      return [];
+    },
+    async guestStatus() {
+      return { status: "running" };
+    },
+    async startGuest() {
+      return { upid: "x" };
+    },
+    async stopGuest() {
+      return { upid: "x" };
+    },
+    async rebootGuest() {
+      return { upid: "x" };
+    },
+    async listSnapshots() {
+      return [];
+    },
+    async createSnapshot() {
+      return { upid: "x" };
+    },
+    async rollbackSnapshot() {
+      return { upid: "x" };
+    },
+    async deleteSnapshot() {
+      return { upid: "x" };
+    },
+    async nodeStatus(): Promise<NodeStatusInfo> {
+      return { loadavg: [0.2, 0.1, 0.05], memoryUsed: 99, memoryTotal: 100, cpuCount: 8, uptimeSecs: 100 };
+    },
+    async storageStatus(): Promise<StorageStatusInfo[]> {
+      return [{ storage: "local", type: "dir", enabled: true, active: true, totalBytes: 100, usedBytes: 10, availBytes: 90 }];
+    },
+    async aptUpdates(): Promise<AptUpdateInfo[]> {
+      return [{ package: "a", version: "1" }, { package: "b", version: "2" }];
+    },
+  };
+  return { ...base, ...overrides };
+}
 
 function makeConfig(): Config {
   return {
@@ -77,5 +121,36 @@ describe("healthCheckHandler", () => {
     });
     const res = await healthCheckHandler({ sections: ["updates"] }, t, makeConfig());
     expect(res.findings.find((f) => f.check === "updates")?.finding).toContain("2 pending");
+  });
+});
+
+describe("healthCheckHandler — API tier path (ADR-007 §6, observe)", () => {
+  it("serves node/storage/updates via NodeOps and marks exec-bound sections unavailable", async () => {
+    // A throwing SSH transport proves the API path never touches SSH below companion.
+    const res = await healthCheckHandler({}, new FakeTransport(), makeConfig(), fakeNode(), "observe");
+
+    // node memory 99/100 → crit
+    expect(res.status).toBe("crit");
+    expect(res.findings.find((f) => f.check === "memory")?.status).toBe("crit");
+    expect(res.findings.find((f) => f.check === "store:local")).toBeDefined();
+    expect(res.findings.find((f) => f.check === "updates")?.finding).toContain("2 pending");
+
+    // exec-bound sections → structured status, not error
+    expect(res.unavailable).toEqual([
+      { section: "guests", unavailableAtTier: "companion" },
+      { section: "units", unavailableAtTier: "companion" },
+    ]);
+    expect(res.errors).toEqual([]);
+  });
+
+  it("isolates an API section failure (403) as a recorded error", async () => {
+    const node = fakeNode({
+      async nodeStatus(): Promise<NodeStatusInfo> {
+        throw new Error("API permission denied (403) on node status");
+      },
+    });
+    const res = await healthCheckHandler({ sections: ["node", "storage"] }, new FakeTransport(), makeConfig(), node, "observe");
+    expect(res.errors.some((e) => e.section === "node" && /403/.test(e.error))).toBe(true);
+    expect(res.findings.find((f) => f.check === "store:local")).toBeDefined(); // storage intact
   });
 });

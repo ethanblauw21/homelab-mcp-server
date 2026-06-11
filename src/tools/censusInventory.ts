@@ -15,6 +15,7 @@
  */
 import { redactRecord } from "../guardrails/redaction.js";
 import type { CensusSnapshot, CensusSections, GuestEntry, Truncation } from "./censusTypes.js";
+import { isUnavailable } from "./censusTypes.js";
 import type { GuestConfig } from "./censusParsers.js";
 
 declare const REDACTED_BRAND: unique symbol;
@@ -48,8 +49,10 @@ function orderSections(src: CensusSections): CensusSections {
   if (src.vms) out.vms = [...src.vms].map((g) => ({ ...g })).sort(byVmid);
   if (src.storage)
     out.storage = [...src.storage].map((s) => ({ ...s })).sort((a, b) => a.name.localeCompare(b.name));
-  if (src.services) out.services = [...src.services].map((s) => ({ ...s })).sort(byVmid);
-  if (src.network) {
+  // ADR-007 §6 — leave an `Unavailable` marker untouched (it is not a list).
+  if (src.services && !isUnavailable(src.services))
+    out.services = [...src.services].map((s) => ({ ...s })).sort(byVmid);
+  if (src.network && !isUnavailable(src.network)) {
     out.network = {
       ifaces: [...src.network.ifaces].sort((a, b) => a.iface.localeCompare(b.iface)),
       bridges: [...src.network.bridges].sort((a, b) => a.name.localeCompare(b.name)),
@@ -64,13 +67,10 @@ function byVmid(a: { vmid: number }, b: { vmid: number }): number {
 
 /** Per-section item caps (R5). Records an explicit truncation for each cut. */
 function capSections(sections: CensusSections, cap: number, truncations: Truncation[]): void {
-  const lists: Array<[keyof CensusSections, { length: number } | undefined]> = [
-    ["containers", sections.containers],
-    ["vms", sections.vms],
-    ["storage", sections.storage],
-    ["services", sections.services],
-  ];
-  for (const [name] of lists) {
+  // Only list-valued sections are capped; `services` may hold an Unavailable
+  // marker (ADR-007 §6), which the Array.isArray guard below skips.
+  const names: Array<keyof CensusSections> = ["containers", "vms", "storage", "services"];
+  for (const name of names) {
     const arr = sections[name] as unknown[] | undefined;
     if (Array.isArray(arr) && arr.length > cap) {
       const omitted = arr.length - cap;

@@ -49,7 +49,9 @@ export async function writeFileHandler(
   audit: AuditLog,
   backupStore: BackupStore,
   cfg: Config,
-  history?: ConfigHistory
+  history?: ConfigHistory,
+  // ADR-007 §4 — stamps rootTier:true on the audit record at the root tier.
+  rootTier = false
 ): Promise<WriteFileResult | WriteFileDryRunResult> {
   const pathResult = validatePath(input.path, {
     allowlist: cfg.guardrails.pathAllowlist,
@@ -153,6 +155,7 @@ export async function writeFileHandler(
     prevSha256: prevHash ?? undefined,
     newSha256: newHash,
     bytes: newContent.length,
+    ...(rootTier ? { rootTier: true } : {}),
     isLargeChange: largeChange.isLarge,
     isRevertible: backupResult.revertible,
     note: largeChange.isLarge ? largeChange.reason : undefined,

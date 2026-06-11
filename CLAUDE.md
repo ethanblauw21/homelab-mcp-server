@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Ground truth
 
-`ADR-001-ssh-mcp-server.md` and `TESTING-STRATEGY-ssh-mcp-server.md` are the authoritative spec. Read both before writing code; keep them in sync if the design changes.
+`ADR-001-ssh-mcp-server.md` and `TESTING-STRATEGY-ssh-mcp-server.md` are the authoritative spec. Read both before writing code; keep them in sync if the design changes. `ADR-007-permissions-tiers.md` governs the permission-tier model and partially supersedes ADR-001's root-by-default.
 
 ## What this is
 
-A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zod`, `vitest`) that connects as `root` over SSH (key auth) to a Proxmox VE node on the LAN and exposes an operator toolkit grown across ADRs 001–006:
+A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zod`, `vitest`) that connects to a Proxmox VE node on the LAN — over the **REST API** (token auth, all tiers) and/or **root SSH** (key auth, companion+) — and exposes a tier-gated operator toolkit grown across ADRs 001–007:
 
 | Tool | Purpose | ADR |
 |------|---------|-----|
@@ -31,8 +31,31 @@ A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zo
 | `query_audit` | Filter/summarize the local audit log (read-only, not audited) | 005 |
 | `diff_config` | Preview a revert: current → backup diff (read-only, not audited) | 005 |
 | `config_sweep` | Hash-compare-before-fetch sweep of watched paths into the git mirror; captures out-of-band edits (one commit per sweep) | 006 |
+| `guest_start` / `guest_stop` / `guest_restart` | API-native guest lifecycle (operate tier; `guest_stop` confirm-gated) | 007 |
 
 > `config_sweep` is registered **only when git is on PATH**. With git absent the whole config-history subsystem is disabled (writes still succeed, `historyCommitted: false`) and `config_sweep` is unregistered.
+
+> **Tiers gate registration (ADR-007).** Tools above the configured tier are **not registered at all** (`index.ts` filters via `isToolEnabled(name, activeTier)`), so the model never sees them — there is nothing to refuse at runtime. The tool table above is the *root-tier* superset.
+
+## Permission tiers & hybrid transport (ADR-007)
+
+**Least privilege by default; capability by explicit ceremony.** Four tiers, each a strict superset of the one below, with two enforcement grades:
+
+| Tier | Credentials | Enforced by | Adds |
+|------|-------------|-------------|------|
+| **observe** *(default)* | API token (PVEAuditor) | **Proxmox RBAC** | read-only tools |
+| **operate** | API token (custom `MCPOperate` role) | **Proxmox RBAC** | `guest_start/stop/restart` |
+| **companion** | + root SSH key | **MCP server** | everything *inside guests* + snapshots, `pct_*`/`qm_*`, `tail_log`, `config_sweep`, guest-target `diff_config`/`revert_file` |
+| **root** | + acknowledgment flag | **MCP server** | host `execute`/`read_file`/`write_file`/`list_directory`, host-target `diff_config`/`revert_file` |
+
+- **The distinction is doctrine, not a footnote.** Below companion a server bug or injected prompt **cannot exceed the token's privileges** (the node refuses — Proxmox-enforced). At companion and above the credential *could* do more and the software chooses not to (registration filtering + ADR-004 denylist/confirm + the protected set — **tripwires, not a sandbox**).
+- **Tier model is data (`tiers/registry.ts`).** `TOOL_MIN_TIER` maps tool→minTier; `isToolEnabled`/`toolsForTier` derive the rest. `diff_config`/`revert_file` follow their **target kind** (`targetMinTier`: guest⇒companion, host⇒root) via `assertTargetTier`, not a fixed row. **Implementation deltas from the ADR's first draft (kept in sync there):** snapshot tools land at **companion** (still SSH-routed — the `mcp-` protection + eviction + stop/rollback/start orchestration live in the SSH handlers; the ApiBackend snapshot endpoints exist + are fixture-tested for a future operate-tier move); the operate tier's API-native capability is the three lifecycle tools.
+- **Hybrid transport (`node/nodeOps.ts`): the transport follows the tool, not the tier.** Structured node ops depend on the `NodeOps` interface; `ApiBackend` (Node `https` — *not* `fetch`, which isn't resolvable here — against `:8006/api2/json`, token header, pinned-TLS agent, 401/403/5xx error mapping; transport injected as `ApiHttp` so tests use fixtures) rides every tier; `SshBackend` (wraps the existing exec + parsers) serves companion+ and anything API-less. `index.ts` picks `ApiBackend` when the four `PVE_API_*` envs are set, else `SshBackend`.
+- **Root flag (`tiers/rootFlag.ts`):** `MCP_HOST_ROOT_ENABLED` must equal **exactly** `I-understand-Claude-gets-root-and-can-break-this-node` — any other value (incl. `true`) is disabled. Restart-only; **no runtime escalation path ever** (a hard design exclusion — escalation prompts are a social-engineering surface). While enabled: stderr banner each start; root-tier audit records carry `rootTier: true`.
+- **Protected set (absolute, ADR-007 §4):** destructive ops against `/etc/pve` and cluster membership (`pvecm` add/addnode/delnode/qdevice) are **DENY at every tier including root**, no confirm bypass — recovering a node's identity is always a human action.
+- **Shared `pinnedTrust` (`trust/pinnedTrust.ts`):** one fail-closed pin/TOFU decision (`SHA256:<base64>` form), two consumers — SSH host key (`ssh/hostKey.ts`) and API TLS cert (`trust/tlsPin.ts`).
+- **Tier-aware census/health (§6):** below companion `describe_homelab`/`health_check` route metadata sections through `NodeOps` (API-complete: node/storage/containers/vms; health node/storage/updates). Exec-bound sections report a structured `{ unavailableAtTier: "companion" }` — census `network`/`services`/`tailscale`, health `units`/`guests` (network + onboot are deferred-to-API follow-ups, documented in ADR §6). The drift differ treats `unavailableAtTier` as **not observed** (suppresses the sub-diff), never "removed".
+- **Setup (`scripts/setup.ps1`, supersedes `generate-ssh-key.ps1` + `install-proxmox-key.sh`):** one ceremony — tier-conditional `pveum` provisioning (auto `ssh root@node` or paste-blob), dual fingerprint capture, a **403 negative test** (proving privsep is enforcing, not just configured), companion key gen/install (removed on downgrade), and the `claude mcp add` emit. It never sets the root flag.
 
 ## VM parity & operator toolkit (ADR-005)
 
@@ -123,11 +146,25 @@ src/
   audit/
     log.ts              # Atomic append-only JSONL writer (temp+rename / O_APPEND)
     record.ts           # Pure fn: audit record construction + SHA-256 hashing
+  tiers/                # ADR-007 permission tiers
+    registry.ts         # Pure: TOOL_MIN_TIER, isToolEnabled/toolsForTier, target-kind tier rule
+    rootFlag.ts         # Pure: acknowledgment-string parse, resolveTier, root banner
+  trust/                # ADR-007 shared pinned-trust (+ ADR-004 SSH consumer)
+    pinnedTrust.ts      # Pure decidePin + thin PinStore (one core, two consumers)
+    tlsPin.ts           # API TLS consumer: cert fingerprint + pinned https.Agent (fail-closed)
+  node/                 # ADR-007 hybrid transport (NodeOps)
+    nodeOps.ts          # NodeOps interface + domain types (Guest/Snapshot/TaskRef/...)
+    apiBackend.ts       # NodeOps over the PVE REST API (ApiHttp injected; 401/403/5xx mapping)
+    apiClient.ts        # makeApiHttp: https.request + pinned agent + token header (form-encoded)
+    sshBackend.ts       # NodeOps over the existing exec + parsers (companion+; API-less ops)
+  tools/
+    lifecycle.ts        # guest_start/stop/restart handlers (NodeOps; confirm-gated stop)
 ```
+(`ssh/hostKey.ts` is the SSH consumer of `trust/pinnedTrust.ts`.)
 
-**Key invariant:** `guardrails/`, `backup/policy.ts`, `backup/eviction.ts`, `audit/record.ts`, and `history/{paths,commitMessage,manifest,sweepPlanner}.ts` are **pure functions with no I/O** — the only way unit tests stay fast and trustworthy. (The `history/configHistory.ts` + `gitEngine.ts` git layer is tested against a real git repo in a temp dir, skipped where git is absent.)
+**Key invariant:** `guardrails/`, `backup/policy.ts`, `backup/eviction.ts`, `audit/record.ts`, `history/{paths,commitMessage,manifest,sweepPlanner}.ts`, `tiers/{registry,rootFlag}.ts`, and the decision core of `trust/pinnedTrust.ts` are **pure functions with no I/O** — the only way unit tests stay fast and trustworthy. (The git layer + the real-repo tests, and `ApiBackend` via an injected `ApiHttp` fixture, follow the same "pure core, thin I/O shell" split.)
 
-**Dependency direction:** tool handlers → `SshTransport` interface (injected). Never import `ssh2Client.ts` from tool handlers directly.
+**Dependency direction:** tool handlers → `SshTransport` and/or `NodeOps` interfaces (injected). Never import `ssh2Client.ts` or `apiClient.ts` from tool handlers directly. The tier registry (`tiers/registry.ts`) is **data**; adding a tool means adding a `TOOL_MIN_TIER` row, nothing else. **No runtime tier escalation, ever** — raising the tier means re-running setup (or editing config) + restart.
 
 ## Core principle: root SSH + tool-layer guardrails
 

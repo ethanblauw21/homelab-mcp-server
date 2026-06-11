@@ -1,4 +1,12 @@
 # scripts/generate-ssh-key.ps1
+#
+# DEPRECATED (ADR-007 §5): superseded by scripts/setup.ps1, which provisions the
+# tier credential, generates the Ed25519 key (companion tier only), installs it,
+# captures both trust fingerprints, runs the 403 privsep verification, and emits
+# the Claude registration in one ceremony:
+#     .\scripts\setup.ps1 -Tier companion -NodeHost <proxmox-ip>
+# This standalone key generator is kept only for the SSH-only / manual path.
+#
 # Generates an Ed25519 SSH key pair for the homelab MCP server.
 # Run this once; the public key output goes into Proxmox's /root/.ssh/authorized_keys.
 [CmdletBinding()]

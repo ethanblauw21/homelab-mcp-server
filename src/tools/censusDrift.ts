@@ -7,7 +7,7 @@ import type {
   GuestEntry,
   CensusSection,
 } from "./censusTypes.js";
-import { VOLATILE_FIELDS } from "./censusTypes.js";
+import { VOLATILE_FIELDS, observed } from "./censusTypes.js";
 import type { StorageInfo, NetworkIface } from "./censusParsers.js";
 
 /**
@@ -132,6 +132,13 @@ export function diffSnapshots(
 
   void NODE_IS_ALL_VOLATILE; // node section intentionally excluded from drift
 
+  // ADR-007 §6 — collapse any Unavailable marker on the newer snapshot to
+  // undefined; a not-observed section drives an empty (suppressed) sub-diff.
+  const observedNext = {
+    network: observed(next.sections.network),
+    tailscale: observed(next.sections.tailscale),
+  };
+
   const report: DriftReport = {
     containers: diffGuests(
       prev.sections.containers,
@@ -140,12 +147,17 @@ export function diffSnapshots(
     ),
     vms: diffGuests(prev.sections.vms, next.sections.vms, sectionTruncated(next, "vms")),
     storage: diffStorage(prev.sections.storage, next.sections.storage, opts.storageDriftPercent),
-    network: diffNetwork(prev.sections.network?.ifaces, next.sections.network?.ifaces),
+    // ADR-007 §6 — when the NEWER snapshot did not observe a section (an
+    // Unavailable marker at a lower tier), suppress its drift entirely: a section
+    // we did not look at can report neither additions, removals, nor changes.
+    network: observedNext.network
+      ? diffNetwork(observed(prev.sections.network)?.ifaces, observedNext.network.ifaces)
+      : { added: [], removed: [], changed: [] },
     comparedTo: prev.ts,
   };
 
-  const prevPeers = prev.sections.tailscale?.peerCount;
-  const nextPeers = next.sections.tailscale?.peerCount;
+  const prevPeers = observed(prev.sections.tailscale)?.peerCount;
+  const nextPeers = observedNext.tailscale?.peerCount;
   if (
     prevPeers !== undefined &&
     nextPeers !== undefined &&

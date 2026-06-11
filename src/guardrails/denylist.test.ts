@@ -138,6 +138,39 @@ describe("checkCommand — configured denylist (segment-prefix + tier annotation
   });
 });
 
+describe("checkCommand — protected set (ADR-007 §4)", () => {
+  it("DENIES destructive ops against /etc/pve", () => {
+    expect(checkCommand("rm -rf /etc/pve/qemu-server/100.conf").tier).toBe("deny");
+    expect(checkCommand("rm /etc/pve").tier).toBe("deny");
+    expect(checkCommand("mv /etc/pve/foo /tmp/bar").tier).toBe("deny");
+    expect(checkCommand("truncate -s0 /etc/pve/storage.cfg").tier).toBe("deny");
+    expect(checkCommand("echo x > /etc/pve/corosync.conf").tier).toBe("deny");
+  });
+
+  it("DENIES cluster-membership mutation via pvecm", () => {
+    expect(checkCommand("pvecm delnode pve2").tier).toBe("deny");
+    expect(checkCommand("pvecm add 10.0.0.20").tier).toBe("deny");
+    expect(checkCommand("pvecm addnode pve3").tier).toBe("deny");
+  });
+
+  it("the protected-set DENY cannot be confirm-bypassed (still deny tier)", () => {
+    // deny tier is unconditional — confirm:true never downgrades it.
+    expect(checkCommand("rm -rf /etc/pve").tier).toBe("deny");
+    expect(checkCommand("rm -rf /etc/pve").reason).toMatch(/protected set/i);
+  });
+
+  it("does NOT block reading /etc/pve or unrelated pvecm verbs", () => {
+    expect(checkCommand("cat /etc/pve/storage.cfg").tier).toBe("allow");
+    expect(checkCommand("grep -r onboot /etc/pve").tier).toBe("allow");
+    expect(checkCommand("pvecm status").tier).toBe("allow");
+    expect(checkCommand("pvecm nodes").tier).toBe("allow");
+  });
+
+  it("does not false-positive on a similarly named path", () => {
+    expect(checkCommand("rm -rf /etc/pveproxy-cache").tier).toBe("allow");
+  });
+});
+
 describe("checkCommand — obfuscation resistance", () => {
   it("normalizes multiple spaces in rm -rf /", () =>
     expect(checkCommand("rm   -rf    /").tier).toBe("deny"));

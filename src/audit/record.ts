@@ -19,7 +19,10 @@ export type AuditTool =
   | "qm_exec"
   | "qm_read_file"
   | "qm_write_file"
-  | "config_sweep";
+  | "config_sweep"
+  | "guest_start"
+  | "guest_stop"
+  | "guest_restart";
 
 export interface AuditRecord {
   id: string;
@@ -42,6 +45,9 @@ export interface AuditRecord {
   timeoutSecs?: number;
   // Set when a CONFIRM-tier command ran because the caller passed confirm:true.
   confirmGated?: boolean;
+  // ADR-007 §4 — set on every record produced by a root-tier tool while the root
+  // acknowledgment flag is enabled, making root-tier operation attributable.
+  rootTier?: boolean;
   isLargeChange?: boolean;
   isRevertible?: boolean;
   // ADR-006 — whether the config-history mirror captured this change. Best-effort:
