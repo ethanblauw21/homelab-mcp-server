@@ -30,6 +30,8 @@ import {
 import { QmListInputSchema, qmListHandler } from "./tools/qmList.js";
 import { QmAgentPingInputSchema, qmAgentPingHandler } from "./tools/qmAgentPing.js";
 import { QmExecInputSchema, qmExecHandler } from "./tools/qmExec.js";
+import { QmReadFileInputSchema, qmReadFileHandler } from "./tools/qmReadFile.js";
+import { QmWriteFileInputSchema, qmWriteFileHandler } from "./tools/qmWriteFile.js";
 import { HealthCheckInputSchema, healthCheckHandler } from "./tools/healthCheck.js";
 import { TailLogInputSchema, tailLogHandler } from "./tools/tailLog.js";
 import { QueryAuditInputSchema, queryAuditHandler } from "./tools/queryAudit.js";
@@ -327,6 +329,40 @@ server.registerTool(
   async (input) => {
     try {
       const result = await qmExecHandler(input, sshTransport, audit, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+server.registerTool(
+  "qm_read_file",
+  {
+    description:
+      "Read a file from inside a VM via the QEMU guest agent (agent/file-read). Requires the guest " +
+      "agent. Text-oriented (binary is lossy); enforces the same read cap + offset/maxBytes window as " +
+      "read_file/pct_read_file. For large files use offset/maxBytes or qm_exec with head/tail/grep/wc.",
+    inputSchema: QmReadFileInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await qmReadFileHandler(input, sshTransport, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+server.registerTool(
+  "qm_write_file",
+  {
+    description:
+      "Write a file inside a VM via the QEMU guest agent (agent/file-write). Requires the guest agent. " +
+      "Runs the full backup + audit pipeline (dryRun previews a diff with no side effects). Bounded by " +
+      "the guest-agent write cap; no permission preservation (file lands with the guest's default umask).",
+    inputSchema: QmWriteFileInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await qmWriteFileHandler(input, sshTransport, audit, backupStore, config);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }

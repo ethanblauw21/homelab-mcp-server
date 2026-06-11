@@ -25,6 +25,7 @@ A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zo
 | `qm_list` | List QEMU/KVM VMs + status | 005 |
 | `qm_agent_ping` | Check a VM's QEMU guest agent responsiveness | 005 |
 | `qm_exec` | Run a command in a VM via the guest agent (denylist + confirm gate) | 005 |
+| `qm_read_file` / `qm_write_file` | VM file I/O via the guest agent (`agent/file-read`/`file-write`; `dryRun`) | 005 |
 | `health_check` | Fixed-probe node health → ok/warn/crit, section-isolated | 005 |
 | `tail_log` | Bounded, validated, **always-redacted** journal/file tail (host or LXC) | 005 |
 | `query_audit` | Filter/summarize the local audit log (read-only, not audited) | 005 |
@@ -35,6 +36,7 @@ A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zo
 - **`qm_exec` runs through the QEMU guest agent** (`qm guest exec <vmid> --timeout <secs> -- sh -c '<cmd>'`), not SSH. It requires `qemu-guest-agent` installed and running in the guest; `qm_exec` prechecks with an agent ping and fails with a fix-naming error when absent. The inner command passes the **same two-tier denylist** as `execute`/`pct_exec` (`confirm?: boolean` gates CONFIRM-tier). **Honest limit (contrast ADR-004's host `timeout` wrapper):** the agent `--timeout` bounds how long the *server waits*, but cannot guarantee in-guest termination — `parseAgentExec` surfaces `timedOut`/`exitCode: null`/`pid` rather than faking a clean exit. The census `vms[].agent` slot (ADR-002 R6) is populated from `qm_agent_ping` + parsed guest config.
 - **`health_check` is fixed-probe and read-only**, mirroring the census pattern: declarative probes per section (`node`, `storage`, `guests`, `units`, `updates`), **pure evaluators** (`healthEvaluators.ts`) score each against config thresholds, and a `rollupStatus` reports the worst. Per-section `try/catch` isolation — a failed section becomes a recorded error, never an abort. apt staleness is read with `apt-get -s` (simulate); the server **never** runs `apt update` (A5.1).
 - **`tail_log` validates before it interpolates.** Unit names match a strict charset, `since` accepts only ISO or `<n> (min|hour|day) ago`, paths go through `validatePath`, lines clamp to `tools.tailLinesCap`, and `unit` XOR `path` is enforced — anything free-form throws. Output (and error text) **always** passes through the ADR-002 redaction module; over-redaction is the safe failure mode for logs.
+- **`qm_read_file` / `qm_write_file` move VM files through the guest agent** (`pvesh .../agent/file-read|file-write`), not SSH — a VM exposes no hypervisor-level filesystem the way `pct` does for a container. They mirror the `pct_*` file tools (validated path, agent precheck, ADR-004 read cap + `offset`/`maxBytes` window on read; full ADR-003 backup + audit pipeline and `dryRun` preview on write) with two honest agent-imposed limits made explicit in `qmFiles.ts`: the endpoints are **text-oriented** (binary is lossy/refused — use for config files, not blobs), and the write endpoint takes **no mode/owner so perms are not preserved** (the file lands with the guest's default umask; contrast `pct push`). Writes are bounded by `tools.qmWriteMaxBytes` (a payload over the cap is refused, never truncated in the guest — use `qm_exec` for larger edits). Backups key on a `qm:<vmid>:<path>` descriptor (no host/`pct` collision), and `revert_file` routes `kind === "qm"` back through `writeVmFile`. The PVE node name for `pvesh` paths is resolved from `hostname` (Proxmox pins it) and charset-validated before interpolation.
 - **`query_audit` + `diff_config` complete the preview/forensics triad:** `dryRun` (before a write) → `diff_config` (before a revert) → `query_audit` (after the fact). Both are pure/read-only and **not** themselves audited. `query_audit` filters `AuditLog.readAll()` (tool/vmid/path/time/large-only), returns a summary + newest-first records bounded by `tools.queryAuditMaxLimit`. `diff_config` reconstructs a backup (resolved by `backupPath` or latest-for-target) and diffs `current → backup` via the shared `computeUnifiedDiff`; metadata-only backups return a structured `revertible: false` instead of a diff.
 
 ## Commands
@@ -81,6 +83,9 @@ src/
     qmList.ts           # qm_list handler
     qmAgentPing.ts      # qm_agent_ping handler + pingAgent
     qmExec.ts           # qm_exec handler (denylist + confirm gate, agent-exec)
+    qmFiles.ts          # Pure agent file-read/write builders+parsers + I/O (node resolve, read/write VM file)
+    qmReadFile.ts       # qm_read_file handler (agent precheck, read cap + window)
+    qmWriteFile.ts      # qm_write_file handler (backup pipeline, dryRun, qmWriteMaxBytes cap, no perm preserve)
     healthEvaluators.ts # Pure: threshold evaluators + parsers (load/mem/fs/units/onboot/updates)
     healthCheck.ts      # health_check handler — fixed probes, section-isolated rollup
     tailLog.ts          # tail_log handler + pure buildTailCommand (validate → redact)

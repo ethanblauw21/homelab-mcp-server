@@ -30,7 +30,7 @@ This ADR adds VM parity plus four small operator tools. Each tool is individuall
 
 **Census integration (amends ADR-002):** the `vms` section carries `agent: { enabled: boolean (from config), responsive: boolean (from ping) }` per VM, so `qm_exec` coverage is visible on the map before it's needed. *(As shipped, this populates the existing ADR-002 R6 forward-slot `agent: { enabled, running? }` — `running` holds the ping-derived "responsive" boolean — which avoids a `schemaVersion` bump. Same information, existing key. See Action Item 3.)*
 
-**Deferred (stretch): `qm_read_file` / `qm_write_file`.** The guest agent supports file read/write (via `pvesh …/agent/file-read|file-write`, base64-bodied, agent-enforced size limits), and ADR-003's target-descriptor scheme extends naturally (`kind: "qm"`). Deferred because VM config edits are rare in this lab relative to container edits; if implemented, reads inherit the ADR-004 size cap and writes run the full ADR-003 pipeline. Listed as a stretch action item rather than a decision.
+**Deferred (stretch): `qm_read_file` / `qm_write_file`.** The guest agent supports file read/write (via `pvesh …/agent/file-read|file-write`, base64-bodied, agent-enforced size limits), and ADR-003's target-descriptor scheme extends naturally (`kind: "qm"`). Deferred because VM config edits are rare in this lab relative to container edits; if implemented, reads inherit the ADR-004 size cap and writes run the full ADR-003 pipeline. Listed as a stretch action item rather than a decision. **(Subsequently shipped 2026-06-10 against fixtures — see action item 10; the lab still has no VM to exercise it end-to-end.)**
 
 ### Part 2 — Operator toolkit
 
@@ -112,7 +112,7 @@ Deferred as described — demand-driven; the descriptor scheme means no design w
 7. [x] Implement `diff_config` over backup meta + `computeUnifiedDiff`.
 8. [x] Config additions: health thresholds, tail-lines cap, query_audit limit cap.
 9. [x] Update CLAUDE.md tool table and the project overview.
-10. [ ] (Stretch — deferred) `qm_read_file`/`qm_write_file` through the ADR-003 pipeline with `kind: "qm"` descriptors and agent size limits. Not implemented; revisit if VM config edits become frequent.
+10. [x] (Stretch) `qm_read_file`/`qm_write_file` through the ADR-003 pipeline with `kind: "qm"` descriptors and agent size limits. **Shipped 2026-06-10** (`qmFiles.ts` pure builders/parsers + I/O; `qmReadFile.ts`/`qmWriteFile.ts` handlers; `BackupTarget` `kind: "qm"` → `qm:<vmid>:<path>` key; `revert_file` routes `kind === "qm"`; `qm_write_file` enforces `tools.qmWriteMaxBytes`). Built against fixtures/`FakeTransport` (the live lab currently has **zero VMs**, so end-to-end agent exercise awaits a VM). **Honest limits made explicit:** the agent endpoints are text-oriented (binary lossy/refused) and the write endpoint preserves **no** mode/owner (file lands with the guest umask — unlike `pct push`). Docker `qm` integration coverage remains a CI/Linux task (no Docker on the Windows dev machine).
 
 ## References
 

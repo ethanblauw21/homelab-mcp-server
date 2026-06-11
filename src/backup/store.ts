@@ -12,7 +12,7 @@ import type { Config } from "../config.js";
  * same store but must never collide on disk, so the file key is derived from a
  * descriptor string: bare path for host, `pct:<vmid>:<path>` for containers.
  */
-export type BackupTargetKind = "host" | "pct";
+export type BackupTargetKind = "host" | "pct" | "qm";
 
 export interface BackupTarget {
   kind: BackupTargetKind;
@@ -21,7 +21,9 @@ export interface BackupTarget {
 }
 
 export function targetKeyString(t: BackupTarget): string {
-  return t.kind === "pct" ? `pct:${t.vmid}:${t.remotePath}` : t.remotePath;
+  if (t.kind === "pct") return `pct:${t.vmid}:${t.remotePath}`;
+  if (t.kind === "qm") return `qm:${t.vmid}:${t.remotePath}`;
+  return t.remotePath;
 }
 
 export interface BackupResult {
