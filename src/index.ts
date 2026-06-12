@@ -55,7 +55,7 @@ import {
 
 const server = new McpServer({
   name: "homelab-ssh-mcp",
-  version: "0.1.0",
+  version: "0.2.0",
 });
 
 // ADR-007 — resolve the active permission tier. `level` (observe/operate/companion)
@@ -64,6 +64,13 @@ const server = new McpServer({
 // registered, so the model never sees a tool it cannot run.
 const activeTier: Tier = resolveTier(config.tier.level, config.tier.rootEnabled);
 const isRootTier = activeTier === "root";
+
+// One-line startup identity: answers "is the right thing running?" before someone asks.
+const hostDisplay = config.api.baseUrl
+  ? (() => { try { return new URL(config.api.baseUrl).hostname; } catch { return config.api.baseUrl; } })()
+  : config.ssh.host || "unconfigured";
+process.stderr.write(`homelab-mcp v0.2.0 | tier: ${activeTier} | host: ${hostDisplay}\n`);
+
 if (config.tier.rootEnabled) {
   // Loud, every start. stdout is the MCP channel — diagnostics go to stderr.
   process.stderr.write(rootBanner() + "\n");
@@ -89,7 +96,21 @@ const nodeOps: NodeOps =
 
 function errResult(err: unknown) {
   const msg = err instanceof Error ? err.message : String(err);
-  return { isError: true as const, content: [{ type: "text" as const, text: msg }] };
+  let hint = "";
+  if (/ECONNREFUSED|connect ECONNREFUSED/i.test(msg)) {
+    hint = " — SSH connection refused. Verify SSH_HOST is correct and the node is up. Run `npm run doctor` to diagnose.";
+  } else if (/ETIMEDOUT|timed out|backstop fired/i.test(msg)) {
+    hint = " — connection timed out. Run `npm run doctor` to check connectivity.";
+  } else if (/no such file.*\.ssh|ENOENT.*\.ssh|cannot open.*private key/i.test(msg)) {
+    hint = " — SSH key file not found. Check SSH_KEY_PATH or re-run setup.";
+  } else if (/host key verification failed|hostVerifier/i.test(msg)) {
+    hint = " — host key mismatch. Check SSH_HOST_KEY_FINGERPRINT (see stderr for details). Re-run `npm run setup` to re-capture.";
+  } else if (/backup storage.*cap|over cap.*disk.pressure/i.test(msg)) {
+    hint = " — raise GLOBAL_SIZE_CAP_BYTES or move BACKUP_DIR to a larger disk.";
+  } else if (/container.*not running|not running.*container/i.test(msg)) {
+    hint = " — start the container first with guest_start, or use host-level tools.";
+  }
+  return { isError: true as const, content: [{ type: "text" as const, text: hint ? `${msg}${hint}` : msg }] };
 }
 
 /**

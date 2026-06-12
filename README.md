@@ -1,8 +1,10 @@
 # homelab-mcp-server
 
-A stdio [Model Context Protocol](https://modelcontextprotocol.io) server that connects Claude Code on Windows to a Proxmox VE node over the REST API and SSH. Exposes a tier-gated operator toolkit ranging from read-only observability to full host access, with least privilege enforced by default.
+Tiered MCP server for Proxmox — least-privilege by default, every write backed up and revertible, fully audited.
 
 *Designed by a human through a documented architecture-first process. Implemented by Claude against those specifications. See [Design process](#design-process).*
+
+[![CI](https://github.com/ethanblauw21/homelab-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/ethanblauw21/homelab-mcp-server/actions/workflows/ci.yml)
 
 ![homelab MCP server demo](assets/demo.gif)
 
@@ -75,16 +77,27 @@ The server runs at one of four tiers. Choose the lowest tier that covers what yo
 
 ## Setup
 
-**Prerequisites:** Node.js 20+, Claude Code, PowerShell 5.1+ (Windows), a Proxmox VE node on the same LAN.
+**Prerequisites:** Node.js 20+, Claude Code, a Proxmox VE node on the same LAN.
 
-```powershell
+```bash
 git clone https://github.com/ethanblauw21/homelab-mcp-server
 cd homelab-mcp-server
 npm install && npm run build
+```
+
+Then run the setup ceremony for your platform:
+
+**Linux / macOS**
+```bash
+./scripts/setup.sh
+```
+
+**Windows**
+```powershell
 .\scripts\setup.ps1
 ```
 
-The setup script walks you through the ceremony interactively — choose a tier, enter your node's address, pick a bootstrap mode:
+Both wrappers call the same Node.js setup script (`scripts/setup.mjs`). The ceremony walks you through the setup interactively — choose a tier, enter your node's address, pick a bootstrap mode:
 
 - **auto** — one SSH root password prompt, then fully automated
 - **paste** — prints a script to run in the Proxmox web shell (no root password touches your machine)
@@ -100,15 +113,46 @@ Restart Claude Code when it completes.
 
 All parameters can also be passed as flags for automated or repeated runs:
 
+```bash
+# Linux / macOS
+./scripts/setup.sh --tier=observe   --node-host=192.168.1.100
+./scripts/setup.sh --tier=companion --node-host=192.168.1.100 --bootstrap-mode=paste
+./scripts/setup.sh --tier=observe   --node-host=192.168.1.100 --dry-run
+```
+
 ```powershell
+# Windows
 .\scripts\setup.ps1 -Tier observe   -NodeHost 192.168.1.100
 .\scripts\setup.ps1 -Tier companion -NodeHost 192.168.1.100 -BootstrapMode paste
 .\scripts\setup.ps1 -Tier observe   -NodeHost 192.168.1.100 -DryRun
 ```
 
+### Claude Desktop
+
+Add to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "homelab": {
+      "command": "node",
+      "args": ["/absolute/path/to/homelab-mcp-server/dist/index.js"],
+      "env": {
+        "MCP_TIER": "observe",
+        "PVE_API_BASE_URL": "https://192.168.1.100:8006/api2/json",
+        "PVE_API_TOKEN_ID": "mcp@pve!mcp-observe",
+        "PVE_API_TOKEN_SECRET": "<secret from setup>",
+        "PVE_API_NODE": "proxmox",
+        "PVE_API_TLS_FINGERPRINT": "SHA256:<fingerprint from setup>"
+      }
+    }
+  }
+}
+```
+
 ### Upgrading tiers
 
-Re-run `.\scripts\setup.ps1` at the new tier — setup is idempotent. Downgrading from `companion` removes the SSH key from `authorized_keys` and deletes the local private key.
+Re-run the setup script at the new tier — it is idempotent. Downgrading from `companion` removes the SSH key from `authorized_keys` and deletes the local private key.
 
 ### Root tier
 
@@ -119,6 +163,16 @@ MCP_HOST_ROOT_ENABLED=I-understand-Claude-gets-root-and-can-break-this-node
 ```
 
 Any other value (including `true`) is treated as disabled. There is no runtime escalation path.
+
+### Troubleshooting
+
+If the server isn't connecting, run the pre-flight checker first:
+
+```bash
+npm run doctor
+```
+
+It checks Node version, the `claude` CLI, the built artifact, all required env vars, API reachability, and SSH connectivity. Most first-time issues surface here in under two seconds.
 
 ## Architecture
 
@@ -144,11 +198,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the ADR-first process, testing requir
 
 ## Storage
 
-All persistent data lives on the **Windows host**, not the Proxmox node:
+All persistent data lives on the **machine running the MCP server**, not the Proxmox node:
 
 | Data | Default location |
 |------|-----------------|
-| Backups | `%LOCALAPPDATA%\claude-mcp\backups\` |
+| Backups | `%LOCALAPPDATA%\claude-mcp\backups\` (Windows) / `~/.local/share/claude-mcp/backups/` |
 | Audit log | `%LOCALAPPDATA%\claude-mcp\audit.jsonl` |
 | Config history | `%LOCALAPPDATA%\claude-mcp\config-history\` |
 
