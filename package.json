@@ -7,6 +7,13 @@
   "bin": {
     "homelab-mcp-server": "./dist/index.js"
   },
+  "files": [
+    "dist/",
+    "scripts/setup.mjs",
+    "scripts/setup.sh",
+    "scripts/doctor.mjs",
+    "LICENSE"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
