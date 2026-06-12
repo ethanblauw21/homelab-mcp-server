@@ -75,6 +75,60 @@ The server runs at one of four tiers. Choose the lowest tier that covers what yo
 | `write_file` | Write a file on the host — full backup pipeline + audit on every write |
 | `list_directory` | List a host directory |
 
+## Sample output
+
+<details>
+<summary><code>describe_homelab</code> — node census (summary depth)</summary>
+
+```json
+{
+  "schemaVersion": 1,
+  "ts": "2026-06-12T03:16:08.616Z",
+  "host": "10.0.0.10",
+  "depth": "summary",
+  "sections": {
+    "node": {
+      "version": "9.2.3",
+      "uptime": "up 1 week, 6 days, 23 hours, 42 minutes",
+      "cpu": 8,
+      "memBytes": 16413732864,
+      "memUsedBytes": 3904413696,
+      "load": [0.1, 0.07, 0.08],
+      "zpool": { "healthy": true, "detail": "no pools" }
+    },
+    "storage": [
+      { "name": "local",        "type": "dir",     "active": true, "totalBytes": 100861726720,   "usedBytes": 9079173120,   "availBytes": 86611816448   },
+      { "name": "local-lvm",    "type": "lvmthin", "active": true, "totalBytes": 374538764288,   "usedBytes": 143373437952, "availBytes": 231165325312  },
+      { "name": "media-backup", "type": "dir",     "active": true, "totalBytes": 3936820731904,  "usedBytes": 261289168896, "availBytes": 3475475435520 }
+    ],
+    "containers": [
+      { "vmid": 100, "name": "adguard-dns",  "status": "running" },
+      { "vmid": 101, "name": "dockerBoss",   "status": "running" }
+    ],
+    "vms": [],
+    "services": [
+      { "vmid": 101, "failedUnits": [], "docker": [
+        { "name": "jellyfin",     "image": "jellyfin/jellyfin:latest",                    "status": "Up 12 days (healthy)" },
+        { "name": "sonarr",       "image": "lscr.io/linuxserver/sonarr:latest",           "status": "Up 12 days"           },
+        { "name": "radarr",       "image": "lscr.io/linuxserver/radarr:latest",           "status": "Up 12 days"           },
+        { "name": "prowlarr",     "image": "lscr.io/linuxserver/prowlarr:latest",         "status": "Up 12 days"           },
+        { "name": "qbittorrent",  "image": "lscr.io/linuxserver/qbittorrent:latest",      "status": "Up 12 days"           },
+        { "name": "gluetun",      "image": "qmcgaw/gluetun:latest",                       "status": "Up 12 days (healthy)" },
+        { "name": "jellyseerr",   "image": "fallenbagel/jellyseerr:latest",               "status": "Up 12 days"           },
+        { "name": "tailscale",    "image": "tailscale/tailscale:latest",                  "status": "Up 12 days"           },
+        { "name": "portainer",    "image": "portainer/portainer-ce:latest",               "status": "Up 12 days"           },
+        { "name": "homepage",     "image": "ghcr.io/gethomepage/homepage:latest",         "status": "Up 22 hours (healthy)"},
+        { "name": "watchtower",   "image": "containrrr/watchtower:latest",                "status": "Up 25 hours (healthy)"},
+        { "name": "flaresolverr", "image": "ghcr.io/flaresolverr/flaresolverr:latest",    "status": "Up 12 days"           }
+      ]}
+    ]
+  },
+  "errors": [],
+  "redactions": 0
+}
+```
+</details>
+
 ## Setup
 
 **Prerequisites:** Node.js 20+, Claude Code, a Proxmox VE node on the same LAN.
