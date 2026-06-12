@@ -8,3 +8,4 @@ coverage/
 .int-test-audit.jsonl
 stryker-*.txt
 .claude/settings.local.json
+census-snapshots/

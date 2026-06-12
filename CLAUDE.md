@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Ground truth
 
-`ADR-001-ssh-mcp-server.md` and `TESTING-STRATEGY-ssh-mcp-server.md` are the authoritative spec. Read both before writing code; keep them in sync if the design changes. `ADR-007-permissions-tiers.md` governs the permission-tier model and partially supersedes ADR-001's root-by-default.
+`docs/adr/ADR-001-ssh-mcp-server.md` and `docs/adr/TESTING-STRATEGY-ssh-mcp-server.md` are the authoritative spec. Read both before writing code; keep them in sync if the design changes. `docs/adr/ADR-007-permissions-tiers.md` governs the permission-tier model and partially supersedes ADR-001's root-by-default.
 
 ## What this is
 

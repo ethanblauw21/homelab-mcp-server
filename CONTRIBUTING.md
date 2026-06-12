@@ -26,7 +26,7 @@ Adding a tool means adding one row to `TOOL_MIN_TIER` in `tiers/registry.ts`. No
 
 Changes to the tool surface, transport, tier model, trust model, or backup/audit behavior require an ADR before implementation. The ADRs are the specification; the code implements the spec, not the other way around.
 
-ADRs live at the project root as `ADR-NNN-slug.md`. Write from a question the design needs to answer: document the options considered, state the decision, and explain the rationale. Look at the existing ADRs for format and depth. If you are unsure whether something warrants an ADR, it probably does.
+ADRs live in `docs/adr/` as `ADR-NNN-slug.md`. Write from a question the design needs to answer: document the options considered, state the decision, and explain the rationale. Look at the existing ADRs for format and depth. If you are unsure whether something warrants an ADR, it probably does.
 
 ## Testing requirements
 
