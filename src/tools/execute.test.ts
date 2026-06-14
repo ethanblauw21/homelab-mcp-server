@@ -72,4 +72,33 @@ describe("executeHandler (ADR-004 confirm gate + honest exit)", () => {
     expect(r.stdout).toBe("bin\n");
     expect(audit.readAll()[0].confirmGated).toBeUndefined();
   });
+
+  // ADR-008 §4 — heavy patterns must run WITHOUT confirm and annotate isHeavy,
+  // never isLargeChange (which is for large file writes) and never confirmGated.
+  describe("heavy-pattern annotation (ADR-008 §4)", () => {
+    const heavy: Array<[string, string]> = [
+      ["curl health check", "curl http://localhost:3000/health"],
+      ["wget download", "wget https://example.com/file.iso"],
+      ["tar archive", "tar -czf backup.tar.gz /var"],
+      ["rsync mirror", "rsync -av /src /dst"],
+    ];
+
+    for (const [label, cmd] of heavy) {
+      it(`runs ${label} without confirm and annotates isHeavy`, async () => {
+        transport.setExecResult(cmd, { stdout: "ok", stderr: "", exitCode: 0 });
+        const r = await executeHandler({ command: cmd }, transport, audit, cfg);
+        expect(r.exitCode).toBe(0);
+        const rec = audit.readAll()[0];
+        expect(rec.isHeavy).toBe(true);
+        expect(rec.isLargeChange).toBeUndefined();
+        expect(rec.confirmGated).toBeUndefined();
+      });
+    }
+
+    it("does not annotate isHeavy on an ordinary command", async () => {
+      transport.setExecResult("ls /", { stdout: "bin\n", stderr: "", exitCode: 0 });
+      await executeHandler({ command: "ls /" }, transport, audit, cfg);
+      expect(audit.readAll()[0].isHeavy).toBeUndefined();
+    });
+  });
 });

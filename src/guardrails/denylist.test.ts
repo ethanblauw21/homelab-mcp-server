@@ -171,6 +171,25 @@ describe("checkCommand — protected set (ADR-007 §4)", () => {
   });
 });
 
+describe("checkCommand — heavy patterns are never gated (ADR-008 §4 regression)", () => {
+  // The CONFIRM gate is reserved for availability-class commands and DENY for
+  // destruction. Heavy patterns (curl/wget/tar/rsync/…) are an audit annotation
+  // only and MUST resolve to `allow` — gating them was implementation drift.
+  const tierOf = (cmd: string) => checkCommand(cmd).tier;
+
+  it("allows curl (the dogfooding health-check case)", () =>
+    expect(tierOf("curl http://localhost:3000/health")).toBe("allow"));
+  it("allows wget", () => expect(tierOf("wget https://example.com/file.iso")).toBe("allow"));
+  it("allows tar", () => expect(tierOf("tar -czf backup.tar.gz /var")).toBe("allow"));
+  it("allows rsync", () => expect(tierOf("rsync -av /src /dst")).toBe("allow"));
+  it("allows scp", () => expect(tierOf("scp root@host:/etc/cfg /tmp/")).toBe("allow"));
+
+  it("the gate is unchanged for the classes it does cover", () => {
+    expect(tierOf("reboot")).toBe("confirm");
+    expect(tierOf("rm -rf /")).toBe("deny");
+  });
+});
+
 describe("checkCommand — obfuscation resistance", () => {
   it("normalizes multiple spaces in rm -rf /", () =>
     expect(checkCommand("rm   -rf    /").tier).toBe("deny"));

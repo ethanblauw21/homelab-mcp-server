@@ -30,56 +30,56 @@ describe("detectLargeFileWrite", () => {
 
 describe("detectHeavyCommand", () => {
   it("flags tar commands", () => {
-    expect(detectHeavyCommand("tar -czf backup.tar.gz /var").isLarge).toBe(true);
+    expect(detectHeavyCommand("tar -czf backup.tar.gz /var").isHeavy).toBe(true);
   });
 
   it("flags rsync", () => {
-    expect(detectHeavyCommand("rsync -av /source /dest").isLarge).toBe(true);
+    expect(detectHeavyCommand("rsync -av /source /dest").isHeavy).toBe(true);
   });
 
   it("flags find /", () => {
-    expect(detectHeavyCommand("find / -name '*.conf'").isLarge).toBe(true);
+    expect(detectHeavyCommand("find / -name '*.conf'").isHeavy).toBe(true);
   });
 
   it("flags wget", () => {
-    expect(detectHeavyCommand("wget https://example.com/large.iso").isLarge).toBe(true);
+    expect(detectHeavyCommand("wget https://example.com/large.iso").isHeavy).toBe(true);
   });
 
   it("flags curl", () => {
-    expect(detectHeavyCommand("curl -O https://example.com/file.tar.gz").isLarge).toBe(true);
+    expect(detectHeavyCommand("curl -O https://example.com/file.tar.gz").isHeavy).toBe(true);
   });
 
   it("flags scp", () => {
-    expect(detectHeavyCommand("scp root@host:/etc/config /tmp/").isLarge).toBe(true);
+    expect(detectHeavyCommand("scp root@host:/etc/config /tmp/").isHeavy).toBe(true);
   });
 
   it("flags fsck", () => {
-    expect(detectHeavyCommand("fsck /dev/sda1").isLarge).toBe(true);
+    expect(detectHeavyCommand("fsck /dev/sda1").isHeavy).toBe(true);
   });
 
   it("flags dump", () => {
-    expect(detectHeavyCommand("dump -0u -f /dev/st0 /home").isLarge).toBe(true);
+    expect(detectHeavyCommand("dump -0u -f /dev/st0 /home").isHeavy).toBe(true);
   });
 
   it("flags restore", () => {
-    expect(detectHeavyCommand("restore -rf /dev/st0").isLarge).toBe(true);
+    expect(detectHeavyCommand("restore -rf /dev/st0").isHeavy).toBe(true);
   });
 
   it("includes pattern info in reason", () => {
     const result = detectHeavyCommand("tar -czf backup.tar.gz /var");
-    expect(result.isLarge).toBe(true);
+    expect(result.isHeavy).toBe(true);
     expect(result.reason).toBeTruthy();
   });
 
   it("does not flag ls", () => {
-    expect(detectHeavyCommand("ls -la /etc").isLarge).toBe(false);
+    expect(detectHeavyCommand("ls -la /etc").isHeavy).toBe(false);
   });
 
   it("does not flag cat", () => {
-    expect(detectHeavyCommand("cat /etc/hosts").isLarge).toBe(false);
+    expect(detectHeavyCommand("cat /etc/hosts").isHeavy).toBe(false);
   });
 
   it("does not flag systemctl", () => {
-    expect(detectHeavyCommand("systemctl restart nginx").isLarge).toBe(false);
+    expect(detectHeavyCommand("systemctl restart nginx").isHeavy).toBe(false);
   });
 });

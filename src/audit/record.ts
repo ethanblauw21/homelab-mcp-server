@@ -49,6 +49,11 @@ export interface AuditRecord {
   // acknowledgment flag is enabled, making root-tier operation attributable.
   rootTier?: boolean;
   isLargeChange?: boolean;
+  // ADR-008 §4 — heavy-pattern annotation for exec tools (curl/wget/tar/rsync/…).
+  // Distinct from isLargeChange (large *file writes*): a heavy command is worth
+  // noting but is NOT a large change and NEVER gates. Separating the two keeps the
+  // `largeOnly` audit query meaningful (it surfaces large writes, not network ops).
+  isHeavy?: boolean;
   isRevertible?: boolean;
   // ADR-006 — whether the config-history mirror captured this change. Best-effort:
   // false means git was absent/failed (the write itself still succeeded), the
