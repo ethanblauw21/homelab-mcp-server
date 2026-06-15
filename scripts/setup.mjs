@@ -175,6 +175,26 @@ if (tier === "companion" && wasInteractive) {
   console.log("");
 }
 
+// ADR-010 — optional localhost UI sidecar. It is a SEPARATE process (`npm run ui`),
+// not registered with `claude mcp add`, so we don't push its env into the MCP server;
+// we capture the preference and print the launch command. The renderer is credential-
+// free and safe at any tier; LIVE ACTIONS (the bounded §5 human-tool executor) are
+// opt-in and only meaningful at companion+ (all four human tools are companion-tier).
+// The bind address is FIXED to localhost by the server — never prompted, never routable.
+let uiEnableActions = false;
+if (wasInteractive) {
+  console.log("  Local dashboard (ADR-010) — a localhost-only web view of census/drift/health/audit.");
+  console.log("  Renderer-only by default (holds no credentials). Launch later with: npm run ui");
+  console.log("");
+  if (tier === "companion") {
+    const uiChoice = await prompt(
+      "  Also enable LIVE action buttons (verify_integrity / accept_truth / compute_tree / config_sweep)? [y/N]: "
+    );
+    uiEnableActions = /^y(es)?$/i.test(uiChoice.trim());
+    console.log("");
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Confirmed config
 // ---------------------------------------------------------------------------
@@ -471,6 +491,18 @@ console.log(`  Token      ${tokenId}`);
 if (nodeName) console.log(`  Node       ${nodeName}`);
 if (tier === "companion") console.log(`  SSH key    ${sshKeyPath}`);
 if (integrityLevel) console.log(`  Integrity  ${integrityLevel} (forest tracking depth)`);
+console.log("");
+// ADR-010 — how to launch the optional localhost dashboard (separate process).
+console.log(c(90, "  ------------------------------------------"));
+if (uiEnableActions) {
+  console.log(c(36, "  Local dashboard (live actions enabled):"));
+  console.log("    set UI_ENABLE_ACTIONS=true && npm run ui      (Windows: $env:UI_ENABLE_ACTIONS='true'; npm run ui)");
+  console.log(c(90, "    Then open http://127.0.0.1:7311  — localhost only; the server refuses any routable bind."));
+} else {
+  console.log(c(36, "  Local dashboard (renderer-only):"));
+  console.log("    npm run ui      then open http://127.0.0.1:7311");
+  console.log(c(90, "    Credential-free view of the latest census/drift/health/audit. No live actions."));
+}
 console.log("");
 console.log(`  ${c(36, "→ Restart Claude Code to activate the 'homelab' server.")}`);
 console.log("");

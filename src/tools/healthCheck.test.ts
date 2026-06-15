@@ -34,6 +34,18 @@ function fakeNode(overrides: Partial<NodeOps> = {}): NodeOps {
     async deleteSnapshot() {
       return { upid: "x" };
     },
+    async createBackup() {
+      return { upid: "x" };
+    },
+    async listBackupArchives() {
+      return [];
+    },
+    async restoreBackup() {
+      return { upid: "x" };
+    },
+    async deleteBackupArchive() {
+      return { upid: "x" };
+    },
     async nodeStatus(): Promise<NodeStatusInfo> {
       return { loadavg: [0.2, 0.1, 0.05], memoryUsed: 99, memoryTotal: 100, cpuCount: 8, uptimeSecs: 100 };
     },

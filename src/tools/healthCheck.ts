@@ -56,6 +56,17 @@ export interface HealthCheckResult {
   unavailable?: Array<{ section: HealthSection; unavailableAtTier: Tier }>;
 }
 
+/**
+ * ADR-010 §2 — optional cached-state sink. When the server wires one, every
+ * `health_check` result is persisted (newest snapshot wins) so the UI's health
+ * board can render the last ok/warn/crit with no live session. Structurally a
+ * `SnapshotStore<HealthCheckResult>`; kept as a minimal interface so `tools/`
+ * never imports `ui/` (dependency direction: ui → tools, never the reverse).
+ */
+export interface HealthSnapshotSink {
+  save(result: HealthCheckResult): void;
+}
+
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -75,12 +86,16 @@ export async function healthCheckHandler(
   // exec-bound sections (units, onboot guests) report `unavailableAtTier`.
   // Defaults preserve the pre-tier SSH path for existing callers.
   nodeOps: NodeOps | null = null,
-  tier: Tier = "companion"
+  tier: Tier = "companion",
+  // ADR-010 — optional cached-state sink (persist each result for the UI panel).
+  store: HealthSnapshotSink | null = null
 ): Promise<HealthCheckResult> {
   const requested = new Set<HealthSection>(input.sections ?? HEALTH_SECTIONS);
 
   if (!tierAtLeast(tier, "companion")) {
-    return apiHealthCheck(requested, nodeOps, cfg);
+    const apiResult = await apiHealthCheck(requested, nodeOps, cfg);
+    store?.save(apiResult);
+    return apiResult;
   }
 
   const findings: HealthFinding[] = [];
@@ -189,7 +204,9 @@ export async function healthCheckHandler(
     }
   }
 
-  return { status: rollupStatus(findings), findings, errors };
+  const result: HealthCheckResult = { status: rollupStatus(findings), findings, errors };
+  store?.save(result);
+  return result;
 }
 
 /**

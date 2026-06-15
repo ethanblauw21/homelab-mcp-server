@@ -30,6 +30,8 @@
     "build": "tsc",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
+    "ui": "node dist/ui/server.js",
+    "ui:dev": "tsx watch src/ui/server.ts",
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/doctor.mjs",
     "test": "vitest run",
