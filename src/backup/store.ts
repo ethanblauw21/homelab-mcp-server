@@ -8,21 +8,28 @@ import { applyReverseDiff } from "./policy.js";
 import type { Config } from "../config.js";
 
 /**
- * Identifies what a backup belongs to. Host files and container files share the
- * same store but must never collide on disk, so the file key is derived from a
- * descriptor string: bare path for host, `pct:<vmid>:<path>` for containers.
+ * Identifies what a backup belongs to. Host files and guest files share the same
+ * store but must never collide on disk, so the file key is derived from a
+ * descriptor string: bare path for host, `pct:<vmid>:<path>` for containers,
+ * `qm:<vmid>:<path>` for VMs, `docker:<vmid>:<container>:<path>` for Docker
+ * containers (ADR-008). Docker identity is the container *name* (survives
+ * recreation) — the same string the caller named, regardless of whether the
+ * write took the bind-mount fast path or the `docker cp` slow path.
  */
-export type BackupTargetKind = "host" | "pct" | "qm";
+export type BackupTargetKind = "host" | "pct" | "qm" | "docker";
 
 export interface BackupTarget {
   kind: BackupTargetKind;
   vmid?: number;
+  /** Docker container name (ADR-008 `docker` kind only). */
+  container?: string;
   remotePath: string;
 }
 
 export function targetKeyString(t: BackupTarget): string {
   if (t.kind === "pct") return `pct:${t.vmid}:${t.remotePath}`;
   if (t.kind === "qm") return `qm:${t.vmid}:${t.remotePath}`;
+  if (t.kind === "docker") return `docker:${t.vmid}:${t.container}:${t.remotePath}`;
   return t.remotePath;
 }
 

@@ -194,3 +194,75 @@ describe("ApiBackend node/storage/apt", () => {
     expect(await be.aptUpdates()).toEqual([{ package: "bash", version: "5.2-1" }]);
   });
 });
+
+describe("ApiBackend backups (ADR-008 §6)", () => {
+  it("POSTs /vzdump with the notes-template, compress, and remove:0 (mcp- owns rotation)", async () => {
+    const { http, calls } = fixtureHttp([
+      { method: "POST", path: `/nodes/${NODE}/vzdump`, res: ok("UPID:vzdump") },
+    ]);
+    const be = new ApiBackend(http, { node: NODE });
+    const ref = await be.createBackup(101, "lxc", { mode: "snapshot", storage: "local", notes: "mcp-x" });
+    expect(ref.upid).toBe("UPID:vzdump");
+    expect(calls[0]!.body).toEqual({
+      vmid: 101,
+      storage: "local",
+      mode: "snapshot",
+      compress: "zstd",
+      "notes-template": "mcp-x",
+      remove: 0,
+    });
+  });
+
+  it("lists archives on a storage and filters to one vmid", async () => {
+    const { http } = fixtureHttp([
+      {
+        method: "GET",
+        path: `/nodes/${NODE}/storage/local/content?content=backup`,
+        res: ok([
+          { volid: "local:backup/vzdump-lxc-101.tar.zst", vmid: 101, ctime: 100, notes: "mcp-a" },
+          { volid: "local:backup/vzdump-lxc-102.tar.zst", vmid: 102, ctime: 200, notes: "nightly" },
+        ]),
+      },
+    ]);
+    const be = new ApiBackend(http, { node: NODE });
+    const all = await be.listBackupArchives("local");
+    expect(all).toHaveLength(2);
+    const filtered = await be.listBackupArchives("local", 101);
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0]!.volid).toBe("local:backup/vzdump-lxc-101.tar.zst");
+  });
+
+  it("restores an LXC via POST /lxc with ostemplate+restore+force", async () => {
+    const { http, calls } = fixtureHttp([
+      { method: "POST", path: `/nodes/${NODE}/lxc`, res: ok("UPID:restore") },
+    ]);
+    const be = new ApiBackend(http, { node: NODE });
+    const ref = await be.restoreBackup(101, "lxc", "local:backup/a");
+    expect(ref.upid).toBe("UPID:restore");
+    expect(calls[0]!.body).toEqual({ vmid: 101, ostemplate: "local:backup/a", restore: 1, force: 1 });
+  });
+
+  it("restores a QEMU via POST /qemu with archive+force", async () => {
+    const { http, calls } = fixtureHttp([
+      { method: "POST", path: `/nodes/${NODE}/qemu`, res: ok("UPID:restore") },
+    ]);
+    const be = new ApiBackend(http, { node: NODE });
+    await be.restoreBackup(100, "qemu", "local:backup/a");
+    expect(calls[0]!.body).toEqual({ vmid: 100, archive: "local:backup/a", force: 1 });
+  });
+
+  it("DELETEs an archive by url-encoded volid", async () => {
+    const volid = "local:backup/vzdump-lxc-101.tar.zst";
+    const { http, calls } = fixtureHttp([
+      {
+        method: "DELETE",
+        path: `/nodes/${NODE}/storage/local/content/${encodeURIComponent(volid)}`,
+        res: ok("UPID:del"),
+      },
+    ]);
+    const be = new ApiBackend(http, { node: NODE });
+    await be.deleteBackupArchive("local", volid);
+    expect(calls[0]!.method).toBe("DELETE");
+    expect(calls[0]!.path).toContain(encodeURIComponent(volid));
+  });
+});

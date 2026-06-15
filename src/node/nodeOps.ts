@@ -68,6 +68,28 @@ export interface AptUpdateInfo {
   version: string;
 }
 
+/**
+ * ADR-008 §6 — a vzdump archive on a node backup storage. The `notes` field
+ * carries the server's `mcp-` ownership tag (see tools/backups.ts); identity is
+ * the `volid`.
+ */
+export interface BackupArchive {
+  volid: string;
+  vmid: number;
+  ctime?: number;
+  sizeBytes?: number;
+  notes?: string;
+  format?: string;
+}
+
+export interface BackupCreateOpts {
+  mode: "snapshot" | "suspend" | "stop";
+  storage: string;
+  /** Goes into the archive notes; carries the `mcp-` ownership tag. */
+  notes: string;
+  compress?: string;
+}
+
 export interface NodeOps {
   listGuests(): Promise<Guest[]>;
   guestStatus(vmid: number, type: GuestType): Promise<{ status: string }>;
@@ -86,6 +108,16 @@ export interface NodeOps {
   storageStatus(): Promise<StorageStatusInfo[]>;
   /** apt updates available (simulate-only; never runs `apt update`). */
   aptUpdates(): Promise<AptUpdateInfo[]>;
+
+  // ADR-008 §6 — vzdump archive lifecycle (the snapshot-incapable rollback path).
+  /** Create a vzdump archive of a guest. `opts.notes` carries the `mcp-` tag. */
+  createBackup(vmid: number, type: GuestType, opts: BackupCreateOpts): Promise<TaskRef>;
+  /** List backup archives on a storage, optionally filtered to one vmid. */
+  listBackupArchives(storage: string, vmid?: number): Promise<BackupArchive[]>;
+  /** Restore a guest from an archive volid (destructive whole-guest overwrite). */
+  restoreBackup(vmid: number, type: GuestType, volid: string): Promise<TaskRef>;
+  /** Delete one archive volume by volid. */
+  deleteBackupArchive(storage: string, volid: string): Promise<TaskRef>;
 
   /** Which backend answered — for audit notes / diagnostics. */
   readonly kind: "api" | "ssh";

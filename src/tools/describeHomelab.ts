@@ -16,6 +16,7 @@ import {
   parseZpoolStatusX,
   parseFailedUnits,
   parseDockerPs,
+  evaluateSnapshotCapable,
 } from "./censusParsers.js";
 import { ALL_SECTIONS, CENSUS_SCHEMA_VERSION } from "./censusTypes.js";
 import type {
@@ -201,6 +202,13 @@ export async function describeHomelabHandler(
       sections.network = { ifaces, bridges };
     }
 
+    // ADR-008 §5 — storage-type lookup for the snapshotCapable heuristic, built
+    // from the storage section when it was collected (it runs before containers/
+    // vms). Absent ⇒ heuristic falls back to passthrough-only (best-effort).
+    const storageTypeByName = Array.isArray(sections.storage)
+      ? new Map(sections.storage.map((s) => [s.name, s.type]))
+      : undefined;
+
     if (requested.has("containers")) {
       const rows = await getPctRows("containers");
       const entries: GuestEntry[] = [];
@@ -219,7 +227,10 @@ export async function describeHomelabHandler(
             errors
           );
           // Raw (unredacted) here; redaction happens once in finalizeInventory.
-          if (cfgText !== null) entry.config = parseGuestConfig(cfgText);
+          if (cfgText !== null) {
+            entry.config = parseGuestConfig(cfgText);
+            entry.snapshotCapable = evaluateSnapshotCapable(entry.config, storageTypeByName);
+          }
         }
         entries.push(entry);
       }
@@ -252,6 +263,7 @@ export async function describeHomelabHandler(
           if (cfgText !== null) {
             const parsed = parseGuestConfig(cfgText);
             entry.config = parsed;
+            entry.snapshotCapable = evaluateSnapshotCapable(parsed, storageTypeByName);
             agentEnabled = parseAgentEnabled(parsed["agent"]);
           }
         }

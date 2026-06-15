@@ -73,6 +73,28 @@ export const TOOL_MIN_TIER: Record<string, Tier> = {
   revert_file: "companion",
   config_sweep: "companion",
 
+  // ADR-008 — the Docker layer rides the companion-tier `pct exec` plumbing; the
+  // daemon socket is never exposed. A `docker` write target is companion-grade
+  // via assertTargetTier (targetMinTier("docker") = "companion"), so revert_file /
+  // diff_config / list_backups accept the kind without a separate row.
+  docker_ps: "companion",
+  docker_exec: "companion",
+  docker_read_file: "companion",
+  docker_write_file: "companion",
+  docker_logs: "companion",
+
+  // ADR-008 §6 — outcome-level rollback. Snapshot-tier unification: every
+  // service-affecting guest verb (snapshot_*, guest_backup*, compose_redeploy)
+  // lands at companion/MCP-enforced, ONE enforcement story. vzdump is
+  // API-expressible (and rides the API backend when configured), but the mcp-
+  // archive-ownership boundary + retention + confirm gate are MCP-server tripwires
+  // with no RBAC equivalent — so the tier floor stays companion even though ADR §6's
+  // first draft floated operate. A destructive whole-guest restore must not sit
+  // behind RBAC that is blind to the mcp- tag.
+  guest_backup: "companion",
+  guest_backup_restore: "companion",
+  compose_redeploy: "companion",
+
   // root — everything on the host (flag-gated; MCP-enforced).
   execute: "root",
   read_file: "root",
@@ -97,9 +119,11 @@ export function toolsForTier(tier: Tier): string[] {
  * Target-kind tier rule for the two tools whose floor follows their target
  * (ADR-007 §2): a guest target is companion-grade, a host target is root-grade.
  */
-export type TargetKind = "host" | "pct" | "qm";
+export type TargetKind = "host" | "pct" | "qm" | "docker";
 
 export function targetMinTier(kind: TargetKind): Tier {
+  // Only host file ops are root-grade; every guest kind (pct/qm/docker) is
+  // companion-grade (ADR-007 §2; ADR-008 adds docker at the same floor).
   return kind === "host" ? "root" : "companion";
 }
 

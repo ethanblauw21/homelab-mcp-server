@@ -68,6 +68,12 @@ const ConfigSchema = z.object({
     perFileVersionCap: z.number().default(10),
     globalSizeCapBytes: z.number().default(100 * 1024 * 1024), // 100 MB
     diskPressureFailSafe: z.enum(["refuse", "warn"]).default("warn"),
+    // ADR-008 §6 — vzdump (guest_backup). The node storage that holds archives,
+    // and the per-guest cap on server-managed (mcp-) archives. Default 1: vzdump
+    // archives are large and node disk is premium (human-made archives are
+    // invisible to retention, per the snapshot ownership rule).
+    nodeBackupStorage: z.string().default("local"),
+    guestArchivePerGuestCap: z.number().default(1),
   }),
   audit: z.object({
     logPath: z.string(),
@@ -250,6 +256,10 @@ function loadConfig(): Config {
         ? parseInt(process.env.GLOBAL_SIZE_CAP_BYTES)
         : 100 * 1024 * 1024,
       diskPressureFailSafe: (process.env.DISK_PRESSURE_FAIL_SAFE ?? "warn") as "refuse" | "warn",
+      nodeBackupStorage: process.env.NODE_BACKUP_STORAGE ?? "local",
+      guestArchivePerGuestCap: process.env.GUEST_ARCHIVE_PER_GUEST_CAP
+        ? parseInt(process.env.GUEST_ARCHIVE_PER_GUEST_CAP)
+        : 1,
     },
     audit: {
       logPath: process.env.AUDIT_LOG_PATH ?? path.join(LOCAL_DATA_DIR, "audit.jsonl"),

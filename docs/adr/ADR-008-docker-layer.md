@@ -1,6 +1,6 @@
 # ADR-008: The Docker Layer — Container-in-Container Safety, Compose Rollback & Dogfooding Fixes
 
-**Status:** Proposed
+**Status:** Accepted — implemented 2026-06-14 (all 10 action items complete; snapshot-tier deviation resolved at companion)
 **Date:** 2026-06-11
 **Deciders:** Ethan
 **Depends on:** ADR-003 (target descriptors, backup pipeline, `pct pull/push`, snapshot guard), ADR-004 (denylist v2, `computeUnifiedDiff`, size caps, confirm gate), ADR-005 (`tail_log` redaction precedent), ADR-006 (`config_sweep`), ADR-007 (tiers, NodeOps/API backend)
@@ -59,7 +59,7 @@ The `containers`/`vms` sections gain `snapshotCapable: { capable: boolean, reaso
 
 Two complementary answers for snapshot-incapable guests, both honest about their weight:
 
-**`guest_backup`** `{ vmid, mode?: "suspend" | "stop" | "snapshot", note?, confirm: true }` — wraps **vzdump**, which works with device passthrough (suspend/stop modes). ADR-003 rejected vzdump *as the snapshot mechanism* (minutes-scale, heavy); as the **fallback where snapshots are impossible**, it is exactly the right tool, and that distinction is now recorded. Confirm-gated (suspend/stop interrupts service); archives are note-tagged `mcp-`; per-guest retention cap on `mcp-`-tagged archives (default **1** — vzdump archives are large and node disk is premium); human-made archives are invisible to retention, per the snapshot ownership rule. **API-native** (`POST /nodes/<n>/vzdump`) ⇒ **operate tier**, Proxmox-enforced — coordinated with the open snapshot-tier resolution (punch list): both families should land on the same enforcement story.
+**`guest_backup`** `{ vmid, mode?: "suspend" | "stop" | "snapshot", note?, confirm: true }` — wraps **vzdump**, which works with device passthrough (suspend/stop modes). ADR-003 rejected vzdump *as the snapshot mechanism* (minutes-scale, heavy); as the **fallback where snapshots are impossible**, it is exactly the right tool, and that distinction is now recorded. Confirm-gated (suspend/stop interrupts service); archives are note-tagged `mcp-`; per-guest retention cap on `mcp-`-tagged archives (default **1** — vzdump archives are large and node disk is premium); human-made archives are invisible to retention, per the snapshot ownership rule. vzdump *is* API-expressible (`POST /nodes/<n>/vzdump`, and the implementation rides the API backend when configured — "SSH-CLI + API both"), but **the tier floor is companion, not operate** (snapshot-tier resolution, see §"Decision" / Action Item 8): the `mcp-` archive-ownership boundary, per-guest retention, and confirm gate are MCP-server tripwires with no Proxmox-RBAC equivalent — placing a destructive whole-guest restore behind RBAC that is blind to the `mcp-` tag would split the guardrail story. Every service-affecting guest verb (`snapshot_*`, `guest_backup*`, `compose_redeploy`) lands on ONE companion/MCP enforcement story; only the *transport* follows the tool.
 
 **`guest_backup_restore`** `{ vmid, archive, confirm: true, stopIfRunning?: boolean }` — the heaviest hammer in the server: replaces the entire guest from an archive. Gating mirrors `snapshot_rollback` exactly (confirm required; `mcp-`-tagged archives only; refuses a running guest without `stopIfRunning`; restarts iff it was running); audited `isLargeChange: true` with prior run-state.
 
@@ -81,7 +81,7 @@ Rejected: a reachable Docker socket is root-equivalent on that host and a standi
 
 ## Security & Audit Model
 
-- No new trust surface: Docker operations are command construction over the existing companion-tier SSH path (or operate-tier API for vzdump); the daemon socket is never exposed; container names and paths are charset/path-validated; file content travels SFTP + `docker cp`, never argv.
+- No new trust surface: Docker operations are command construction over the existing companion-tier SSH path (vzdump rides the companion-tier `NodeOps` — API-or-SSH transport, companion floor); the daemon socket is never exposed; container names and paths are charset/path-validated; file content travels SFTP + `docker cp`, never argv.
 - `docker_exec` is the fourth consumer of denylist v2 + the confirm gate — every exec path in the server now shares one guardrail.
 - `docker_logs` joins `tail_log` as a mandatory-redaction output; `docker_read_file` deliberately does **not** redact (fidelity is the point of a file read — reading a config to use its API key is the operator's legitimate choice), which is consistent with `pct_read_file`/`read_file`.
 - `guest_backup_restore` adopts the confirm-gate + `mcp-` ownership boundary verbatim; the gate pattern now covers stop, rollback, restore, and redeploy — the complete set of service-affecting verbs.
@@ -110,16 +110,16 @@ Rejected: a reachable Docker socket is root-equivalent on that host and a standi
 
 ## Action Items
 
-1. [ ] **§4 first** (it's a bug): remove heavy-pattern gating, write the regression suite, ship independently of the rest.
-2. [ ] Extend `BackupTarget`/`targetKeyString`/meta routing/`targetMinTier` with the `docker` kind.
-3. [ ] Implement the mounts parser + path-resolution fast path (pure, fixtures from real `docker inspect` output).
-4. [ ] Implement `docker_read_file`/`docker_write_file` (fast + slow paths, ownership restoration, caps) sharing the pipeline stages.
-5. [ ] Implement `docker_ps`, `docker_exec` (denylist v2 + confirm), `docker_logs` (validation + mandatory redaction).
-6. [ ] Add diff-on-write to all three write handlers; amend `diff_config`'s description.
-7. [ ] Census `snapshotCapable` heuristic + drift handling; file as the ADR-002 amendment.
-8. [ ] Implement `guest_backup` (API-native, operate) + retention + `guest_backup_restore` (gated); resolve jointly with the snapshot-tier deviation so both land on one enforcement story.
-9. [ ] Implement `compose_redeploy`; document the revert+redeploy rollback runbook and image-pinning practice.
-10. [ ] Update CLAUDE.md (tool table, fourth exec path, descriptor kinds) and the tier registry snapshots.
+1. [x] **§4 first** (it's a bug): remove heavy-pattern gating, write the regression suite, ship independently of the rest.
+2. [x] Extend `BackupTarget`/`targetKeyString`/meta routing/`targetMinTier` with the `docker` kind.
+3. [x] Implement the mounts parser + path-resolution fast path (pure, fixtures from real `docker inspect` output).
+4. [x] Implement `docker_read_file`/`docker_write_file` (fast + slow paths, ownership restoration, caps) sharing the pipeline stages.
+5. [x] Implement `docker_ps`, `docker_exec` (denylist v2 + confirm), `docker_logs` (validation + mandatory redaction).
+6. [x] Add diff-on-write to all three write handlers; amend `diff_config`'s description.
+7. [x] Census `snapshotCapable` heuristic + drift handling; file as the ADR-002 amendment.
+8. [x] Implement `guest_backup` + retention + `guest_backup_restore` (gated). **Resolved jointly with the snapshot-tier deviation: landed at companion, not operate** — vzdump rides API-or-SSH via `NodeOps`, but the `mcp-` ownership/retention/confirm guardrails are MCP-server tripwires with no RBAC equivalent, so every service-affecting guest verb shares ONE companion/MCP enforcement story (rationale inline in `tiers/registry.ts` + `tools/backupTools.ts`).
+9. [x] Implement `compose_redeploy`; document the revert+redeploy rollback runbook and image-pinning practice.
+10. [x] Update CLAUDE.md (tool table, fourth exec path, descriptor kinds, §6 + snapshot-tier unification) and the tier registry snapshots.
 
 ## References
 

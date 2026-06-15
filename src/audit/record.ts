@@ -19,10 +19,16 @@ export type AuditTool =
   | "qm_exec"
   | "qm_read_file"
   | "qm_write_file"
+  | "docker_exec"
+  | "docker_read_file"
+  | "docker_write_file"
   | "config_sweep"
   | "guest_start"
   | "guest_stop"
-  | "guest_restart";
+  | "guest_restart"
+  | "guest_backup"
+  | "guest_backup_restore"
+  | "compose_redeploy";
 
 export interface AuditRecord {
   id: string;
@@ -30,6 +36,11 @@ export interface AuditRecord {
   tool: AuditTool;
   host?: string;
   vmid?: number;
+  // ADR-008 — Docker tools record the container *name* (the stable identity used
+  // for the backup descriptor) and the container *id* at time-of-write (for
+  // forensics: names survive recreation, ids do not).
+  container?: string;
+  containerId?: string;
   path?: string;
   prevBackup?: string;
   prevSha256?: string;

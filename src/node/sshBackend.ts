@@ -16,7 +16,16 @@ import type {
   NodeStatusInfo,
   StorageStatusInfo,
   AptUpdateInfo,
+  BackupArchive,
+  BackupCreateOpts,
 } from "./nodeOps.js";
+import {
+  parseArchiveContent,
+  buildVzdumpCommand,
+  buildListBackupsCommand,
+  buildRestoreCommand,
+  buildArchiveFreeCommand,
+} from "../tools/backups.js";
 import { parsePctList } from "../tools/pctHelpers.js";
 import { parseQmList, parseLoadAvg, parseFreeBytes, parsePvesmStatus } from "../tools/censusParsers.js";
 import {
@@ -45,12 +54,26 @@ export class SshBackend implements NodeOps {
     private readonly timeoutMs: number
   ) {}
 
+  /** Cached PVE node name (for `pvesh` paths). Proxmox pins it to `hostname`. */
+  private nodeName?: string;
+
   private async exec(cmd: string): Promise<string> {
     const res = await this.transport.exec(cmd, this.timeoutMs);
     if (res.exitCode !== 0) {
       throw new Error(`\`${cmd}\` failed (exit ${res.exitCode}): ${res.stderr.trim()}`);
     }
     return res.stdout;
+  }
+
+  /** Resolve + charset-validate the node name once (used in `pvesh` paths). */
+  private async resolveNode(): Promise<string> {
+    if (this.nodeName !== undefined) return this.nodeName;
+    const name = (await this.exec("hostname")).trim().split("\n")[0]!.trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(name)) {
+      throw new Error(`Refusing to use an unexpected node name from hostname: ${JSON.stringify(name)}`);
+    }
+    this.nodeName = name;
+    return name;
   }
 
   async listGuests(): Promise<Guest[]> {
@@ -142,5 +165,43 @@ export class SshBackend implements NodeOps {
       if (m) updates.push({ package: m[1]!, version: m[2]! });
     }
     return updates;
+  }
+
+  // ADR-008 §6 — vzdump archive lifecycle over the CLI (+ pvesh JSON for listing,
+  // which is the only CLI surface that returns the notes the mcp- tag lives in).
+
+  async createBackup(vmid: number, _type: GuestType, opts: BackupCreateOpts): Promise<TaskRef> {
+    await this.exec(buildVzdumpCommand(vmid, opts));
+    return { upid: `ssh:vzdump:${vmid}` };
+  }
+
+  async listBackupArchives(storage: string, vmid?: number): Promise<BackupArchive[]> {
+    const node = await this.resolveNode();
+    const out = await this.exec(buildListBackupsCommand(node, storage));
+    let data: unknown;
+    try {
+      data = JSON.parse(out);
+    } catch {
+      data = [];
+    }
+    const all = parseArchiveContent(data).map((a) => ({
+      volid: a.volid,
+      vmid: a.vmid,
+      ctime: a.ctime,
+      sizeBytes: a.sizeBytes,
+      notes: a.notes,
+      format: a.format,
+    }));
+    return vmid === undefined ? all : all.filter((a) => a.vmid === vmid);
+  }
+
+  async restoreBackup(vmid: number, type: GuestType, volid: string): Promise<TaskRef> {
+    await this.exec(buildRestoreCommand(type, vmid, volid));
+    return { upid: `ssh:restore:${type}:${vmid}` };
+  }
+
+  async deleteBackupArchive(_storage: string, volid: string): Promise<TaskRef> {
+    await this.exec(buildArchiveFreeCommand(volid));
+    return { upid: `ssh:free:${volid}` };
   }
 }

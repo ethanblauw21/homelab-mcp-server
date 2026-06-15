@@ -23,6 +23,11 @@ function fileKey(remotePath: string): string {
   return crypto.createHash("sha256").update(remotePath).digest("hex").slice(0, 16);
 }
 
+// fileKey for a docker target (descriptor docker:<vmid>:<container>:<path>).
+function dockerKey(vmid: number, container: string, remotePath: string): string {
+  return crypto.createHash("sha256").update(`docker:${vmid}:${container}:${remotePath}`).digest("hex").slice(0, 16);
+}
+
 function seedGzEntry(keyDir: string, ts: string, content = "data"): void {
   const gzBlob = zlib.gzipSync(Buffer.from(content));
   fs.writeFileSync(path.join(keyDir, `${ts}.gz`), gzBlob);
@@ -124,6 +129,26 @@ describe("listBackupsHandler", () => {
     const metaOnly = result.versions.filter((v) => !v.revertible);
     expect(revertible).toHaveLength(1);
     expect(metaOnly).toHaveLength(1);
+  });
+
+  it("lists docker backups keyed on docker:<vmid>:<container>:<path>", async () => {
+    const remotePath = "/config/app.conf";
+    const keyDir = path.join(cfg.backup.baseDir, dockerKey(101, "web", remotePath));
+    fs.mkdirSync(keyDir, { recursive: true });
+    seedGzEntry(keyDir, "2024-01-01T00-00-00-000Z");
+
+    const result = await listBackupsHandler({ path: remotePath, vmid: 101, container: "web" }, backupStore, cfg);
+    expect(result.container).toBe("web");
+    expect(result.versions).toHaveLength(1);
+    // A pct-scoped query for the same vmid+path must NOT collide with the docker key.
+    const pctResult = await listBackupsHandler({ path: remotePath, vmid: 101 }, backupStore, cfg);
+    expect(pctResult.versions).toHaveLength(0);
+  });
+
+  it("rejects a container without a vmid", async () => {
+    await expect(
+      listBackupsHandler({ path: "/config/app.conf", container: "web" }, backupStore, cfg)
+    ).rejects.toThrow(/requires `vmid`/i);
   });
 
   it("rejects a relative path", async () => {

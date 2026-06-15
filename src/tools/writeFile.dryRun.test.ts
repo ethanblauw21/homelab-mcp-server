@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { writeFileHandler, type WriteFileDryRunResult } from "./writeFile.js";
+import { writeFileHandler, type WriteFileDryRunResult, type WriteFileResult } from "./writeFile.js";
 import { FakeTransport } from "../ssh/fakeTransport.js";
 import { BackupStore } from "../backup/store.js";
 import { AuditLog } from "../audit/log.js";
@@ -84,5 +84,58 @@ describe("writeFileHandler dryRun (ADR-004 §6)", () => {
 
     expect(r.diff).toBeNull();
     expect(r.note).toMatch(/binary/i);
+  });
+});
+
+describe("writeFileHandler diff-on-write (ADR-008 §3)", () => {
+  let tmpDir: string;
+  let transport: FakeTransport;
+  let cfg: Config;
+  let backupStore: BackupStore;
+  let audit: AuditLog;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "write-diff-"));
+    transport = new FakeTransport();
+    cfg = makeConfig(tmpDir);
+    backupStore = new BackupStore(cfg.backup);
+    audit = new AuditLog(cfg.audit.logPath);
+  });
+
+  it("returns a diff against prior content on a real overwrite", async () => {
+    transport.setFile("/etc/app.conf", "a\nb\nc\n");
+
+    const r = (await writeFileHandler(
+      { path: "/etc/app.conf", content: "a\nB\nc\n", encoding: "utf8" },
+      transport, audit, backupStore, cfg
+    )) as WriteFileResult;
+
+    expect(r.newFile).toBe(false);
+    expect(r.diff).toContain("- b");
+    expect(r.diff).toContain("+ B");
+    // The write actually happened.
+    expect((await transport.readFile("/etc/app.conf")).toString()).toBe("a\nB\nc\n");
+    expect(audit.readAll()).toHaveLength(1);
+  });
+
+  it("returns newFile=true and a diff against empty for a fresh file", async () => {
+    const r = (await writeFileHandler(
+      { path: "/etc/new.conf", content: "hello\n", encoding: "utf8" },
+      transport, audit, backupStore, cfg
+    )) as WriteFileResult;
+
+    expect(r.newFile).toBe(true);
+    expect(r.diff).toContain("+ hello");
+  });
+
+  it("returns diff=null for binary content on a real write", async () => {
+    const bin = Buffer.from([0x00, 0x01, 0x02, 0xff]).toString("base64");
+    const r = (await writeFileHandler(
+      { path: "/etc/blob.bin", content: bin, encoding: "base64" },
+      transport, audit, backupStore, cfg
+    )) as WriteFileResult;
+
+    expect(r.diff).toBeNull();
+    expect(r.newFile).toBe(true);
   });
 });

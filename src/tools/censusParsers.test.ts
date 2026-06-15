@@ -13,6 +13,9 @@ import {
   parseZpoolStatusX,
   parseFailedUnits,
   parseDockerPs,
+  hasDevicePassthrough,
+  rootfsStorageName,
+  evaluateSnapshotCapable,
 } from "./censusParsers.js";
 
 describe("parsePveVersion", () => {
@@ -229,5 +232,77 @@ describe("parseDockerPs", () => {
       image: "qmcgaw/gluetun:latest",
       status: "Up 3 days (healthy)",
     });
+  });
+});
+
+describe("hasDevicePassthrough (ADR-008 §5)", () => {
+  it("detects an LXC devN device", () => {
+    expect(hasDevicePassthrough({ dev0: "/dev/dri/renderD128,gid=104" })).toBe(true);
+  });
+  it("detects an lxc.cgroup2 device rule", () => {
+    expect(hasDevicePassthrough({ "lxc.cgroup2.devices.allow": "c 226:* rwm" })).toBe(true);
+  });
+  it("detects a VM hostpci passthrough", () => {
+    expect(hasDevicePassthrough({ hostpci0: "0000:01:00,pcie=1" })).toBe(true);
+  });
+  it("detects an lxc.mount.entry /dev bind", () => {
+    expect(hasDevicePassthrough({ "lxc.mount.entry": "/dev/dri dev/dri none bind,optional,create=dir" })).toBe(true);
+  });
+  it("returns false for a plain config (no devices)", () => {
+    expect(hasDevicePassthrough({ rootfs: "local-lvm:subvol-101-disk-0,size=8G", memory: "2048" })).toBe(false);
+  });
+  it("does not treat a non-device lxc.mount.entry as passthrough", () => {
+    expect(hasDevicePassthrough({ "lxc.mount.entry": "/srv/data srv/data none bind 0 0" })).toBe(false);
+  });
+});
+
+describe("rootfsStorageName (ADR-008 §5)", () => {
+  it("extracts the LXC rootfs storage name", () => {
+    expect(rootfsStorageName({ rootfs: "local-lvm:subvol-101-disk-0,size=8G" })).toBe("local-lvm");
+  });
+  it("extracts a VM's first disk storage, skipping cdrom and cloudinit", () => {
+    expect(
+      rootfsStorageName({
+        ide2: "local:iso/debian.iso,media=cdrom",
+        scsi0: "local-zfs:vm-100-disk-0,size=32G",
+      })
+    ).toBe("local-zfs");
+  });
+  it("returns undefined when no disk reference is present", () => {
+    expect(rootfsStorageName({ memory: "2048", cores: "2" })).toBeUndefined();
+  });
+});
+
+describe("evaluateSnapshotCapable (ADR-008 §5)", () => {
+  const storage = new Map([
+    ["local-lvm", "lvmthin"],
+    ["local-zfs", "zfspool"],
+    ["backup", "dir"],
+  ]);
+
+  it("lvmthin rootfs + no devices ⇒ capable", () => {
+    const r = evaluateSnapshotCapable({ rootfs: "local-lvm:subvol-101-disk-0,size=8G" }, storage);
+    expect(r.capable).toBe(true);
+    expect(r.reason).toBeUndefined();
+  });
+
+  it("dir storage ⇒ not capable with a reason", () => {
+    const r = evaluateSnapshotCapable({ rootfs: "backup:subvol-9-disk-0,size=8G" }, storage);
+    expect(r.capable).toBe(false);
+    expect(r.reason).toMatch(/dir storage/i);
+  });
+
+  it("device passthrough ⇒ not capable, reason 'device passthrough' (checked before storage)", () => {
+    const r = evaluateSnapshotCapable(
+      { rootfs: "local-lvm:subvol-101-disk-0,size=8G", dev0: "/dev/dri/renderD128" },
+      storage
+    );
+    expect(r.capable).toBe(false);
+    expect(r.reason).toBe("device passthrough");
+  });
+
+  it("best-effort capable when no storage map is supplied and no passthrough", () => {
+    const r = evaluateSnapshotCapable({ rootfs: "backup:subvol-9-disk-0,size=8G" });
+    expect(r.capable).toBe(true);
   });
 });

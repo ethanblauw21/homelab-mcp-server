@@ -33,6 +33,10 @@ class FakeNode implements NodeOps {
   async createSnapshot() { return { upid: "" }; }
   async rollbackSnapshot() { return { upid: "" }; }
   async deleteSnapshot() { return { upid: "" }; }
+  async createBackup() { return { upid: "" }; }
+  async listBackupArchives() { return []; }
+  async restoreBackup() { return { upid: "" }; }
+  async deleteBackupArchive() { return { upid: "" }; }
   async nodeStatus() { return {}; }
   async storageStatus() { return []; }
   async aptUpdates() { return []; }

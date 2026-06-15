@@ -16,6 +16,7 @@ function makeConfig(tmpDir: string): Config {
     audit: { logPath: path.join(tmpDir, "audit.jsonl") },
     container: { newFileMode: "0644", newFileUid: 0, newFileGid: 0, nodeTempDir: "/tmp" },
     snapshot: { perGuestCap: 3, vmstate: false },
+    tools: { readFileMaxBytes: 2 * 1024 * 1024, dryRunDiffMaxLines: 200 },
     guardrails: { commandDenylist: [], pathAllowlist: undefined, pathDenylist: [] },
   };
 }

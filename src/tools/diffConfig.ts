@@ -5,6 +5,7 @@ import type { Config } from "../config.js";
 import { sha256 } from "../audit/record.js";
 import { computeUnifiedDiff } from "../util/diff.js";
 import { assertContainerRunning, pullContainerFile } from "./pctFiles.js";
+import { resolveDockerContainer, readDockerFile } from "./dockerFiles.js";
 
 export const DiffConfigInputSchema = z
   .object({
@@ -145,6 +146,22 @@ export async function diffConfigHandler(
       transport,
       target.vmid,
       target.remotePath,
+      cfg.container.nodeTempDir,
+      timeoutMs
+    );
+    if (content) currentContent = content;
+  } else if (target.kind === "docker") {
+    if (target.vmid === undefined || !target.container) {
+      throw new Error("Docker backup is missing its vmid/container; cannot read current content.");
+    }
+    await assertContainerRunning(transport, target.vmid, timeoutMs);
+    const inspect = await resolveDockerContainer(transport, target.vmid, target.container, timeoutMs);
+    const { content } = await readDockerFile(
+      transport,
+      target.vmid,
+      target.container,
+      target.remotePath,
+      inspect,
       cfg.container.nodeTempDir,
       timeoutMs
     );

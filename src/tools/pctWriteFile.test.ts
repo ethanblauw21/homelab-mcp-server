@@ -46,6 +46,9 @@ describe("pctWriteFileHandler", () => {
     );
 
     expect(res.vmid).toBe(101);
+    // ADR-008 §3 diff-on-write: new file ⇒ newFile true, diff against empty.
+    expect("newFile" in res && res.newFile).toBe(true);
+    expect("diff" in res && res.diff).toContain("+ new body");
     expect((await t.readFile("/tmp/tmp.W")).toString()).toBe("new body");
     const records = audit.readAll();
     expect(records[0].tool).toBe("pct_write_file");
@@ -67,6 +70,9 @@ describe("pctWriteFileHandler", () => {
     );
 
     expect(res.backupPath).toBeTruthy();
+    // ADR-008 §3 diff-on-write: overwrite ⇒ newFile false, diff old→new.
+    expect("newFile" in res && res.newFile).toBe(false);
+    expect("diff" in res && res.diff).toContain("+ new body");
     // The push used the stat'd perms (640 0:33) — assert by the bytes staged.
     expect((await t.readFile("/tmp/tmp.W")).toString()).toBe("new body");
     const records = audit.readAll();

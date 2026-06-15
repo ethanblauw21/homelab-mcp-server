@@ -44,6 +44,18 @@ function fakeNode(overrides: Partial<NodeOps> = {}): NodeOps {
     async deleteSnapshot() {
       return { upid: "x" };
     },
+    async createBackup() {
+      return { upid: "x" };
+    },
+    async listBackupArchives() {
+      return [];
+    },
+    async restoreBackup() {
+      return { upid: "x" };
+    },
+    async deleteBackupArchive() {
+      return { upid: "x" };
+    },
     async nodeStatus(): Promise<NodeStatusInfo> {
       return {
         loadavg: [0.1, 0.2, 0.3],
@@ -215,6 +227,49 @@ describe("describeHomelabHandler — full depth redaction", () => {
     expect(portainer?.config?.password).toBe("[REDACTED:password]");
     expect(JSON.stringify(snap)).not.toContain("supersecret");
     expect(snap.redactions).toBe(1);
+
+    // ADR-008 §5 — snapshotCapable is populated at full depth. Neither config
+    // carries a device or a storage map (storage section not requested), so the
+    // heuristic returns best-effort capable.
+    expect(gluetun?.snapshotCapable).toEqual({ capable: true });
+    expect(portainer?.snapshotCapable).toEqual({ capable: true });
+  });
+
+  it("marks a device-passthrough container snapshot-incapable (ADR-008 §5)", async () => {
+    const t = baseTransport();
+    t.setExecResult("pct config 101", {
+      stdout: ["arch: amd64", "rootfs: local-lvm:subvol-101-disk-0,size=8G", "dev0: /dev/dri/renderD128,gid=104"].join("\n"),
+      stderr: "",
+      exitCode: 0,
+    });
+    t.setExecResult("pct config 102", { stdout: "arch: amd64\nrootfs: local-lvm:subvol-102-disk-0,size=8G", stderr: "", exitCode: 0 });
+    const store = new CensusStore(tmpDir, 30);
+    const snap = await describeHomelabHandler(parse({ depth: "full", sections: ["containers"] }), t, store, makeConfig(tmpDir));
+
+    const gpu = snap.sections.containers?.find((c) => c.vmid === 101);
+    expect(gpu?.snapshotCapable).toEqual({ capable: false, reason: "device passthrough" });
+    const plain = snap.sections.containers?.find((c) => c.vmid === 102);
+    expect(plain?.snapshotCapable).toEqual({ capable: true });
+  });
+
+  it("marks a dir-backed rootfs snapshot-incapable when the storage section is observed (ADR-008 §5)", async () => {
+    const t = baseTransport();
+    // local is dir-typed in baseTransport's pvesm output; back CT101's rootfs on it.
+    t.setExecResult("pct config 101", { stdout: "arch: amd64\nrootfs: local:subvol-101-disk-0,size=8G", stderr: "", exitCode: 0 });
+    t.setExecResult("pct config 102", { stdout: "arch: amd64\nrootfs: local-lvm:subvol-102-disk-0,size=8G", stderr: "", exitCode: 0 });
+    const store = new CensusStore(tmpDir, 30);
+    const snap = await describeHomelabHandler(
+      parse({ depth: "full", sections: ["storage", "containers"] }),
+      t,
+      store,
+      makeConfig(tmpDir)
+    );
+
+    const dirBacked = snap.sections.containers?.find((c) => c.vmid === 101);
+    expect(dirBacked?.snapshotCapable?.capable).toBe(false);
+    expect(dirBacked?.snapshotCapable?.reason).toMatch(/dir storage/i);
+    const lvm = snap.sections.containers?.find((c) => c.vmid === 102);
+    expect(lvm?.snapshotCapable).toEqual({ capable: true });
   });
 });
 

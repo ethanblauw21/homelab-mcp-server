@@ -13,6 +13,13 @@ import {
   type GuestPerms,
 } from "./pctFiles.js";
 import { assertAgentAvailable, resolveNodeName, readVmFile, writeVmFile } from "./qmFiles.js";
+import {
+  resolveDockerContainer,
+  readDockerFile,
+  statDockerPerms,
+  writeDockerFile,
+} from "./dockerFiles.js";
+import type { DockerInspect } from "./dockerHelpers.js";
 import type { ConfigHistory } from "../history/configHistory.js";
 
 export const RevertFileInputSchema = z.object({
@@ -76,6 +83,9 @@ export async function revertFileHandler(
   // Resolved lazily for qm targets and reused for the write-back below so the
   // node name is looked up once per revert.
   let qmNode: string | undefined;
+  // Resolved lazily for docker targets (id + mounts) and reused for the write-back
+  // so the container is inspected once per revert.
+  let dockerInspect: DockerInspect | undefined;
 
   if (target.kind === "pct") {
     if (target.vmid === undefined) {
@@ -100,6 +110,25 @@ export async function revertFileHandler(
     await assertAgentAvailable(transport, target.vmid, timeoutMs);
     qmNode = await resolveNodeName(transport, timeoutMs);
     const { content } = await readVmFile(transport, qmNode, target.vmid, target.remotePath, timeoutMs);
+    if (content) {
+      currentContent = content;
+      prevHash = sha256(content);
+    }
+  } else if (target.kind === "docker") {
+    if (target.vmid === undefined || !target.container) {
+      throw new Error("Docker backup is missing its vmid/container; cannot route revert");
+    }
+    await assertContainerRunning(transport, target.vmid, timeoutMs);
+    dockerInspect = await resolveDockerContainer(transport, target.vmid, target.container, timeoutMs);
+    const { content } = await readDockerFile(
+      transport,
+      target.vmid,
+      target.container,
+      target.remotePath,
+      dockerInspect,
+      cfg.container.nodeTempDir,
+      timeoutMs
+    );
     if (content) {
       currentContent = content;
       prevHash = sha256(content);
@@ -138,16 +167,44 @@ export async function revertFileHandler(
     // Agent precheck + node resolution already happened during the read above;
     // reuse the resolved node. (No perm preservation — the agent write takes none.)
     await writeVmFile(transport, qmNode!, target.vmid!, target.remotePath, restored, timeoutMs);
+  } else if (target.kind === "docker") {
+    // Reuse the inspect from the read above. Slow-path ownership restoration needs
+    // perms captured before the overwrite; the bind fast path follows the LXC file.
+    const bindFast = dockerInspect!.mounts.some(
+      (m) => m.type === "bind" && (target.remotePath === m.destination || target.remotePath.startsWith(m.destination.replace(/\/+$/, "") + "/"))
+    );
+    const prevPerms = bindFast
+      ? null
+      : await statDockerPerms(transport, target.vmid!, target.container!, target.remotePath, timeoutMs);
+    await writeDockerFile(
+      transport,
+      target.vmid!,
+      target.container!,
+      target.remotePath,
+      restored,
+      dockerInspect!,
+      prevPerms,
+      { mode: cfg.container.newFileMode, uid: cfg.container.newFileUid, gid: cfg.container.newFileGid },
+      cfg.container.nodeTempDir,
+      timeoutMs
+    );
   } else {
     await transport.writeFile(target.remotePath, restored);
   }
 
-  const vmid = target.kind === "pct" || target.kind === "qm" ? target.vmid : undefined;
+  const vmid =
+    target.kind === "pct" || target.kind === "qm" || target.kind === "docker"
+      ? target.vmid
+      : undefined;
 
   const record = buildAuditRecord({
     tool: "revert_file",
     host: cfg.ssh.host,
     vmid,
+    ...(target.kind === "docker" && {
+      container: target.container,
+      containerId: dockerInspect?.id || undefined,
+    }),
     path: target.remotePath,
     prevSha256: prevHash,
     newSha256: sha256(restored),

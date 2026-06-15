@@ -37,6 +37,10 @@ export interface PctWriteFileResult {
   auditId: string;
   revertible: boolean;
   vmid: number;
+  // ADR-008 §3 — diff-on-write (new-file ⇒ diff vs empty; binary ⇒ diff: null).
+  newFile: boolean;
+  diff: string | null;
+  diffTruncated?: boolean;
 }
 
 export interface PctWriteFileDryRunResult {
@@ -95,6 +99,17 @@ export async function pctWriteFileHandler(
     cfg.backup.largeFileBytesThreshold
   );
 
+  // Diff-on-write (ADR-008 §3): computed once, shared by dryRun + the real push.
+  const diffable =
+    isTextContent(newContent) && (isNewFile || (prevContent !== null && isTextContent(prevContent)));
+  const diff = diffable
+    ? computeUnifiedDiff(
+        prevContent ? prevContent.toString("utf8") : "",
+        newContent.toString("utf8"),
+        cfg.tools.dryRunDiffMaxLines
+      )
+    : null;
+
   // dryRun: run the full pipeline READ-ONLY and return a preview. No push, no
   // backup stored, no audit record — a dry run has zero side effects (ADR-004 §6).
   if (input.dryRun) {
@@ -108,16 +123,6 @@ export async function pctWriteFileHandler(
       largeFilePolicy: cfg.backup.largeFilePolicy,
       existingHashToPaths: existingHashMap,
     });
-
-    const diffable =
-      isTextContent(newContent) && (isNewFile || (prevContent !== null && isTextContent(prevContent)));
-    const diff = diffable
-      ? computeUnifiedDiff(
-          prevContent ? prevContent.toString("utf8") : "",
-          newContent.toString("utf8"),
-          cfg.tools.dryRunDiffMaxLines
-        )
-      : null;
 
     return {
       dryRun: true,
@@ -217,5 +222,8 @@ export async function pctWriteFileHandler(
     auditId: record.id,
     revertible: backupResult.revertible,
     vmid: input.vmid,
+    newFile: isNewFile,
+    diff: diff ? diff.diff : null,
+    diffTruncated: diff ? diff.truncated : undefined,
   };
 }
