@@ -428,4 +428,147 @@ describe("selectBackupKind", () => {
       expect(kind.type).toBe("gzip-full");
     });
   });
+
+  // --- Mutation-hardening: targeted kills for surviving mutants ---
+
+  describe("guard precision (mutation-hardening)", () => {
+    it("with a non-null prevHash but null prevContent, falls back to gzip-full (no diff attempt)", async () => {
+      // Kills the `prevContent !== null` → `true` mutant on the normal-text branch:
+      // the mutant would call computeReverseDiff(newContent, null) and crash on null.
+      const kind = await selectBackupKind(
+        makeInput({
+          newContent: Buffer.from("some new text"),
+          prevContent: null,
+          prevHash: "a-non-null-hash",
+          isText: true,
+        })
+      );
+      expect(kind.type).toBe("gzip-full");
+    });
+  });
+
+  describe("reverse-diff is byte-faithful for multibyte UTF-8 (encoding mutation-hardening)", () => {
+    it("roundtrips multibyte content exactly through both encode sites", async () => {
+      // Kills the two `"utf8"` → `""` StringLiteral mutants (envelope JSON encode at
+      // computeReverseDiff, and the applyHunks output encode). ASCII content survives a
+      // wrong/empty encoding; multibyte does not — the restored bytes diverge or throw.
+      const newContent = Buffer.from("α\nβ\nγ", "utf8");
+      const prevContent = Buffer.from("α\nДЕЛЬТА δ ☃\nγ", "utf8");
+      const kind = await selectBackupKind(
+        makeInput({ newContent, prevContent, prevHash: "h", isText: true })
+      );
+      expect(kind.type).toBe("gzip-diff");
+      if (kind.type === "gzip-diff") {
+        const restored = await applyReverseDiff(kind.blob, newContent);
+        expect(restored.equals(prevContent)).toBe(true);
+      }
+    });
+  });
+
+  describe("LCS produces the MINIMAL hunk set (DP-table mutation-hardening)", () => {
+    it("a single changed line in a 100-line file yields exactly 4 hunks", async () => {
+      // A suboptimal LCS (any corrupted dp recurrence / loop bound / max-pick) emits
+      // extra delete+insert hunks instead of one big keep run. Asserting the EXACT
+      // optimal structure kills the dp mutants that mere roundtrip checks cannot.
+      const newLines = Array.from({ length: 100 }, (_, i) => `line-${String(i).padStart(3, "0")}`);
+      const prevLines = [...newLines];
+      prevLines[50] = "line-050-OLD-VERSION";
+      const newContent = Buffer.from(newLines.join("\n"), "utf8");
+      const prevContent = Buffer.from(prevLines.join("\n"), "utf8");
+
+      const kind = await selectBackupKind(
+        makeInput({ newContent, prevContent, prevHash: "h", isText: true })
+      );
+      expect(kind.type).toBe("gzip-diff");
+      if (kind.type === "gzip-diff") {
+        const envelope = JSON.parse((await gunzip(kind.blob)).toString("utf8"));
+        const hunks = envelope.hunks as Array<Record<string, unknown>>;
+        expect(hunks).toHaveLength(4);
+        expect(hunks[0]).toEqual({ k: 50 });
+        expect(hunks[3]).toEqual({ k: 49 });
+        const middle = [hunks[1], hunks[2]];
+        expect(middle).toContainEqual({ d: 1 });
+        expect(middle).toContainEqual({ i: ["line-050-OLD-VERSION"] });
+        // And it still restores exactly.
+        const restored = await applyReverseDiff(kind.blob, newContent);
+        expect(restored).toEqual(prevContent);
+      }
+    });
+
+    // Transposition inputs where the OPTIMAL alignment is not positional: the dp table
+    // (not the backtrack's equality check) decides whether the long common run is found.
+    // A corrupted recurrence / loop bound / max-pick fails to keep the run, so asserting
+    // the run survives — and that the diff still roundtrips — kills those dp mutants.
+    const keptRun = (hunks: Array<Record<string, unknown>>) =>
+      hunks.filter((h) => "k" in h).reduce((sum, h) => sum + (h as { k: number }).k, 0);
+
+    it("keeps the A,B,C run when X moves from the front to the back", async () => {
+      const newContent = Buffer.from(["X", "A", "B", "C"].join("\n"), "utf8");
+      const prevContent = Buffer.from(["A", "B", "C", "X"].join("\n"), "utf8");
+      const kind = await selectBackupKind(
+        makeInput({ newContent, prevContent, prevHash: "h", isText: true })
+      );
+      expect(kind.type).toBe("gzip-diff");
+      if (kind.type === "gzip-diff") {
+        const envelope = JSON.parse((await gunzip(kind.blob)).toString("utf8"));
+        const hunks = envelope.hunks as Array<Record<string, unknown>>;
+        // Optimal LCS length is 3 (A,B,C). Any suboptimal dp keeps fewer.
+        expect(keptRun(hunks)).toBe(3);
+        expect(hunks).toContainEqual({ k: 3 });
+        const restored = await applyReverseDiff(kind.blob, newContent);
+        expect(restored).toEqual(prevContent);
+      }
+    });
+
+    it("keeps the A,B,C run when X moves from the back to the front (last-row/col coverage)", async () => {
+      // Mirror of the above so the participating LCS lines touch the final dp row AND
+      // column — this is what kills the `i <= n`/`j <= m` loop-bound mutants.
+      const newContent = Buffer.from(["A", "B", "C", "X"].join("\n"), "utf8");
+      const prevContent = Buffer.from(["X", "A", "B", "C"].join("\n"), "utf8");
+      const kind = await selectBackupKind(
+        makeInput({ newContent, prevContent, prevHash: "h", isText: true })
+      );
+      expect(kind.type).toBe("gzip-diff");
+      if (kind.type === "gzip-diff") {
+        const envelope = JSON.parse((await gunzip(kind.blob)).toString("utf8"));
+        const hunks = envelope.hunks as Array<Record<string, unknown>>;
+        expect(keptRun(hunks)).toBe(3);
+        expect(hunks).toContainEqual({ k: 3 });
+        const restored = await applyReverseDiff(kind.blob, newContent);
+        expect(restored).toEqual(prevContent);
+      }
+    });
+  });
+
+  describe("applyReverseDiff — error messages are specific (string mutation-hardening)", () => {
+    it("the delta-format-without-current error names the remedy", async () => {
+      // Kills the line-167 `"Ensure the target file exists on the host."` → `""` mutant.
+      const kind = await selectBackupKind(
+        makeInput({ newContent: Buffer.from("v2"), prevContent: Buffer.from("v1"), prevHash: "h", isText: true })
+      );
+      expect(kind.type).toBe("gzip-diff");
+      if (kind.type === "gzip-diff") {
+        await expect(applyReverseDiff(kind.blob)).rejects.toThrow(/delta format/i);
+        await expect(applyReverseDiff(kind.blob)).rejects.toThrow(/Ensure the target file exists on the host/);
+      }
+    });
+
+    it("the stale-base error shows TRUNCATED before/after hashes and the recovery hint", async () => {
+      // Kills the line-174 mutants (two `.slice(0, 8)` removals → full hash, and the
+      // whole-fragment emptying) plus the line-175 recovery-hint emptying.
+      const newContent = Buffer.from("version two content");
+      const kind = await selectBackupKind(
+        makeInput({ newContent, prevContent: Buffer.from("version one content"), prevHash: "h", isText: true })
+      );
+      expect(kind.type).toBe("gzip-diff");
+      if (kind.type === "gzip-diff") {
+        const wrongBase = Buffer.from("completely different file content");
+        // Exactly 8 hex digits immediately followed by the ellipsis — a full (un-sliced)
+        // hash has a 9th hex char where the ellipsis must be, so these fail on the mutant.
+        await expect(applyReverseDiff(kind.blob, wrongBase)).rejects.toThrow(/base [0-9a-f]{8}…/);
+        await expect(applyReverseDiff(kind.blob, wrongBase)).rejects.toThrow(/current [0-9a-f]{8}…/);
+        await expect(applyReverseDiff(kind.blob, wrongBase)).rejects.toThrow(/Try reverting a more recent backup first/);
+      }
+    });
+  });
 });

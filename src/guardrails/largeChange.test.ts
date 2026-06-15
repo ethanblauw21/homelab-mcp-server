@@ -82,4 +82,24 @@ describe("detectHeavyCommand", () => {
   it("does not flag systemctl", () => {
     expect(detectHeavyCommand("systemctl restart nginx").isHeavy).toBe(false);
   });
+
+  // --- Mutation-hardening (kills survivors the broad tests miss) ---
+
+  it("flags a bare `tar` command even with no `.tar` substring in the args", () => {
+    // Guards `\btar\s+` against the `\btar\S+` mutant: an input like
+    // "tar -czf backup.tar.gz" hides a second "tar" inside "tar.gz", so the
+    // \S+ mutant still matches there. This input has NO such substring, so only
+    // the real `\s+` (space after the command) can match.
+    expect(detectHeavyCommand("tar -czf /var/spool").isHeavy).toBe(true);
+  });
+
+  it("requires an argument after `find /` (the trailing `\\s` is normalized, not trimmed away)", () => {
+    // `\bfind\s+\/\s/` only fires when something follows the root slash. With the
+    // real `.trim()` in normalization, "find / " collapses to "find /" (no trailing
+    // whitespace) and is NOT heavy. The trim-removal mutant leaves the trailing
+    // space, which the pattern would match — so this asserting-false test kills it.
+    expect(detectHeavyCommand("find / ").isHeavy).toBe(false);
+    // And the canonical args-present form stays heavy.
+    expect(detectHeavyCommand("find / -name x").isHeavy).toBe(true);
+  });
 });
