@@ -9,6 +9,7 @@ import type { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
 import { assertAgentAvailable, resolveNodeName, readVmFile, writeVmFile } from "./qmFiles.js";
 import { computeUnifiedDiff } from "../util/diff.js";
+import { contentLeafHash } from "../integrity/leafHash.js";
 
 export const QmWriteFileInputSchema = z.object({
   vmid: z.number().int().positive().describe("VM ID (qm guest)"),
@@ -172,6 +173,12 @@ export async function qmWriteFileHandler(
     prevSha256: prevHash ?? undefined,
     newSha256: newHash,
     bytes: newContent.length,
+    // ADR-009 content fingerprint. A VM is NOT in the Merkle forest (no
+    // descriptor-stable fs), so this never explains a forest drift — it only
+    // makes the write queryable by content hash in query_audit.
+    beforeHash: prevContent ? contentLeafHash(prevContent) : undefined,
+    afterHash: contentLeafHash(newContent),
+    hashScope: input.path,
     isLargeChange: largeChange.isLarge,
     isRevertible: backupResult.revertible,
     note: largeChange.isLarge ? largeChange.reason : undefined,

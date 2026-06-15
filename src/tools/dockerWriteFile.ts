@@ -16,6 +16,7 @@ import {
   writeDockerFile,
 } from "./dockerFiles.js";
 import { computeUnifiedDiff } from "../util/diff.js";
+import { contentLeafHash } from "../integrity/leafHash.js";
 
 export const DockerWriteFileInputSchema = z.object({
   vmid: z.number().int().positive().describe("LXC container ID hosting the Docker daemon"),
@@ -222,6 +223,11 @@ export async function dockerWriteFileHandler(
     prevSha256: prevHash ?? undefined,
     newSha256: newHash,
     bytes: newContent.length,
+    // ADR-009 content fingerprint. Docker files are not in the Merkle forest
+    // (parity with qm), so this is queryable-by-hash, not a drift explainer.
+    beforeHash: prevContent ? contentLeafHash(prevContent) : undefined,
+    afterHash: contentLeafHash(newContent),
+    hashScope: input.path,
     isLargeChange: largeChange.isLarge,
     isRevertible: backupResult.revertible,
     // Docker targets have no git-mirror layout (parity with qm).

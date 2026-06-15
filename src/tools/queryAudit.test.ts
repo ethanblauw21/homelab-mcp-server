@@ -54,6 +54,19 @@ describe("filterAuditRecords", () => {
     expect(r).toHaveLength(1);
     expect(r[0]?.cmd).toBe("df");
   });
+
+  it("filters by ADR-009 hash anchors (hashScopeContains, unknownScopeOnly, hashEquals)", () => {
+    const hashed: AuditRecord[] = [
+      rec({ tool: "write_file", path: "/etc/app.conf", hashScope: "/etc/app.conf", afterHash: "deadbeef", beforeHash: "cafe" }),
+      rec({ tool: "execute", cmd: "sed -i ...", hashScope: "unknown" }),
+      rec({ tool: "pct_exec", vmid: 101, hashScope: "unknown" }),
+    ];
+    expect(filterAuditRecords(hashed, { hashScopeContains: "app.conf" })).toHaveLength(1);
+    expect(filterAuditRecords(hashed, { unknownScopeOnly: true })).toHaveLength(2);
+    expect(filterAuditRecords(hashed, { hashEquals: "deadbeef" })).toHaveLength(1); // matches afterHash
+    expect(filterAuditRecords(hashed, { hashEquals: "cafe" })).toHaveLength(1); // matches beforeHash
+    expect(filterAuditRecords(hashed, { hashEquals: "nope" })).toHaveLength(0);
+  });
 });
 
 describe("summarizeAuditRecords", () => {

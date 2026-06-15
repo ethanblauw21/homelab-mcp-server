@@ -28,7 +28,10 @@ export type AuditTool =
   | "guest_restart"
   | "guest_backup"
   | "guest_backup_restore"
-  | "compose_redeploy";
+  | "compose_redeploy"
+  | "compute_tree"
+  | "verify_integrity"
+  | "accept_truth";
 
 export interface AuditRecord {
   id: string;
@@ -70,6 +73,16 @@ export interface AuditRecord {
   // false means git was absent/failed (the write itself still succeeded), the
   // mutation target has no mirror layout (qm), or the subsystem is disabled.
   historyCommitted?: boolean;
+  // ADR-009 — hash-anchored audit. The write family populates beforeHash/afterHash
+  // with the L3 subtree hash of `hashScope` before and after the op, enabling the
+  // structure↔cause pivot (find the tool call whose afterHash produced a drifted
+  // leaf). Exec tools (execute/pct_exec/qm_exec/docker_exec) take an OPTIONAL scope:
+  // with one they hash before/after; without one they record hashScope:"unknown"
+  // (a queryable marker, not prose) and skip hashing — the next verify_integrity
+  // catches any change as drift anyway.
+  beforeHash?: string;
+  afterHash?: string;
+  hashScope?: string;
   note?: string;
 }
 

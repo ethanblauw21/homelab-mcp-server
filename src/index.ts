@@ -64,6 +64,18 @@ import {
   guestBackupRestoreHandler,
 } from "./tools/backupTools.js";
 import { ComposeRedeployInputSchema, composeRedeployHandler } from "./tools/composeRedeploy.js";
+import {
+  ComputeTreeInputSchema,
+  computeTreeHandler,
+  VerifyIntegrityInputSchema,
+  verifyIntegrityHandler,
+  AcceptTruthInputSchema,
+  acceptTruthHandler,
+  openIntegrityStore,
+} from "./tools/integrity.js";
+import { IntegrityEngine } from "./integrity/integrityEngine.js";
+import type { NodeStore } from "./integrity/nodeStore.js";
+import { assertNonOverlap } from "./integrity/forestShape.js";
 
 const server = new McpServer({
   name: "homelab-ssh-mcp",
@@ -728,6 +740,71 @@ register(
   }
 );
 
+// ADR-009 — Merkle integrity forest (companion tier). The SQLite node store holds
+// the baseline/working Merkle trees on this Windows host; only open it (native dep)
+// when the tier actually registers an integrity tool. The engine reads file content
+// over the same SSH transport (host SFTP / pct pull) the other companion tools use.
+let integrityStore: NodeStore | undefined;
+if (isToolEnabled("verify_integrity", activeTier)) {
+  // Fail fast (§4): the host subtree and the container subtrees must never describe
+  // the same bytes, or a file would be hashed twice (raw host view vs pct view).
+  assertNonOverlap(config.history.hostWatchPaths, config.integrity.containerBackingPaths);
+  integrityStore = openIntegrityStore(config);
+  const integrityEngine = new IntegrityEngine(integrityStore, sshTransport, config, audit);
+
+  register(
+    "compute_tree",
+    {
+      description:
+        "Build/refresh the Merkle integrity baseline at a tracking level (L1 mtime, L2 config content, " +
+        "L3 full content) over the host + running containers. Mutates only the LOCAL node store on this " +
+        "Windows host — never the node. Audited. First-run seeding; use verify_integrity to detect drift.",
+      inputSchema: ComputeTreeInputSchema,
+    },
+    async (input) => {
+      try {
+        const result = await computeTreeHandler(input, integrityEngine, audit, config);
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } catch (err) { return errResult(err); }
+    }
+  );
+
+  register(
+    "verify_integrity",
+    {
+      description:
+        "Read-only drift report: diff the current Merkle forest against the baseline and classify each " +
+        "changed leaf explained (an audit afterHash matches — the server caused it) vs unexplained " +
+        "(human/package/out-of-band). 'smart' level runs L1 first and only reads file content where L1 " +
+        "flags a touch. With autoAccept: true, applies the audited auto-accept policy after reporting.",
+      inputSchema: VerifyIntegrityInputSchema,
+    },
+    async (input) => {
+      try {
+        const result = await verifyIntegrityHandler(input, integrityEngine, config);
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } catch (err) { return errResult(err); }
+    }
+  );
+
+  register(
+    "accept_truth",
+    {
+      description:
+        "Explicit human override: fold the current state (a scope, or the whole forest) into all three " +
+        "Merkle baselines at once, so a subsequent verify_integrity shows no drift. Use after reviewing " +
+        "and approving out-of-band changes. Audited with before/after super-root hashes.",
+      inputSchema: AcceptTruthInputSchema,
+    },
+    async (input) => {
+      try {
+        const result = await acceptTruthHandler(input, integrityEngine, config);
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } catch (err) { return errResult(err); }
+    }
+  );
+}
+
 // ADR-006 — initialize the config-history mirror (detect git, bootstrap repo).
 // On absence the subsystem stays disabled and config_sweep is NOT registered, so
 // the model never sees a tool it cannot run. Mutation commits remain best-effort.
@@ -758,6 +835,7 @@ const stdioTransport = new StdioServerTransport();
 await server.connect(stdioTransport);
 
 process.on("SIGINT", async () => {
+  integrityStore?.close();
   await sshTransport.close();
   process.exit(0);
 });

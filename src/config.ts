@@ -201,6 +201,49 @@ const ConfigSchema = z.object({
     // manifest, never silently dropped.
     sweepFileSizeCapBytes: z.number().default(1024 * 1024), // 1 MB
   }),
+  // ADR-009 — Merkle integrity forest. Watched sets are SHARED with history.*
+  // (the forest hashes the same paths config_sweep mirrors); this section adds the
+  // forest-specific knobs. Reads only, companion+.
+  integrity: z.object({
+    // SQLite node store on the client (off the premium node disk, by design).
+    dbPath: z.string(),
+    // Configured default verify depth (setup: last-edited→l1 / coarse→l2 / fine→l3).
+    // verify_integrity can override per call; "smart" runs L1-gated escalation.
+    level: z.enum(["l1", "l2", "l3"]).default("l2"),
+    // L2 "important config" membership — a leaf is in the L2 tree iff its path
+    // matches one of these globs. Kept deliberately broad (config-ish extensions
+    // + a few well-known extensionless files).
+    configFileGlobs: z.array(z.string()).default([
+      "**/*.conf",
+      "**/*.cfg",
+      "**/*.yml",
+      "**/*.yaml",
+      "**/*.ini",
+      "**/*.toml",
+      "**/*.json",
+      "**/*.env",
+      "**/*config",
+      "**/sshd_config",
+      "**/fstab",
+      "**/hosts",
+      "**/crontab",
+    ]),
+    // Auto-accept policy (§6). maxUnexplainedL3 bounds the unexplained non-config
+    // tail that folds without a human; L2 config drift never auto-folds unless
+    // explicitly loosened; sensitive paths never auto-fold regardless.
+    maxUnexplainedL3: z.number().default(20),
+    allowL2AutoAccept: z.boolean().default(false),
+    sensitiveGlobs: z.array(z.string()).default(["/etc/pve"]),
+    // Non-overlap invariant (§1): the host watcher must NOT point at
+    // container-backing storage, or the same bytes hash twice (raw vs pct view).
+    // Asserted at forest-config load; a host watch path under any of these throws.
+    containerBackingPaths: z.array(z.string()).default([
+      "/var/lib/vz",
+      "/var/lib/pve",
+      "/dev/zvol",
+      "/dev/pve",
+    ]),
+  }),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -372,6 +415,23 @@ function loadConfig(): Config {
       sweepFileSizeCapBytes: process.env.HISTORY_SWEEP_FILE_SIZE_CAP_BYTES
         ? parseInt(process.env.HISTORY_SWEEP_FILE_SIZE_CAP_BYTES)
         : 1024 * 1024,
+    },
+    integrity: {
+      dbPath: process.env.INTEGRITY_DB_PATH ?? path.join(LOCAL_DATA_DIR, "integrity.db"),
+      level: (process.env.INTEGRITY_LEVEL ?? "l2") as "l1" | "l2" | "l3",
+      configFileGlobs: process.env.INTEGRITY_CONFIG_GLOBS
+        ? process.env.INTEGRITY_CONFIG_GLOBS.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined,
+      maxUnexplainedL3: process.env.INTEGRITY_MAX_UNEXPLAINED_L3
+        ? parseInt(process.env.INTEGRITY_MAX_UNEXPLAINED_L3)
+        : 20,
+      allowL2AutoAccept: process.env.INTEGRITY_ALLOW_L2_AUTO_ACCEPT === "true",
+      sensitiveGlobs: process.env.INTEGRITY_SENSITIVE_GLOBS
+        ? process.env.INTEGRITY_SENSITIVE_GLOBS.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined,
+      containerBackingPaths: process.env.INTEGRITY_CONTAINER_BACKING_PATHS
+        ? process.env.INTEGRITY_CONTAINER_BACKING_PATHS.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined,
     },
   };
   return ConfigSchema.parse(raw);
