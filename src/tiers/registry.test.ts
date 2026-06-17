@@ -54,15 +54,22 @@ describe("tool → tier registration", () => {
     expect(companion).toContain("config_sweep");
     expect(companion).toContain("snapshot_create");
     expect(companion).toContain("snapshot_list");
+    // ADR-011 — guest edit tools share their write surface's companion floor.
+    expect(companion).toContain("pct_edit_file");
+    expect(companion).toContain("qm_edit_file");
+    expect(companion).toContain("docker_edit_file");
     expect(companion).not.toContain("execute");
     expect(companion).not.toContain("write_file");
+    expect(companion).not.toContain("edit_file");
     expect(companion).not.toContain("read_file");
     expect(companion).not.toContain("list_directory");
   });
 
-  it("root adds exactly the four host-level tools", () => {
+  it("root adds exactly the host-level tools (incl. ADR-011 edit_file)", () => {
     const added = toolsForTier("root").filter((t) => !toolsForTier("companion").includes(t));
-    expect(added.sort()).toEqual(["execute", "list_directory", "read_file", "write_file"]);
+    expect(added.sort()).toEqual(
+      ["edit_file", "execute", "list_directory", "read_file", "write_file"].sort()
+    );
   });
 
   it("each tier is a strict superset of the one below", () => {

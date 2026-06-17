@@ -8,6 +8,7 @@ import { BackupStore } from "./backup/store.js";
 import { ExecuteInputSchema, executeHandler } from "./tools/execute.js";
 import { ReadFileInputSchema, readFileHandler } from "./tools/readFile.js";
 import { WriteFileInputSchema, writeFileHandler } from "./tools/writeFile.js";
+import { EditFileInputSchema, editFileHandler } from "./tools/editFile.js";
 import { ListDirectoryInputSchema, listDirectoryHandler } from "./tools/listDirectory.js";
 import { PctExecInputSchema, pctExecHandler } from "./tools/pctExec.js";
 import { PctListInputSchema, pctListHandler } from "./tools/pctList.js";
@@ -197,6 +198,22 @@ register(
   async (input) => {
     try {
       const result = await writeFileHandler(input, sshTransport, audit, backupStore, config, configHistory, isRootTier);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "edit_file",
+  {
+    description:
+      "Edit a host file by find-and-replace (oldString→newString) instead of resending the whole file (ADR-011). " +
+      "oldString must be unique unless replaceAll. File must already exist and be text. Same backup/audit/diff pipeline as write_file.",
+    inputSchema: EditFileInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await editFileHandler(input, sshTransport, audit, backupStore, config, configHistory, isRootTier);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }
