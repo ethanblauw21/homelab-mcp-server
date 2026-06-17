@@ -42,6 +42,9 @@ A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zo
 | `compute_tree` | Build/refresh the Merkle integrity baseline at L1/L2/L3 (mutates only the local node store) | 009 |
 | `verify_integrity` | Read-only drift report: diff forest vs baseline, classify each leaf explained/unexplained; `smart` escalation; optional audited auto-accept | 009 |
 | `accept_truth` | Explicit human override: fold current state into all three Merkle baselines (audited) | 009 |
+| `edit_file` / `pct_edit_file` / `qm_edit_file` / `docker_edit_file` | Find-and-replace front door to the matching `*_write_file` — send `oldString`→`newString`, not the whole file (token-cheaper); reuses the exact write pipeline (`dryRun` preview) | 011 |
+
+> The four `*_edit_file` tools are **not a new mutation surface** — each reads the target once, applies a literal substring replacement (`applyStringEdit`), and funnels the result through the *same* `writeResolved<Surface>` core as its `*_write_file` sibling, so a button-identical backup/audit/diff/history record results. They inherit the write surface's tier (`edit_file` ⇒ root, the guest three ⇒ companion), path validation, caps, and limits (`qm_edit_file` re-checks `qmWriteMaxBytes` on the resolved bytes). Refusals are honest: a missing file, binary content, a not-found `oldString`, an ambiguous match (without `replaceAll`), or a no-op all throw with **no write**. Multi-edit batching + regex are deliberately out of scope for v1 (ADR-011 §5).
 
 > `config_sweep` is registered **only when git is on PATH**. With git absent the whole config-history subsystem is disabled (writes still succeed, `historyCommitted: false`) and `config_sweep` is unregistered.
 

@@ -1,6 +1,6 @@
 # ADR-011: Token Economy as a Design Axis — Find-and-Replace Edit Tools
 
-**Status:** Proposed
+**Status:** Accepted (base function — multi-edit batching + regex deferred per §5)
 **Date:** 2026-06-16
 **Deciders:** Ethan
 **Depends on:** ADR-001 (write_file pipeline), ADR-003 (pct file I/O, backup/audit pipeline), ADR-004 (dryRun preview, read caps, path validation), ADR-005 (qm file I/O), ADR-006 (config-history capture path A), ADR-008 (docker file I/O, §3 diff-on-write), ADR-009 (hash-anchored audit records — beforeHash/afterHash)
