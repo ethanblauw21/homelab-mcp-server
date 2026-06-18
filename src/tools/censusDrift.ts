@@ -11,6 +11,20 @@ import { VOLATILE_FIELDS, observed } from "./censusTypes.js";
 import type { StorageInfo, NetworkIface } from "./censusParsers.js";
 
 /**
+ * #22 — the tailscale section widened to include a `TailscaleAbsent`
+ * ({ scope: "none" }) shape that carries no `peerCount`. Extract the peer count
+ * only when present; a scope flip or an absent marker yields undefined and so
+ * suppresses the tailscale sub-diff (the same "not observed" rule as Unavailable).
+ */
+function peerCountOf(v: unknown): number | undefined {
+  if (v != null && typeof v === "object" && "peerCount" in v) {
+    const n = (v as { peerCount?: unknown }).peerCount;
+    return typeof n === "number" ? n : undefined;
+  }
+  return undefined;
+}
+
+/**
  * Pure drift diff between two census snapshots (ADR-002). Cosmetic noise
  * (uptime, load, memory, timestamps) is excluded by design — only structural
  * changes (guests added/removed/status-changed, storage activity/usage beyond
@@ -173,8 +187,8 @@ export function diffSnapshots(
     comparedTo: prev.ts,
   };
 
-  const prevPeers = observed(prev.sections.tailscale)?.peerCount;
-  const nextPeers = observedNext.tailscale?.peerCount;
+  const prevPeers = peerCountOf(observed(prev.sections.tailscale));
+  const nextPeers = peerCountOf(observedNext.tailscale);
   if (
     prevPeers !== undefined &&
     nextPeers !== undefined &&

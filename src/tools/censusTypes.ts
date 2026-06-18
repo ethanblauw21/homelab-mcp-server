@@ -4,6 +4,7 @@ import type {
   BridgeInfo,
   GuestConfig,
   TailscaleSummary,
+  TailscaleAbsent,
   DockerContainer,
   SnapshotCapability,
 } from "./censusParsers.js";
@@ -125,7 +126,10 @@ export interface CensusSections {
   containers?: GuestEntry[];
   vms?: GuestEntry[];
   services?: ServiceEntry[] | Unavailable;
-  tailscale?: TailscaleSummary | null | Unavailable;
+  // #22 — host-first/container-fallback probe. TailscaleAbsent ({ scope: "none" })
+  // replaces a bare null so "not present" is distinguishable from "down"; null is
+  // retained for back-compat with snapshots stored before ADR-013.
+  tailscale?: TailscaleSummary | TailscaleAbsent | null | Unavailable;
 }
 
 /**

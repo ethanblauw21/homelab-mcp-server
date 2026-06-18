@@ -10,6 +10,7 @@ import {
   parseIpBrief,
   parseInterfacesBridges,
   parseTailscaleStatus,
+  findTailscaleContainer,
   parseZpoolStatusX,
   parseFailedUnits,
   parseDockerPs,
@@ -187,6 +188,59 @@ describe("parseTailscaleStatus", () => {
       self: "pve",
       peerCount: 0,
     });
+  });
+  it("surfaces online state and tailnet IPs when present (#22)", () => {
+    const json = JSON.stringify({
+      Self: { HostName: "ts", Online: true, TailscaleIPs: ["100.64.0.5", "fd7a::1"] },
+      Peer: { a: {} },
+    });
+    expect(parseTailscaleStatus(json)).toEqual({
+      self: "ts",
+      peerCount: 1,
+      online: true,
+      tailnetIPs: ["100.64.0.5", "fd7a::1"],
+    });
+  });
+  it("omits online/tailnetIPs when absent (additive, back-compatible)", () => {
+    const r = parseTailscaleStatus(JSON.stringify({ Self: { HostName: "ts" } }));
+    expect(r).not.toHaveProperty("online");
+    expect(r).not.toHaveProperty("tailnetIPs");
+  });
+  it("records online:false explicitly", () => {
+    const r = parseTailscaleStatus(JSON.stringify({ Self: { HostName: "ts", Online: false } }));
+    expect(r?.online).toBe(false);
+  });
+});
+
+describe("findTailscaleContainer (#22)", () => {
+  const ps = (rows: Array<{ name: string; image: string }>) =>
+    rows.map((r) => ({ name: r.name, image: r.image, status: "Up" }));
+
+  it("matches by image name", () => {
+    const found = findTailscaleContainer(
+      ps([
+        { name: "web", image: "nginx:latest" },
+        { name: "vpn", image: "tailscale/tailscale:latest" },
+      ])
+    );
+    expect(found?.name).toBe("vpn");
+  });
+  it("matches by container name (case-insensitive)", () => {
+    const found = findTailscaleContainer(ps([{ name: "Tailscale", image: "custom/repack" }]));
+    expect(found?.name).toBe("Tailscale");
+  });
+  it("returns the first match when several look like Tailscale", () => {
+    const found = findTailscaleContainer(
+      ps([
+        { name: "ts-a", image: "tailscale/tailscale" },
+        { name: "ts-b", image: "tailscale/tailscale" },
+      ])
+    );
+    expect(found?.name).toBe("ts-a");
+  });
+  it("returns undefined when none look like Tailscale", () => {
+    expect(findTailscaleContainer(ps([{ name: "web", image: "nginx" }]))).toBeUndefined();
+    expect(findTailscaleContainer([])).toBeUndefined();
   });
 });
 

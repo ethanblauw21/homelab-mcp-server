@@ -4,6 +4,7 @@ import os from "os";
 import path from "path";
 import { FakeTransport } from "../ssh/fakeTransport.js";
 import { buildPctExecCommand } from "./pctHelpers.js";
+import { buildDockerExecCommand } from "./dockerHelpers.js";
 import { describeHomelabHandler, DescribeHomelabInputSchema } from "./describeHomelab.js";
 import { CensusStore } from "./censusStore.js";
 import type { Config } from "../config.js";
@@ -179,11 +180,93 @@ describe("describeHomelabHandler — summary depth", () => {
     expect(fs.existsSync(snap.snapshotPath!)).toBe(true);
   });
 
-  it("returns tailscale: null when tailscale is absent (no error)", async () => {
-    const t = baseTransport(); // tailscale probe returns default empty/exit 0
+  it("returns a structured absent marker when Tailscale is nowhere (host or guest)", async () => {
+    // #22 — neither the host nor any running guest has Tailscale; the probe
+    // reports { scope: "none", reason } rather than an ambiguous bare null.
+    const t = baseTransport(); // tailscale probe + guest docker ps return default empty/exit 0
     const store = new CensusStore(tmpDir, 30);
     const snap = await describeHomelabHandler(parse({ sections: ["tailscale"] }), t, store, makeConfig(tmpDir));
-    expect(snap.sections.tailscale).toBeNull();
+    expect(snap.sections.tailscale).toEqual({
+      scope: "none",
+      reason: "no host-level Tailscale; no Tailscale container found in running guests",
+    });
+    expect(snap.errors).toEqual([]);
+  });
+
+  it("reports host scope when Tailscale runs on the Proxmox host", async () => {
+    const t = baseTransport();
+    t.setExecResult("tailscale status --json", {
+      stdout: JSON.stringify({
+        Self: { HostName: "pve", Online: true, TailscaleIPs: ["100.64.0.1"] },
+        Peer: { a: {}, b: {} },
+      }),
+      stderr: "",
+      exitCode: 0,
+    });
+    const store = new CensusStore(tmpDir, 30);
+    const snap = await describeHomelabHandler(parse({ sections: ["tailscale"] }), t, store, makeConfig(tmpDir));
+    expect(snap.sections.tailscale).toMatchObject({
+      scope: "host",
+      self: "pve",
+      online: true,
+      tailnetIPs: ["100.64.0.1"],
+      peerCount: 2,
+    });
+    expect(snap.errors).toEqual([]);
+  });
+
+  it("falls back to a Tailscale Docker container inside a running guest", async () => {
+    const t = baseTransport(); // host `tailscale status --json` is absent (default empty)
+    // Guest 101 is running and hosts a tailscale/tailscale Docker container.
+    t.setExecResult(
+      buildPctExecCommand(
+        101,
+        'command -v docker >/dev/null 2>&1 && docker ps --format "{{.Names}}\\t{{.Image}}\\t{{.Status}}" || true'
+      ),
+      { stdout: "ts\ttailscale/tailscale:latest\tUp 2 hours", stderr: "", exitCode: 0 }
+    );
+    t.setExecResult(
+      buildPctExecCommand(101, buildDockerExecCommand("ts", "tailscale status --json")),
+      {
+        stdout: JSON.stringify({
+          Self: { HostName: "ts", Online: true, TailscaleIPs: ["100.64.0.5"] },
+          Peer: { a: {} },
+        }),
+        stderr: "",
+        exitCode: 0,
+      }
+    );
+    const store = new CensusStore(tmpDir, 30);
+    const snap = await describeHomelabHandler(parse({ sections: ["tailscale"] }), t, store, makeConfig(tmpDir));
+    expect(snap.sections.tailscale).toMatchObject({
+      scope: "container",
+      vmid: 101,
+      container: "ts",
+      self: "ts",
+      online: true,
+      peerCount: 1,
+    });
+    expect(snap.errors).toEqual([]);
+  });
+
+  it("reports an unreadable Tailscale container as absent with a naming reason", async () => {
+    const t = baseTransport();
+    t.setExecResult(
+      buildPctExecCommand(
+        101,
+        'command -v docker >/dev/null 2>&1 && docker ps --format "{{.Names}}\\t{{.Image}}\\t{{.Status}}" || true'
+      ),
+      { stdout: "ts\ttailscale/tailscale:latest\tUp 2 hours", stderr: "", exitCode: 0 }
+    );
+    // The inner `tailscale status --json` yields nothing parseable.
+    t.setExecResult(
+      buildPctExecCommand(101, buildDockerExecCommand("ts", "tailscale status --json")),
+      { stdout: "", stderr: "", exitCode: 0 }
+    );
+    const store = new CensusStore(tmpDir, 30);
+    const snap = await describeHomelabHandler(parse({ sections: ["tailscale"] }), t, store, makeConfig(tmpDir));
+    expect(snap.sections.tailscale).toMatchObject({ scope: "none" });
+    expect((snap.sections.tailscale as { reason: string }).reason).toContain("'ts'");
     expect(snap.errors).toEqual([]);
   });
 

@@ -62,6 +62,27 @@ export interface QmRow {
 export interface TailscaleSummary {
   self: string;
   peerCount: number;
+  /** Self.Online — whether this node currently reaches the tailnet. */
+  online?: boolean;
+  /** Self.TailscaleIPs — the 100.64.0.0/10 CGNAT addresses for this node. */
+  tailnetIPs?: string[];
+  /** Where the status was observed (#22). Absent on legacy stored snapshots. */
+  scope?: "host" | "container";
+  /** Guest id, when scope === "container". */
+  vmid?: number;
+  /** Docker container name, when scope === "container". */
+  container?: string;
+}
+
+/**
+ * Structured "no Tailscale found" marker (#22) — replaces a bare `null` so the
+ * operator can distinguish *not present* from *down*. The drift differ has no
+ * `peerCount` to compare here, so it suppresses the tailscale sub-diff (same
+ * rule as the `unavailableAtTier` marker).
+ */
+export interface TailscaleAbsent {
+  scope: "none";
+  reason: string;
 }
 
 export interface ZpoolHealth {
@@ -327,19 +348,37 @@ export function parseInterfacesBridges(output: string): BridgeInfo[] {
   return bridges;
 }
 
-/** Parse `tailscale status --json` → self identity + peer count. Tolerant of malformed JSON. */
+/**
+ * Parse `tailscale status --json` → self identity, peer count, online state, and
+ * tailnet IPs (#22). Tolerant of malformed JSON. Does NOT set `scope` — the
+ * caller stamps host/container scope after a successful parse.
+ */
 export function parseTailscaleStatus(output: string): TailscaleSummary | null {
   try {
     const data = JSON.parse(output) as {
-      Self?: { DNSName?: string; HostName?: string };
+      Self?: { DNSName?: string; HostName?: string; Online?: boolean; TailscaleIPs?: string[] };
       Peer?: Record<string, unknown>;
     };
     const self = data.Self?.DNSName?.replace(/\.$/, "") ?? data.Self?.HostName ?? "";
     const peerCount = data.Peer ? Object.keys(data.Peer).length : 0;
-    return { self, peerCount };
+    const summary: TailscaleSummary = { self, peerCount };
+    if (typeof data.Self?.Online === "boolean") summary.online = data.Self.Online;
+    if (Array.isArray(data.Self?.TailscaleIPs) && data.Self.TailscaleIPs.length > 0) {
+      summary.tailnetIPs = data.Self.TailscaleIPs.filter((s) => typeof s === "string");
+    }
+    return summary;
   } catch {
     return null;
   }
+}
+
+/**
+ * Find a Tailscale container in a `docker ps` listing (#22). Matches by image or
+ * name containing "tailscale" (the canonical `tailscale/tailscale` image and the
+ * conventional service name). First match wins; returns undefined when none.
+ */
+export function findTailscaleContainer(containers: DockerContainer[]): DockerContainer | undefined {
+  return containers.find((c) => /tailscale/i.test(c.image) || /tailscale/i.test(c.name));
 }
 
 /** Parse `zpool status -x` → healthy flag + detail. Absence of ZFS yields healthy:true. */
