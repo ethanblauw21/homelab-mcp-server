@@ -10,7 +10,13 @@ FROM alpine:3.20
 # it, so without this every SFTP op (read_file/write_file/list_directory/
 # config_sweep) fails with "Channel open failure: open failed". exec is unaffected,
 # which is why this stayed hidden behind the BusyBox timeout failure above.
-RUN apk add --no-cache openssh-server openssh-sftp-server bash coreutils && \
+#
+# findutils gives us GNU `find` (with -printf), which config_sweep's enumeration
+# (`find … -type f -printf '%s\t%p\n'`, configSweep.ts) relies on. Alpine's BusyBox
+# find has no -printf and coreutils does not ship `find`, so the sweep enumerated
+# nothing (0 files) until this. Same Debian/Proxmox-representativeness rationale as
+# coreutils — the real node has the GNU userland.
+RUN apk add --no-cache openssh-server openssh-sftp-server bash coreutils findutils && \
     ssh-keygen -A && \
     mkdir -p /root/.ssh && \
     chmod 700 /root/.ssh
