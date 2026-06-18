@@ -87,6 +87,33 @@ describe("diffConfigHandler", () => {
     expect(res.note).toMatch(/metadata-only/i);
   });
 
+  it("returns a structured stale-base response (not a thrown error) when the file drifted out-of-band (#20)", async () => {
+    const t = new FakeTransport();
+    t.setFile("/etc/hosts", "edited-out-of-band\n");
+    const store = fakeStore({
+      target: HOST_TARGET,
+      versions: [
+        {
+          backupPath: "/b/delta.gz",
+          timestamp: "delta",
+          kind: "gzip-diff",
+          sizeBytes: 10,
+          revertible: false,
+          requiresLiveMatch: true,
+          baseHash: "92873e2700000000",
+          revertibleReason: "stale-base",
+        },
+      ],
+    });
+
+    const res = await diffConfigHandler({ path: "/etc/hosts" }, t, store, makeConfig());
+    expect(res.revertible).toBe(false);
+    expect(res.diff).toBeUndefined();
+    expect(res.note).toMatch(/out-of-band/i);
+    expect(res.note).toMatch(/92873e27/); // the stale base hash prefix is surfaced
+    expect(res.currentSha256).toBeDefined();
+  });
+
   it("resolves a specific version by backupPath", async () => {
     const t = new FakeTransport();
     t.setFile("/etc/hosts", "current\n");

@@ -1,10 +1,11 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import zlib from "zlib";
 import type { BackupEntry } from "./eviction.js";
-import type { BackupKind } from "./policy.js";
+import type { BackupKind, BlobRevertibility } from "./policy.js";
 import { planEviction, isOverCap } from "./eviction.js";
-import { applyReverseDiff } from "./policy.js";
+import { applyReverseDiff, classifyBlobRevertibility } from "./policy.js";
 import type { Config } from "../config.js";
 
 /**
@@ -46,6 +47,17 @@ export interface BackupVersionInfo {
   kind: string;
   sizeBytes: number;
   revertible: boolean;
+  /**
+   * #20 — true for a delta (`mcp-rdiff-v1`) blob: it can only be applied while
+   * the live file still matches its `baseHash`. When `revertible` is false on a
+   * version carrying this flag, a companion-tier `diff_config` can still confirm
+   * applicability against the live file (observe-tier `list_backups` cannot).
+   */
+  requiresLiveMatch?: boolean;
+  /** #20 — the live content hash a delta backup is anchored to (present for deltas). */
+  baseHash?: string;
+  /** #20 — why a version is non-revertible: stale base, unknown current, or metadata-only. */
+  revertibleReason?: "stale-base" | "current-unknown" | "metadata-only";
 }
 
 function fileKey(target: BackupTarget): string {
@@ -197,7 +209,20 @@ export class BackupStore {
     return { kind: "host", remotePath: meta.remotePath };
   }
 
-  listBackupsForPath(target: BackupTarget): BackupVersionInfo[] {
+  /**
+   * #20 — list backup versions with **honest** revertibility.
+   *
+   * A `.gz` blob is inspected (decompressed locally — no node access) to learn
+   * whether it is self-contained or an `mcp-rdiff-v1` delta. A delta is only
+   * applicable while the live file still hashes to its `baseHash`:
+   *  - `currentHash` supplied (companion `diff_config`, which reads the live
+   *    file): the delta's `revertible` is the real `currentHash === baseHash`.
+   *  - `currentHash` omitted (observe `list_backups`, no node access): a delta
+   *    cannot be confirmed, so `revertible: false` with `requiresLiveMatch: true`
+   *    + `baseHash` — never the old overstated `revertible: true`.
+   * Self-contained blobs are unconditionally `revertible: true`.
+   */
+  listBackupsForPath(target: BackupTarget, currentHash?: string | null): BackupVersionInfo[] {
     const key = fileKey(target);
     const keyDir = path.join(this.cfg.baseDir, key);
     if (!fs.existsSync(keyDir)) return [];
@@ -205,6 +230,7 @@ export class BackupStore {
     const files = fs.readdirSync(keyDir);
     const timestamps = new Set(files.map((f) => f.replace(/\.(gz|meta)$/, "")));
     const results: BackupVersionInfo[] = [];
+    const liveHash = currentHash ?? null;
 
     for (const ts of timestamps) {
       const gzPath = path.join(keyDir, `${ts}.gz`);
@@ -219,14 +245,59 @@ export class BackupStore {
             kind = meta.kind ?? "gzip-full";
           } catch { /* use default */ }
         }
-        results.push({ backupPath: gzPath, timestamp: ts, kind, sizeBytes: stat.size, revertible: true });
+        // Inspect the blob itself — meta.kind alone is not authoritative (a
+        // "gzip-diff" blob falls back to raw content for very large files).
+        let rev: BlobRevertibility = { revertible: true, requiresLiveMatch: false };
+        try {
+          const decompressed = zlib.gunzipSync(fs.readFileSync(gzPath));
+          rev = classifyBlobRevertibility(decompressed, liveHash);
+        } catch { /* unreadable blob — leave optimistic default */ }
+        results.push({
+          backupPath: gzPath,
+          timestamp: ts,
+          kind,
+          sizeBytes: stat.size,
+          revertible: rev.revertible,
+          requiresLiveMatch: rev.requiresLiveMatch || undefined,
+          baseHash: rev.baseHash,
+          revertibleReason: rev.reason,
+        });
       } else if (fs.existsSync(metaPath)) {
         const stat = fs.statSync(metaPath);
-        results.push({ backupPath: metaPath, timestamp: ts, kind: "metadata-only", sizeBytes: stat.size, revertible: false });
+        results.push({ backupPath: metaPath, timestamp: ts, kind: "metadata-only", sizeBytes: stat.size, revertible: false, revertibleReason: "metadata-only" });
       }
     }
 
     return results.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  }
+
+  /**
+   * #20 — the `baseHash` of the newest stored backup for a target: the live
+   * content hash that backup expects (`meta.hash` === SHA-256 of the content
+   * written at that time). The write path compares the about-to-be-written
+   * `prevHash` against this to detect an out-of-band drift and re-anchor to a
+   * self-contained full copy (see `chainBaseDrifted`). Returns null when no
+   * prior content backup exists.
+   */
+  latestBaseHash(target: BackupTarget): string | null {
+    const key = fileKey(target);
+    const keyDir = path.join(this.cfg.baseDir, key);
+    if (!fs.existsSync(keyDir)) return null;
+
+    const metas = fs
+      .readdirSync(keyDir)
+      .filter((f) => f.endsWith(".meta"))
+      .sort((a, b) => b.localeCompare(a)); // newest timestamp first
+    for (const m of metas) {
+      try {
+        const meta = JSON.parse(fs.readFileSync(path.join(keyDir, m), "utf8"));
+        // Only content backups anchor a chain; metadata-only carries no live base.
+        if (meta.kind && meta.kind !== "metadata-only" && typeof meta.hash === "string") {
+          return meta.hash as string;
+        }
+      } catch { /* skip corrupt meta */ }
+    }
+    return null;
   }
 
   /**

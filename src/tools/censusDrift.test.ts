@@ -75,6 +75,35 @@ describe("diffSnapshots", () => {
     expect(d.containers.changed).toEqual([]);
   });
 
+  it("does not report all storages as 'added' when the prev snapshot never observed storage (#21)", () => {
+    // First baseline lacked a storage section entirely (e.g. taken at a lower
+    // tier, or before the section existed). The newer full snapshot has three
+    // storages — none of them are genuinely *new*, so none may be reported.
+    const prev = snap({ containers: [{ vmid: 101, name: "ct", status: "running" }] });
+    const next = snap(
+      {
+        containers: [{ vmid: 101, name: "ct", status: "running" }],
+        storage: [
+          { name: "local", type: "dir", active: true, totalBytes: 1000, usedBytes: 100, availBytes: 900 },
+          { name: "lvm", type: "lvmthin", active: true, totalBytes: 1000, usedBytes: 100, availBytes: 900 },
+          { name: "backup", type: "dir", active: true, totalBytes: 1000, usedBytes: 100, availBytes: 900 },
+        ],
+      },
+      "2026-06-02T00:00:00.000Z"
+    );
+    const d = diffSnapshots(prev, next, { storageDriftPercent: 10 });
+    expect(d.storage).toEqual({ added: [], removed: [], changed: [] });
+  });
+
+  it("does not report 'removed' when the newer snapshot never observed storage (#21)", () => {
+    const prev = snap({
+      storage: [{ name: "local", type: "dir", active: true, totalBytes: 1000, usedBytes: 100, availBytes: 900 }],
+    });
+    const next = snap({ containers: [{ vmid: 101, name: "ct", status: "running" }] }, "2026-06-02T00:00:00.000Z");
+    const d = diffSnapshots(prev, next, { storageDriftPercent: 10 });
+    expect(d.storage).toEqual({ added: [], removed: [], changed: [] });
+  });
+
   it("flags storage usage change beyond the threshold but ignores small drift", () => {
     const prev = snap({
       storage: [

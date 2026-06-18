@@ -324,6 +324,63 @@ describe("describeHomelabHandler — services", () => {
   });
 });
 
+describe("describeHomelabHandler — tailscale-in-guest detection (#22)", () => {
+  it("reports a tailscale container in a guest when the host has no daemon", async () => {
+    const t = baseTransport();
+    // Host has no tailscale daemon: the status probe returns nothing.
+    t.setExecResult("tailscale status --json", { stdout: "", stderr: "command not found", exitCode: 127 });
+    // The running container 101 runs a tailscale docker image.
+    t.setExecResult(
+      buildPctExecCommand(101, "systemctl list-units --failed --no-legend --plain"),
+      { stdout: "", stderr: "", exitCode: 0 }
+    );
+    t.setExecResult(
+      buildPctExecCommand(
+        101,
+        'command -v docker >/dev/null 2>&1 && docker ps --format "{{.Names}}\\t{{.Image}}\\t{{.Status}}" || true'
+      ),
+      { stdout: "ts-node\ttailscale/tailscale:v1.62\tUp 2 days", stderr: "", exitCode: 0 }
+    );
+    const store = new CensusStore(tmpDir, 30);
+    // services must be requested too — the fallback scans its collected rows.
+    const snap = await describeHomelabHandler(
+      parse({ sections: ["services", "tailscale"] }),
+      t,
+      store,
+      makeConfig(tmpDir)
+    );
+    expect(snap.sections.tailscale).toEqual({
+      self: "",
+      peerCount: 0,
+      detectedInGuests: [{ vmid: 101, container: "ts-node", image: "tailscale/tailscale:v1.62" }],
+    });
+  });
+
+  it("reports tailscale: null when neither the host nor any guest has it (#22)", async () => {
+    const t = baseTransport();
+    t.setExecResult("tailscale status --json", { stdout: "", stderr: "command not found", exitCode: 127 });
+    t.setExecResult(
+      buildPctExecCommand(101, "systemctl list-units --failed --no-legend --plain"),
+      { stdout: "", stderr: "", exitCode: 0 }
+    );
+    t.setExecResult(
+      buildPctExecCommand(
+        101,
+        'command -v docker >/dev/null 2>&1 && docker ps --format "{{.Names}}\\t{{.Image}}\\t{{.Status}}" || true'
+      ),
+      { stdout: "web\tnginx:latest\tUp 5 days", stderr: "", exitCode: 0 }
+    );
+    const store = new CensusStore(tmpDir, 30);
+    const snap = await describeHomelabHandler(
+      parse({ sections: ["services", "tailscale"] }),
+      t,
+      store,
+      makeConfig(tmpDir)
+    );
+    expect(snap.sections.tailscale).toBeNull();
+  });
+});
+
 describe("describeHomelabHandler — vms agent status (ADR-005 A3)", () => {
   it("reports agent responsiveness from ping and enabled from config", async () => {
     const t = baseTransport();
@@ -365,7 +422,9 @@ describe("describeHomelabHandler — API census path (ADR-007 §6, observe tier)
     const ssh = new FakeTransport();
     const snap = await describeHomelabHandler(parse({}), ssh, store, cfg, Date.now, fakeNode(), "observe");
 
-    expect(snap.sections.node?.version).toBe("pve-manager/8.1.4");
+    // #12 — the API path normalizes "pve-manager/8.1.4" to the bare "8.1.4",
+    // matching the SSH path (which parses `pveversion`).
+    expect(snap.sections.node?.version).toBe("8.1.4");
     expect(snap.sections.node?.cpu).toBe(8);
     expect(snap.sections.node?.memBytes).toBe(16766517248);
     expect(snap.sections.storage?.[0]).toMatchObject({ name: "local", active: true });
@@ -377,6 +436,23 @@ describe("describeHomelabHandler — API census path (ADR-007 §6, observe tier)
     expect(snap.sections.services).toEqual({ unavailableAtTier: "companion" });
     expect(snap.sections.tailscale).toEqual({ unavailableAtTier: "companion" });
     expect(snap.errors).toEqual([]);
+  });
+
+  it("derives the snapshot host from the API base URL when SSH_HOST is empty (#12)", async () => {
+    const store = new CensusStore(tmpDir, 30);
+    const cfg = makeConfig(tmpDir);
+    cfg.ssh.host = ""; // observe/operate: SSH typically unconfigured
+    (cfg as Config & { api: { baseUrl: string } }).api = { baseUrl: "https://pve.lan:8006" };
+    const snap = await describeHomelabHandler(
+      parse({ sections: ["node"] }),
+      new FakeTransport(),
+      store,
+      cfg,
+      Date.now,
+      fakeNode(),
+      "observe"
+    );
+    expect(snap.host).toBe("pve.lan");
   });
 
   it("isolates an API section failure as a recorded error (403 RBAC)", async () => {
