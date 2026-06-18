@@ -132,6 +132,85 @@ export function parseGuestConfig(output: string): GuestConfig {
 }
 
 /**
+ * ADR-008 §5 — per-guest snapshot capability, surfaced on the census map so no
+ * tool (or Claude) recommends a checkpoint the node will refuse.
+ */
+export interface SnapshotCapability {
+  capable: boolean;
+  /** Present only when `capable` is false: why the node would refuse a snapshot. */
+  reason?: string;
+}
+
+/**
+ * Detect device-passthrough markers in a (redacted) guest config. Passthrough is
+ * the strong "not snapshot-capable" signal — Proxmox refuses a snapshot of a guest
+ * with a passed-through device regardless of storage. Markers (ADR-008 §5):
+ *   - LXC: `devN:` keys, `lxc.cgroup2.devices.*` keys, `lxc.mount.entry` /dev lines
+ *   - VM:  `hostpciN:` keys (PCI passthrough)
+ */
+export function hasDevicePassthrough(config: GuestConfig): boolean {
+  for (const key of Object.keys(config)) {
+    if (/^dev\d+$/.test(key)) return true; // LXC device passthrough
+    if (/^lxc\.cgroup2?\.devices\./.test(key)) return true; // LXC cgroup device rule
+    if (/^hostpci\d+$/.test(key)) return true; // VM PCI passthrough
+    if (key === "lxc.mount.entry" && /(^|\s)\/dev\//.test(config[key]!)) return true; // device bind
+  }
+  return false;
+}
+
+/**
+ * Extract the storage name backing a guest's root disk, best-effort:
+ *   - LXC: the `rootfs` value (`storage:subvol-…,size=…`)
+ *   - VM:  the first non-cdrom/cloudinit disk among scsi/virtio/sata/ide keys
+ * Returns the storage name (the part before the first `:`), or undefined.
+ */
+export function rootfsStorageName(config: GuestConfig): string | undefined {
+  let ref = config["rootfs"];
+  if (ref === undefined) {
+    const diskKey = /^(scsi|virtio|sata|ide)\d+$/;
+    for (const key of Object.keys(config)) {
+      if (!diskKey.test(key)) continue;
+      const val = config[key]!;
+      if (/media=cdrom/.test(val) || val === "none" || /cloudinit/i.test(val)) continue;
+      ref = val;
+      break;
+    }
+  }
+  if (!ref) return undefined;
+  const beforeComma = ref.split(",")[0] ?? "";
+  const colon = beforeComma.indexOf(":");
+  return colon > 0 ? beforeComma.slice(0, colon).trim() : undefined;
+}
+
+/**
+ * ADR-008 §5 — best-effort snapshot-capability heuristic. A guest is capable iff
+ * its root disk sits on snapshot-friendly storage (lvmthin/ZFS/qcow2/…; only `dir`
+ * is rejected) AND it has no device passthrough. Passthrough is checked first —
+ * it's the more specific, actionable reason. With no storage map (storage section
+ * not requested) the storage check is skipped and capability defaults to true
+ * absent passthrough — honest about being best-effort.
+ */
+export function evaluateSnapshotCapable(
+  config: GuestConfig,
+  storageTypeByName?: Map<string, string>
+): SnapshotCapability {
+  if (hasDevicePassthrough(config)) {
+    return { capable: false, reason: "device passthrough" };
+  }
+  const storageName = rootfsStorageName(config);
+  if (storageName !== undefined && storageTypeByName !== undefined) {
+    const type = storageTypeByName.get(storageName);
+    if (type === "dir") {
+      return {
+        capable: false,
+        reason: `root disk on '${storageName}' (dir storage has no snapshot support)`,
+      };
+    }
+  }
+  return { capable: true };
+}
+
+/**
  * Parse `qm list`. Columns: VMID NAME STATUS MEM(MB) BOOTDISK(GB) PID.
  * PID is "-" or absent for stopped VMs.
  */

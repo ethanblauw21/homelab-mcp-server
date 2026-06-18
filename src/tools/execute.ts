@@ -51,9 +51,11 @@ export async function executeHandler(
       timeoutSecs,
       confirmGated: confirmGated || undefined,
       ...(rootTier ? { rootTier: true } : {}),
-      isLargeChange: heavy.isLarge,
+      // ADR-008 §4: heavy patterns annotate (isHeavy), never gate, and are NOT
+      // conflated with isLargeChange (which is for large file writes).
+      isHeavy: heavy.isHeavy || undefined,
       isRevertible: false,
-      note: heavy.isLarge ? heavy.reason : undefined,
+      note: heavy.isHeavy ? heavy.reason : undefined,
     })
   );
 

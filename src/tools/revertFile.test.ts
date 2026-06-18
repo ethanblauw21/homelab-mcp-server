@@ -2,6 +2,9 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { revertFileHandler } from "./revertFile.js";
 import { pctWriteFileHandler } from "./pctWriteFile.js";
 import { buildAgentFileReadCommand, buildAgentFileWriteCommand } from "./qmFiles.js";
+import { buildPctExecCommand } from "./pctHelpers.js";
+import { buildPctStatusCommand, buildPctPullCommand, buildStatCommand } from "./pctFiles.js";
+import { buildDockerInspectCommand } from "./dockerHelpers.js";
 import { FakeTransport } from "../ssh/fakeTransport.js";
 import { BackupStore } from "../backup/store.js";
 import { AuditLog } from "../audit/log.js";
@@ -18,6 +21,7 @@ function makeFullConfig(tmpDir: string): Config {
     audit: { logPath: path.join(tmpDir, "audit.jsonl") },
     container: { newFileMode: "0644", newFileUid: 0, newFileGid: 0, nodeTempDir: "/tmp" },
     snapshot: { perGuestCap: 3, vmstate: false },
+    tools: { readFileMaxBytes: 2 * 1024 * 1024, dryRunDiffMaxLines: 200 },
     guardrails: { commandDenylist: [], pathAllowlist: undefined, pathDenylist: [] },
   };
 }
@@ -257,5 +261,39 @@ describe("revertFileHandler — meta-routed targets", () => {
     const rec = audit.readAll().find((r) => r.tool === "revert_file");
     expect(rec?.vmid).toBe(200);
     expect(rec?.prevSha256).toBeTruthy(); // current "NEW" was hashed before restore
+  });
+
+  it("routes a docker backup revert through the bind-mount write flow", async () => {
+    const t = new FakeTransport();
+    const BIND = JSON.stringify([{ Type: "bind", Source: "/srv/config", Destination: "/config", RW: true }]);
+    // Stash a docker-targeted backup holding "OLD" (the bytes to restore).
+    const stored = await backupStore.storeBackup(
+      { kind: "docker", vmid: 101, container: "web", remotePath: "/config/app.conf" },
+      { type: "gzip-full", blob: zlib.gzipSync(Buffer.from("OLD")) },
+      "h"
+    );
+
+    // Revert flow: pct status → docker inspect → bind read (pct pull lxcPath) →
+    // restore → bind write (stat perms + pct push lxcPath).
+    t.setExecResult(buildPctStatusCommand(101), { stdout: "status: running\n", stderr: "", exitCode: 0 });
+    t.setExecResult(buildPctExecCommand(101, buildDockerInspectCommand("web")), { stdout: `cid-web ${BIND}`, stderr: "", exitCode: 0 });
+    // bind source path for /config/app.conf is /srv/config/app.conf
+    t.setExecResult(buildPctPullCommand(101, "/srv/config/app.conf", "/tmp/node1"), { stdout: "", stderr: "", exitCode: 0 });
+    t.setExecResult("mktemp -p '/tmp'", { stdout: "/tmp/node1", stderr: "", exitCode: 0 });
+    t.setFile("/tmp/node1", "NEW");
+    t.setExecResult(buildStatCommand(101, "/srv/config/app.conf"), { stdout: "644 0 0\n", stderr: "", exitCode: 0 });
+
+    const result = await revertFileHandler(
+      { backupPath: stored.backupPath! },
+      t, audit, backupStore, cfg
+    );
+
+    expect(result.vmid).toBe(101);
+    expect(result.bytes).toBe(3); // "OLD"
+    const rec = audit.readAll().find((r) => r.tool === "revert_file");
+    expect(rec?.vmid).toBe(101);
+    expect(rec?.container).toBe("web");
+    expect(rec?.containerId).toBe("cid-web");
+    expect(rec?.prevSha256).toBeTruthy(); // current "NEW" hashed before restore
   });
 });

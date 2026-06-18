@@ -28,6 +28,11 @@ export interface WriteFileResult {
   backupPath: string | null;
   auditId: string;
   revertible: boolean;
+  // ADR-008 §3 — diff-on-write: every write is its own review at zero extra I/O.
+  // New-file writes report diff against empty; binary content reports diff: null.
+  newFile: boolean;
+  diff: string | null;
+  diffTruncated?: boolean;
 }
 
 export interface WriteFileDryRunResult {
@@ -80,6 +85,18 @@ export async function writeFileHandler(
     cfg.backup.largeFileBytesThreshold
   );
 
+  // Diff-on-write (ADR-008 §3): computed once from the two contents already in
+  // hand, shared by the dryRun preview and the real write's response.
+  const diffable =
+    isTextContent(newContent) && (isNewFile || (prevContent !== null && isTextContent(prevContent)));
+  const diff = diffable
+    ? computeUnifiedDiff(
+        prevContent ? prevContent.toString("utf8") : "",
+        newContent.toString("utf8"),
+        cfg.tools.dryRunDiffMaxLines
+      )
+    : null;
+
   // dryRun: run the full pipeline READ-ONLY and return a preview. No write, no
   // backup stored, no audit record — a dry run has zero side effects (ADR-004 §6).
   if (input.dryRun) {
@@ -93,16 +110,6 @@ export async function writeFileHandler(
       largeFilePolicy: cfg.backup.largeFilePolicy,
       existingHashToPaths: existingHashMap,
     });
-
-    const diffable =
-      isTextContent(newContent) && (isNewFile || (prevContent !== null && isTextContent(prevContent)));
-    const diff = diffable
-      ? computeUnifiedDiff(
-          prevContent ? prevContent.toString("utf8") : "",
-          newContent.toString("utf8"),
-          cfg.tools.dryRunDiffMaxLines
-        )
-      : null;
 
     return {
       dryRun: true,
@@ -181,5 +188,8 @@ export async function writeFileHandler(
     backupPath: backupResult.backupPath ?? backupResult.existingPath ?? null,
     auditId: record.id,
     revertible: backupResult.revertible,
+    newFile: isNewFile,
+    diff: diff ? diff.diff : null,
+    diffTruncated: diff ? diff.truncated : undefined,
   };
 }

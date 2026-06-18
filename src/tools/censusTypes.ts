@@ -5,6 +5,7 @@ import type {
   GuestConfig,
   TailscaleSummary,
   DockerContainer,
+  SnapshotCapability,
 } from "./censusParsers.js";
 import type { Tier } from "../tiers/registry.js";
 
@@ -94,6 +95,12 @@ export interface GuestEntry {
    * Meaningful for `vms` entries; left undefined for containers.
    */
   agent?: { enabled: boolean; running?: boolean };
+  /**
+   * ADR-008 §5 — best-effort snapshot capability, computed from the redacted
+   * per-guest config (+ storage types when available). Present only at depth
+   * "full" (the heuristic needs the config). Drift treats a change here as real.
+   */
+  snapshotCapable?: SnapshotCapability;
 }
 
 export interface ServiceEntry {
@@ -152,7 +159,12 @@ export interface CensusSnapshot {
 export interface GuestDrift {
   added: number[];
   removed: number[];
-  changed: Array<{ vmid: number; from: string; to: string }>;
+  /**
+   * Per-guest changes. `field` names what changed (`status` by default for
+   * back-compat; `snapshotCapable` for an ADR-008 §5 capability transition —
+   * treated as real drift, not noise).
+   */
+  changed: Array<{ vmid: number; from: string; to: string; field?: "status" | "snapshotCapable" }>;
 }
 
 export interface StorageDrift {

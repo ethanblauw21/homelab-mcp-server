@@ -19,7 +19,10 @@ import type {
   NodeStatusInfo,
   StorageStatusInfo,
   AptUpdateInfo,
+  BackupArchive,
+  BackupCreateOpts,
 } from "./nodeOps.js";
+import { parseArchiveContent } from "../tools/backups.js";
 
 export interface ApiResponse {
   status: number;
@@ -246,5 +249,62 @@ export class ApiBackend implements NodeOps {
       package: String(p["Package"] ?? p["package"] ?? ""),
       version: String(p["Version"] ?? p["version"] ?? ""),
     }));
+  }
+
+  // ADR-008 §6 — vzdump archive lifecycle over the REST API.
+
+  createBackup(vmid: number, _type: GuestType, opts: BackupCreateOpts): Promise<TaskRef> {
+    const body: Record<string, unknown> = {
+      vmid,
+      storage: opts.storage,
+      mode: opts.mode,
+      compress: opts.compress ?? "zstd",
+      "notes-template": opts.notes,
+      remove: 0, // server-side rotation is OUR job (mcp- retention), not vzdump's
+    };
+    return this.unwrap("POST", `${this.base()}/vzdump`, `vzdump ${vmid}`, body).then((d) => ({
+      upid: typeof d === "string" ? d : String(d ?? ""),
+    }));
+  }
+
+  async listBackupArchives(storage: string, vmid?: number): Promise<BackupArchive[]> {
+    const data = await this.unwrap(
+      "GET",
+      `${this.base()}/storage/${storage}/content?content=backup`,
+      `list backups on ${storage}`
+    );
+    const all = parseArchiveContent(data).map((a) => ({
+      volid: a.volid,
+      vmid: a.vmid,
+      ctime: a.ctime,
+      sizeBytes: a.sizeBytes,
+      notes: a.notes,
+      format: a.format,
+    }));
+    return vmid === undefined ? all : all.filter((a) => a.vmid === vmid);
+  }
+
+  restoreBackup(vmid: number, type: GuestType, volid: string): Promise<TaskRef> {
+    // LXC restore is POST /lxc with ostemplate=<volid>+restore=1; QEMU is POST
+    // /qemu with archive=<volid>. Both force-overwrite the existing guest.
+    const seg = typeSeg(type);
+    const body: Record<string, unknown> =
+      type === "lxc"
+        ? { vmid, ostemplate: volid, restore: 1, force: 1 }
+        : { vmid, archive: volid, force: 1 };
+    return this.unwrap(
+      "POST",
+      `${this.base()}/${seg}`,
+      `restore ${type} ${vmid} from ${volid}`,
+      body
+    ).then((d) => ({ upid: typeof d === "string" ? d : String(d ?? "") }));
+  }
+
+  deleteBackupArchive(storage: string, volid: string): Promise<TaskRef> {
+    return this.unwrap(
+      "DELETE",
+      `${this.base()}/storage/${storage}/content/${encodeURIComponent(volid)}`,
+      `delete archive ${volid}`
+    ).then((d) => ({ upid: typeof d === "string" ? d : String(d ?? "") }));
   }
 }

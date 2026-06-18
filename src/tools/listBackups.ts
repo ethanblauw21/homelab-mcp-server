@@ -11,6 +11,13 @@ export const ListBackupsInputSchema = z.object({
     .positive()
     .optional()
     .describe("If set, scope the query to a container file (pct:<vmid>:<path>) instead of a host file"),
+  container: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "If set (with vmid), scope the query to a Docker container file (docker:<vmid>:<container>:<path>)."
+    ),
 });
 
 export type ListBackupsInput = z.infer<typeof ListBackupsInputSchema>;
@@ -21,7 +28,7 @@ export async function listBackupsHandler(
   input: ListBackupsInput,
   backupStore: BackupStore,
   cfg: Config
-): Promise<{ path: string; vmid?: number; versions: BackupVersionInfo[] }> {
+): Promise<{ path: string; vmid?: number; container?: string; versions: BackupVersionInfo[] }> {
   const pathResult = validatePath(input.path, {
     allowlist: cfg.guardrails.pathAllowlist,
     denylist: cfg.guardrails.pathDenylist,
@@ -30,11 +37,19 @@ export async function listBackupsHandler(
     throw new Error(`Invalid path: ${pathResult.reason}`);
   }
 
-  const target: BackupTarget =
-    input.vmid !== undefined
-      ? { kind: "pct", vmid: input.vmid, remotePath: input.path }
-      : { kind: "host", remotePath: input.path };
+  if (input.container !== undefined && input.vmid === undefined) {
+    throw new Error("`container` requires `vmid` (docker backups key on docker:<vmid>:<container>:<path>).");
+  }
+
+  let target: BackupTarget;
+  if (input.container !== undefined) {
+    target = { kind: "docker", vmid: input.vmid!, container: input.container, remotePath: input.path };
+  } else if (input.vmid !== undefined) {
+    target = { kind: "pct", vmid: input.vmid, remotePath: input.path };
+  } else {
+    target = { kind: "host", remotePath: input.path };
+  }
 
   const versions = backupStore.listBackupsForPath(target);
-  return { path: input.path, vmid: input.vmid, versions };
+  return { path: input.path, vmid: input.vmid, container: input.container, versions };
 }

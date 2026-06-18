@@ -38,6 +38,43 @@ describe("diffSnapshots", () => {
     expect(d.comparedTo).toBe("2026-06-01T00:00:00.000Z");
   });
 
+  it("flags a snapshotCapable transition as real drift (ADR-008 §5)", () => {
+    const prev = snap({
+      containers: [{ vmid: 101, name: "ct", status: "running", snapshotCapable: { capable: true } }],
+    });
+    const next = snap(
+      {
+        containers: [
+          {
+            vmid: 101,
+            name: "ct",
+            status: "running",
+            snapshotCapable: { capable: false, reason: "device passthrough" },
+          },
+        ],
+      },
+      "2026-06-02T00:00:00.000Z"
+    );
+    const d = diffSnapshots(prev, next, { storageDriftPercent: 10 });
+    expect(d.containers.changed).toEqual([
+      { vmid: 101, from: "capable", to: "incapable (device passthrough)", field: "snapshotCapable" },
+    ]);
+  });
+
+  it("treats an unobserved snapshotCapable (one side undefined) as not-observed, never a change", () => {
+    const prev = snap({
+      containers: [{ vmid: 101, name: "ct", status: "running" }], // summary depth: no field
+    });
+    const next = snap(
+      {
+        containers: [{ vmid: 101, name: "ct", status: "running", snapshotCapable: { capable: true } }],
+      },
+      "2026-06-02T00:00:00.000Z"
+    );
+    const d = diffSnapshots(prev, next, { storageDriftPercent: 10 });
+    expect(d.containers.changed).toEqual([]);
+  });
+
   it("flags storage usage change beyond the threshold but ignores small drift", () => {
     const prev = snap({
       storage: [

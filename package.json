@@ -3,14 +3,24 @@
   "version": "0.2.0",
   "description": "Tiered MCP server for Proxmox — least-privilege by default, every write backed up and revertible, fully audited",
   "license": "MIT",
-  "keywords": ["mcp", "proxmox", "homelab", "lxc", "claude", "model-context-protocol", "proxmox-ve", "self-hosted"],
+  "keywords": [
+    "mcp",
+    "proxmox",
+    "homelab",
+    "lxc",
+    "claude",
+    "model-context-protocol",
+    "proxmox-ve",
+    "self-hosted"
+  ],
   "bin": {
-    "homelab-mcp-server": "./dist/index.js"
+    "homelab-mcp-server": "dist/index.js"
   },
   "files": [
     "dist/",
     "scripts/setup.mjs",
     "scripts/setup.sh",
+    "scripts/setup.ps1",
     "scripts/doctor.mjs",
     "LICENSE"
   ],

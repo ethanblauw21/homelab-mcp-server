@@ -53,9 +53,10 @@ export async function pctExecHandler(
       timedOut: result.timedOut,
       timeoutSecs,
       confirmGated: confirmGated || undefined,
-      isLargeChange: heavy.isLarge,
+      // ADR-008 §4: heavy patterns annotate (isHeavy), never gate.
+      isHeavy: heavy.isHeavy || undefined,
       isRevertible: false,
-      note: heavy.isLarge ? heavy.reason : undefined,
+      note: heavy.isHeavy ? heavy.reason : undefined,
     })
   );
 

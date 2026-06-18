@@ -3,6 +3,17 @@ export interface LargeChangeResult {
   reason?: string;
 }
 
+/**
+ * Result of heavy-command detection (ADR-008 §4). Deliberately a distinct type
+ * from LargeChangeResult: a heavy command (curl/wget/tar/rsync/…) is an *audit
+ * annotation only* — it is never a "large change" and never gates. Conflating the
+ * two (the drift §4 removes) polluted the `largeOnly` audit filter.
+ */
+export interface HeavyCommandResult {
+  isHeavy: boolean;
+  reason?: string;
+}
+
 const HEAVY_COMMAND_PATTERNS: RegExp[] = [
   /\bfind\s+\/\s/,
   /\btar\s+/,
@@ -32,12 +43,12 @@ export function detectLargeFileWrite(
   return { isLarge: false };
 }
 
-export function detectHeavyCommand(command: string): LargeChangeResult {
+export function detectHeavyCommand(command: string): HeavyCommandResult {
   const normalized = command.replace(/\s+/g, " ").trim();
   for (const pattern of HEAVY_COMMAND_PATTERNS) {
     if (pattern.test(normalized)) {
-      return { isLarge: true, reason: `command matches heavy pattern: ${pattern}` };
+      return { isHeavy: true, reason: `command matches heavy pattern: ${pattern}` };
     }
   }
-  return { isLarge: false };
+  return { isHeavy: false };
 }

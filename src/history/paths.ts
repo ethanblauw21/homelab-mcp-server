@@ -7,9 +7,11 @@ import type { BackupTarget } from "../backup/store.js";
  *   - `host/<absolute-path>`        — node files
  *   - `pct/<vmid>/<absolute-path>`  — container files
  *
- * VM (`qm`) targets have NO mirror layout — the guest-agent file model exposes
- * no perms and the ADR scopes the history layer to host + pct. `qm` targets are
- * rejected here so the caller skips history rather than inventing a layout.
+ * VM (`qm`) and Docker (`docker`) targets have NO mirror layout — neither the
+ * guest-agent file model nor a Docker container exposes a descriptor-stable
+ * host/pct filesystem path the way `pct` does, and the ADR scopes the history
+ * layer to host + pct. Both are rejected here so the caller skips history rather
+ * than inventing a layout (ADR-008 keeps docker writes out of the git mirror).
  *
  * Everything in this module is pure (no I/O) and re-validates paths even though
  * the descriptor was already validated upstream: a mirror path is re-checked for
@@ -53,8 +55,8 @@ function stripLeadingSlash(absPath: string): string {
  * mirror layout) and for any path that fails the post-descriptor traversal guard.
  */
 export function mirrorMappingForTarget(target: BackupTarget): MirrorMapping {
-  if (target.kind === "qm") {
-    throw new Error("VM (qm) targets are not mirrored by the config-history layer");
+  if (target.kind === "qm" || target.kind === "docker") {
+    throw new Error(`${target.kind} targets are not mirrored by the config-history layer`);
   }
   assertSafeAbsolute(target.remotePath);
   const rel = stripLeadingSlash(target.remotePath);

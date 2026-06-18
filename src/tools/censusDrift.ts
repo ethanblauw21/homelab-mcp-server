@@ -50,11 +50,28 @@ function diffGuests(
   const changed: GuestDrift["changed"] = [];
   for (const g of next) {
     const p = prevById.get(g.vmid);
-    if (p && p.status !== g.status) {
+    if (!p) continue;
+    if (p.status !== g.status) {
       changed.push({ vmid: g.vmid, from: p.status, to: g.status });
+    }
+    // ADR-008 §5 — a snapshot-capability transition is real drift. Only compared
+    // when both snapshots observed the field (full depth); a snapshot that didn't
+    // collect config leaves it undefined and is treated as not-observed, never a
+    // change (mirrors the unavailableAtTier suppression rule).
+    if (p.snapshotCapable !== undefined && g.snapshotCapable !== undefined) {
+      const pc = capabilityLabel(p.snapshotCapable);
+      const gc = capabilityLabel(g.snapshotCapable);
+      if (pc !== gc) {
+        changed.push({ vmid: g.vmid, from: pc, to: gc, field: "snapshotCapable" });
+      }
     }
   }
   return { added, removed, changed };
+}
+
+/** Stable label for a snapshot-capability value, e.g. `capable` / `incapable (device passthrough)`. */
+function capabilityLabel(c: { capable: boolean; reason?: string }): string {
+  return c.capable ? "capable" : `incapable${c.reason ? ` (${c.reason})` : ""}`;
 }
 
 function diffStorage(

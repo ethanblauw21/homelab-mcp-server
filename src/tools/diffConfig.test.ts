@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { diffConfigHandler } from "./diffConfig.js";
 import { FakeTransport } from "../ssh/fakeTransport.js";
+import { buildPctExecCommand } from "./pctHelpers.js";
+import { buildPctStatusCommand, buildPctPullCommand } from "./pctFiles.js";
+import { buildDockerInspectCommand } from "./dockerHelpers.js";
 import type { BackupStore, BackupTarget, BackupVersionInfo } from "../backup/store.js";
 import type { Config } from "../config.js";
 
@@ -111,5 +114,29 @@ describe("diffConfigHandler", () => {
     const t = new FakeTransport();
     const store = fakeStore({ versions: [] });
     await expect(diffConfigHandler({}, t, store, makeConfig())).rejects.toThrow(/either/i);
+  });
+
+  it("reads current docker content via the bind-mount flow and diffs current → backup", async () => {
+    const BIND = JSON.stringify([{ Type: "bind", Source: "/srv/config", Destination: "/config", RW: true }]);
+    const t = new FakeTransport();
+    // docker target: status → inspect → bind read (pct pull lxcPath).
+    t.setExecResult(buildPctStatusCommand(101), { stdout: "status: running\n", stderr: "", exitCode: 0 });
+    t.setExecResult(buildPctExecCommand(101, buildDockerInspectCommand("web")), { stdout: `cid-web ${BIND}`, stderr: "", exitCode: 0 });
+    t.setExecResult("mktemp -p '/tmp'", { stdout: "/tmp/node1", stderr: "", exitCode: 0 });
+    t.setExecResult(buildPctPullCommand(101, "/srv/config/app.conf", "/tmp/node1"), { stdout: "", stderr: "", exitCode: 0 });
+    t.setFile("/tmp/node1", "a=1\nb=2\n");
+
+    const store = fakeStore({
+      target: { kind: "docker", vmid: 101, container: "web", remotePath: "/config/app.conf" },
+      versions: [{ backupPath: "/b/d.gz", timestamp: "d", kind: "gzip-full", sizeBytes: 10, revertible: true }],
+      restoreContent: Buffer.from("a=1\n"),
+    });
+
+    const res = await diffConfigHandler({ backupPath: "/b/d.gz" }, t, store, makeConfig());
+
+    expect(res.revertible).toBe(true);
+    // current has the extra "b=2" line a revert would remove.
+    expect(res.removedLines).toBe(1);
+    expect(res.diff).toContain("- b=2");
   });
 });

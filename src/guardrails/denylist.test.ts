@@ -171,8 +171,120 @@ describe("checkCommand — protected set (ADR-007 §4)", () => {
   });
 });
 
+describe("checkCommand — heavy patterns are never gated (ADR-008 §4 regression)", () => {
+  // The CONFIRM gate is reserved for availability-class commands and DENY for
+  // destruction. Heavy patterns (curl/wget/tar/rsync/…) are an audit annotation
+  // only and MUST resolve to `allow` — gating them was implementation drift.
+  const tierOf = (cmd: string) => checkCommand(cmd).tier;
+
+  it("allows curl (the dogfooding health-check case)", () =>
+    expect(tierOf("curl http://localhost:3000/health")).toBe("allow"));
+  it("allows wget", () => expect(tierOf("wget https://example.com/file.iso")).toBe("allow"));
+  it("allows tar", () => expect(tierOf("tar -czf backup.tar.gz /var")).toBe("allow"));
+  it("allows rsync", () => expect(tierOf("rsync -av /src /dst")).toBe("allow"));
+  it("allows scp", () => expect(tierOf("scp root@host:/etc/cfg /tmp/")).toBe("allow"));
+
+  it("the gate is unchanged for the classes it does cover", () => {
+    expect(tierOf("reboot")).toBe("confirm");
+    expect(tierOf("rm -rf /")).toBe("deny");
+  });
+});
+
 describe("checkCommand — obfuscation resistance", () => {
   it("normalizes multiple spaces in rm -rf /", () =>
     expect(checkCommand("rm   -rf    /").tier).toBe("deny"));
   it("normalizes tabs around mkfs", () => expect(checkCommand("mkfs.ext4\t/dev/sdb").tier).toBe("deny"));
+});
+
+// --- Mutation-hardening: targeted kills for survivors the broad suites miss ---
+
+describe("splitSegments — quote state must reset (mutation-hardening)", () => {
+  it("splits on a separator that appears AFTER a closing quote", () => {
+    // Kills the `if (c === quote) quote = null` → `if (false)` mutant: if the quote
+    // never resets, everything after the first quote is swallowed into one segment.
+    expect(splitSegments("echo 'a' ; ls")).toEqual(["echo 'a'", "ls"]);
+    expect(splitSegments('echo "x" && whoami')).toEqual(['echo "x"', "whoami"]);
+  });
+});
+
+describe("checkCommand — normalize() collapses internal whitespace runs", () => {
+  it("matches a configured entry even when the segment has doubled internal spaces", () => {
+    // Kills the normalize() `\s+` → `\s` mutant: with per-char (non-collapsing)
+    // replace, "deploy  prod" stays double-spaced and no longer prefix-matches
+    // the entry "deploy prod".
+    expect(checkCommand("deploy  prod now", ["deploy prod"]).tier).toBe("deny");
+  });
+});
+
+describe("checkCommand — protected set regex precision (mutation-hardening)", () => {
+  it("denies `mv` into /etc/pve with a multi-character gap before the path", () => {
+    // Kills the `\bmv\b[^\n]*` → `\bmv\b[^\n]` mutant (one char only).
+    expect(checkCommand("mv /tmp/staged.conf /etc/pve/storage.cfg").tier).toBe("deny");
+  });
+
+  it("denies a redirect into /etc/pve with NO space after `>`", () => {
+    // Kills the `>\s*` → `>\s` mutant (exactly-one-whitespace): ">/etc/pve/" has none.
+    expect(checkCommand("echo x >/etc/pve/local.cfg").tier).toBe("deny");
+  });
+
+  it("surfaces the full protected-set reason text (matched pattern included)", () => {
+    // Kills the reason-string mutant on the second template fragment.
+    const v = checkCommand("rm -rf /etc/pve/qemu-server/100.conf");
+    expect(v.tier).toBe("deny");
+    expect(v.reason).toMatch(/at every tier including root/);
+    expect(v.reason).toMatch(/matched/);
+  });
+});
+
+describe("checkCommand — DENY fork-bomb regex internals (mutation-hardening)", () => {
+  it("denies a spaced-out fork bomb (kills the \\s* / .* quantifier mutants)", () => {
+    // `:() { x x | y & z z }` exercises whitespace after :() and multi-char runs
+    // between { | & } — distinguishing `\s*`→`\S*` and `.*`→`.` mutants from the real
+    // pattern, all of which a compact `:(){:|:&}` cannot.
+    expect(checkCommand(":() { x x | y & z z }").tier).toBe("deny");
+  });
+});
+
+describe("checkCommand — CONFIRM command-position logic (mutation-hardening)", () => {
+  it("does NOT confirm `init` with a runlevel other than 0/6", () => {
+    // Kills `(tokens[1]==="0"||tokens[1]==="6")`→`(true)` and the `&&`→`||` /
+    // `cmd==="init"`→`true` mutants on the init guard.
+    expect(checkCommand("init 3").tier).toBe("allow");
+  });
+
+  it("does NOT confirm an arbitrary command merely because its argument is 0", () => {
+    // Kills `cmd === "init" && (...)` → `true && (...)`.
+    expect(checkCommand("echo 0").tier).toBe("allow");
+  });
+
+  it("finds the first NON-FLAG systemctl subcommand (startsWith, not endsWith)", () => {
+    // Kills `!t.startsWith("-")` → `!t.endsWith("-")`: with a long flag present,
+    // endsWith would pick the flag and miss the real `reboot` subcommand.
+    expect(checkCommand("systemctl --now reboot").tier).toBe("confirm");
+  });
+
+  it("confirms `systemctl halt` (kills the SYSTEMCTL_CONFIRM \"halt\"→\"\" mutant)", () => {
+    expect(checkCommand("systemctl halt").tier).toBe("confirm");
+  });
+});
+
+describe("checkCommand — configured denylist matching precision (mutation-hardening)", () => {
+  it("matches when ANY segment matches, not only when ALL do (kills some→every)", () => {
+    expect(checkCommand("dangerctl wipe; ls -la", ["dangerctl wipe"]).tier).toBe("deny");
+  });
+
+  it("is segment-PREFIX anchored on a word boundary, not a bare substring (entry + space)", () => {
+    // Kills `seg.startsWith(entry + " ")` → `seg.startsWith(entry + "")`:
+    // "foobar" must NOT match the entry "foo" (only "foo " or exact "foo").
+    expect(checkCommand("foobar --help", ["foo"]).tier).toBe("allow");
+    expect(checkCommand("foo --help", ["foo"]).tier).toBe("deny");
+  });
+
+  it("strips the `confirm:` prefix and trims the entry in the confirm reason", () => {
+    // Kills the line-170 mutants (`.trim()` removal, `\"confirm:\".length`→0) AND the
+    // line-190 reason-string emptying mutant — all observable in the reason text.
+    const v = checkCommand("foo", ["confirm: foo"]);
+    expect(v.tier).toBe("confirm");
+    expect(v.reason).toMatch(/configured confirm-tier command "foo" requires confirm:true/);
+  });
 });

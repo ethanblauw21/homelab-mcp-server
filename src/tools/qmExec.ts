@@ -82,7 +82,7 @@ export async function qmExecHandler(
     );
   }
   if (result.outTruncated) notes.push("stdout truncated by agent");
-  if (heavy.isLarge && heavy.reason) notes.push(heavy.reason);
+  if (heavy.isHeavy && heavy.reason) notes.push(heavy.reason);
 
   await audit.append(
     buildAuditRecord({
@@ -95,7 +95,8 @@ export async function qmExecHandler(
       timedOut: result.timedOut,
       timeoutSecs,
       confirmGated: confirmGated || undefined,
-      isLargeChange: heavy.isLarge,
+      // ADR-008 §4: heavy patterns annotate (isHeavy), never gate.
+      isHeavy: heavy.isHeavy || undefined,
       isRevertible: false,
       note: notes.length ? notes.join("; ") : undefined,
     })

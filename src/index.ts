@@ -32,6 +32,11 @@ import { QmAgentPingInputSchema, qmAgentPingHandler } from "./tools/qmAgentPing.
 import { QmExecInputSchema, qmExecHandler } from "./tools/qmExec.js";
 import { QmReadFileInputSchema, qmReadFileHandler } from "./tools/qmReadFile.js";
 import { QmWriteFileInputSchema, qmWriteFileHandler } from "./tools/qmWriteFile.js";
+import { DockerPsInputSchema, dockerPsHandler } from "./tools/dockerPs.js";
+import { DockerExecInputSchema, dockerExecHandler } from "./tools/dockerExec.js";
+import { DockerLogsInputSchema, dockerLogsHandler } from "./tools/dockerLogs.js";
+import { DockerReadFileInputSchema, dockerReadFileHandler } from "./tools/dockerReadFile.js";
+import { DockerWriteFileInputSchema, dockerWriteFileHandler } from "./tools/dockerWriteFile.js";
 import { HealthCheckInputSchema, healthCheckHandler } from "./tools/healthCheck.js";
 import { TailLogInputSchema, tailLogHandler } from "./tools/tailLog.js";
 import { QueryAuditInputSchema, queryAuditHandler } from "./tools/queryAudit.js";
@@ -52,6 +57,13 @@ import {
   GuestRestartInputSchema,
   guestRestartHandler,
 } from "./tools/lifecycle.js";
+import {
+  GuestBackupInputSchema,
+  guestBackupHandler,
+  GuestBackupRestoreInputSchema,
+  guestBackupRestoreHandler,
+} from "./tools/backupTools.js";
+import { ComposeRedeployInputSchema, composeRedeployHandler } from "./tools/composeRedeploy.js";
 
 const server = new McpServer({
   name: "homelab-ssh-mcp",
@@ -450,6 +462,97 @@ register(
   }
 );
 
+// ADR-008 — Docker layer (companion tier). All five ride the LXC `pct exec`
+// plumbing; the daemon socket is never exposed. docker_read_file is faithful
+// (no redaction); docker_logs is always redacted; docker_write_file runs the
+// full backup + audit pipeline but is excluded from the git mirror (no
+// descriptor-stable host/pct path), like qm.
+register(
+  "docker_ps",
+  {
+    description:
+      "List Docker containers running inside an LXC container (docker ps). Read-only, not audited. " +
+      "Returns each container's name, image, status, and compose project.",
+    inputSchema: DockerPsInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await dockerPsHandler(input, sshTransport, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "docker_exec",
+  {
+    description:
+      "Run a command inside a Docker container (docker exec) hosted in an LXC container. The inner " +
+      "command passes the same two-tier denylist as execute/pct_exec/qm_exec; CONFIRM-tier commands " +
+      "require confirm: true. Audited (records vmid + container).",
+    inputSchema: DockerExecInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await dockerExecHandler(input, sshTransport, audit, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "docker_logs",
+  {
+    description:
+      "Read the tail of a Docker container's logs (docker logs) hosted in an LXC container. Strict " +
+      "input validation (since grammar, line cap). Output ALWAYS passes through secret redaction " +
+      "before return. Read-only.",
+    inputSchema: DockerLogsInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await dockerLogsHandler(input, sshTransport, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "docker_read_file",
+  {
+    description:
+      "Read a file from inside a Docker container hosted in an LXC container. Uses the bind-mount fast " +
+      "path when the path is bind-mounted (reads the LXC source directly), else relays via docker cp. " +
+      "Enforces the same read cap + offset/maxBytes window as the other read tools. Not redacted " +
+      "(fidelity is the point); requires the LXC container to be running.",
+    inputSchema: DockerReadFileInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await dockerReadFileHandler(input, sshTransport, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "docker_write_file",
+  {
+    description:
+      "Write/overwrite a file inside a Docker container hosted in an LXC container. Uses the bind-mount " +
+      "fast path (preserves perms) when possible, else relays via docker cp and restores ownership " +
+      "best-effort. Runs the full backup + audit pipeline (dryRun previews a diff with no side effects). " +
+      "Returns a diff-on-write. Requires the LXC container to be running.",
+    inputSchema: DockerWriteFileInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await dockerWriteFileHandler(input, sshTransport, audit, backupStore, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
 register(
   "health_check",
   {
@@ -566,6 +669,60 @@ register(
   async (input) => {
     try {
       const result = await guestRestartHandler(input, nodeOps, audit, config, isRootTier);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+// ADR-008 §6 — outcome-level rollback for snapshot-incapable guests (companion
+// tier; vzdump via NodeOps — API where configured, SSH otherwise). The mcp-
+// ownership boundary + retention + confirm gate make these MCP-enforced.
+register(
+  "guest_backup",
+  {
+    description:
+      "Create a vzdump archive of a guest (the rollback path for guests that cannot snapshot, e.g. GPU " +
+      "passthrough). Confirm-gated: vzdump is heavy and suspend/stop modes interrupt service. Archives are " +
+      "note-tagged mcp- and retention-capped per guest (default 1); human-made archives are never touched.",
+    inputSchema: GuestBackupInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await guestBackupHandler(input, nodeOps, audit, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "guest_backup_restore",
+  {
+    description:
+      "Restore a guest from a server-managed (mcp-) vzdump archive. DESTRUCTIVE: REPLACES THE ENTIRE GUEST " +
+      "(disk + config) from the archive. Requires confirm: true; only mcp- archives are eligible; a running " +
+      "guest is refused unless stopIfRunning: true (then it is stopped, restored, and restarted).",
+    inputSchema: GuestBackupRestoreInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await guestBackupRestoreHandler(input, nodeOps, audit, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "compose_redeploy",
+  {
+    description:
+      "Redeploy a Docker Compose stack inside an LXC: docker compose -f <composePath> up -d (run on the LXC " +
+      "host via pct exec). Confirm-gated (recreates containers, disrupts services). Pair with revert_file on " +
+      "the compose file for a seconds-scale stack rollback (no vzdump needed). Companion tier; audited.",
+    inputSchema: ComposeRedeployInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await composeRedeployHandler(input, sshTransport, audit, config);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }

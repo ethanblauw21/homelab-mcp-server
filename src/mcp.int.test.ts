@@ -27,6 +27,13 @@ beforeAll(async () => {
       SSH_SKIP_HOST_VERIFICATION: "true",
       BACKUP_DIR: path.join(rootDir, ".int-test-backups"),
       AUDIT_LOG_PATH: path.join(rootDir, ".int-test-audit.jsonl"),
+      // ADR-007: tools above the active tier are not registered at all. This
+      // suite exercises the host tools (execute/read_file/list_directory) — the
+      // only ones meaningfully runnable against the bare Alpine harness (no
+      // pct/qm) — so it must run at the root tier. The default level is
+      // companion, so without the exact root acknowledgment string the host
+      // tools never register and every call below MCP-errors.
+      MCP_HOST_ROOT_ENABLED: "I-understand-Claude-gets-root-and-can-break-this-node",
     },
   });
 
@@ -40,12 +47,25 @@ afterAll(async () => {
 
 describeIfDocker("MCP stdio protocol", () => {
   describe("tool registration", () => {
-    it("lists all six tools", async () => {
+    it("registers the core tools at the root tier", async () => {
+      // Superset check, not exact equality: the root-tier tool set grows with
+      // every ADR (008 added docker_*, 009 the integrity tools, …). Asserting a
+      // fixed list re-breaks this suite on each ADR — assert the core ADR-001
+      // surface is present and let the set grow underneath it.
       const { tools } = await client.listTools();
-      const names = tools.map((t) => t.name).sort();
-      expect(names).toEqual(
-        ["execute", "list_backups", "list_directory", "pct_exec", "pct_list", "read_file", "revert_file", "write_file"]
-      );
+      const names = new Set(tools.map((t) => t.name));
+      for (const core of [
+        "execute",
+        "read_file",
+        "write_file",
+        "list_directory",
+        "pct_exec",
+        "pct_list",
+        "revert_file",
+        "list_backups",
+      ]) {
+        expect(names.has(core)).toBe(true);
+      }
     });
 
     it("each tool has a description and inputSchema", async () => {
