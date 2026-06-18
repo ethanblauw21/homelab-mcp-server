@@ -97,6 +97,21 @@ export function parsePveVersion(output: string): string {
   return m ? m[1]! : first;
 }
 
+/**
+ * Hostname of the PVE API base URL (e.g. "https://10.0.0.10:8006" → "10.0.0.10").
+ * Used to populate the census `host` field on the API transport so it matches
+ * the SSH path's `cfg.ssh.host` (#12 cross-transport parity). Returns "" when
+ * the URL is absent or unparseable.
+ */
+export function hostnameFromBaseUrl(baseUrl: string | undefined): string {
+  if (!baseUrl) return "";
+  try {
+    return new URL(baseUrl).hostname;
+  } catch {
+    return "";
+  }
+}
+
 /** Parse `free -b` → total/used bytes for the Mem row. */
 export function parseFreeBytes(output: string): { totalBytes: number; usedBytes: number } {
   for (const line of nonEmptyLines(output)) {

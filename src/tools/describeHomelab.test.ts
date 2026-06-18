@@ -365,7 +365,8 @@ describe("describeHomelabHandler — API census path (ADR-007 §6, observe tier)
     const ssh = new FakeTransport();
     const snap = await describeHomelabHandler(parse({}), ssh, store, cfg, Date.now, fakeNode(), "observe");
 
-    expect(snap.sections.node?.version).toBe("pve-manager/8.1.4");
+    // #12 — the API path now normalizes to the bare X.Y.Z like the SSH path.
+    expect(snap.sections.node?.version).toBe("8.1.4");
     expect(snap.sections.node?.cpu).toBe(8);
     expect(snap.sections.node?.memBytes).toBe(16766517248);
     expect(snap.sections.storage?.[0]).toMatchObject({ name: "local", active: true });
@@ -420,6 +421,53 @@ describe("describeHomelabHandler — API census path (ADR-007 §6, observe tier)
     expect(snap2.drift).toBeDefined();
     // The previous run saw vmbr0; the unavailable marker must NOT report it removed.
     expect(snap2.drift?.network.removed).toEqual([]);
+  });
+
+  // #12 — cross-transport field parity: the same node served over API and SSH
+  // must agree on `node.version` (bare X.Y.Z) and `host`. No live node — fixtures.
+  it("yields the same version + host over the API path as the SSH path (#12)", async () => {
+    const store = new CensusStore(tmpDir, 30);
+
+    // SSH path: companion tier, host from cfg.ssh.host, version stripped by parsePveVersion.
+    const sshCfg = makeConfig(tmpDir);
+    const sshSnap = await describeHomelabHandler(
+      parse({ sections: ["node"] }),
+      baseTransport(),
+      store,
+      sshCfg
+    );
+
+    // API path: observe tier, no SSH host configured — host must derive from the
+    // API base URL, and the full "pve-manager/<ver>/<hash>" must strip to bare.
+    const apiCfg = makeConfig(tmpDir);
+    apiCfg.ssh.host = ""; // observe/operate: no SSH credentials → no ssh.host
+    (apiCfg as Config).api = { baseUrl: "https://10.0.0.10:8006", requestTimeoutMs: 15_000 };
+    const apiNode = fakeNode({
+      async nodeStatus(): Promise<NodeStatusInfo> {
+        return {
+          loadavg: [0.1, 0.2, 0.3],
+          memoryTotal: 16766517248,
+          memoryUsed: 4233470720,
+          uptimeSecs: 266400,
+          version: "pve-manager/8.1.4/d0fde103346cf89a", // full form w/ commit hash
+          cpuCount: 8,
+        };
+      },
+    });
+    const apiSnap = await describeHomelabHandler(
+      parse({ sections: ["node"] }),
+      new FakeTransport(),
+      store,
+      apiCfg,
+      Date.now,
+      apiNode,
+      "observe"
+    );
+
+    expect(apiSnap.sections.node?.version).toBe(sshSnap.sections.node?.version); // both "8.1.4"
+    expect(apiSnap.sections.node?.version).toBe("8.1.4");
+    expect(apiSnap.host).toBe(sshSnap.host); // both "10.0.0.10"
+    expect(apiSnap.host).toBe("10.0.0.10");
   });
 });
 

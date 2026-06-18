@@ -16,6 +16,7 @@ import {
   hasDevicePassthrough,
   rootfsStorageName,
   evaluateSnapshotCapable,
+  hostnameFromBaseUrl,
 } from "./censusParsers.js";
 
 describe("parsePveVersion", () => {
@@ -26,6 +27,18 @@ describe("parsePveVersion", () => {
   });
   it("falls back to the raw first line when format is unexpected", () => {
     expect(parsePveVersion("weird-output")).toBe("weird-output");
+  });
+});
+
+describe("hostnameFromBaseUrl (#12)", () => {
+  it("extracts the host from a PVE API base URL", () => {
+    expect(hostnameFromBaseUrl("https://10.0.0.10:8006")).toBe("10.0.0.10");
+    expect(hostnameFromBaseUrl("https://pve.lan:8006/")).toBe("pve.lan");
+  });
+  it("returns empty for absent or unparseable input", () => {
+    expect(hostnameFromBaseUrl(undefined)).toBe("");
+    expect(hostnameFromBaseUrl("")).toBe("");
+    expect(hostnameFromBaseUrl("not a url")).toBe("");
   });
 });
 

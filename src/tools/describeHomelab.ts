@@ -5,6 +5,7 @@ import { buildPctExecCommand, parsePctList, type PctContainer } from "./pctHelpe
 import { buildQmAgentPingCommand } from "./qmHelpers.js";
 import {
   parsePveVersion,
+  hostnameFromBaseUrl,
   parseFreeBytes,
   parseLoadAvg,
   parseGuestConfig,
@@ -325,7 +326,10 @@ export async function describeHomelabHandler(
   const raw: RawCensusSnapshot = {
     schemaVersion: CENSUS_SCHEMA_VERSION,
     ts: new Date(now()).toISOString(),
-    host: cfg.ssh.host,
+    // #12 — the SSH path populates host from cfg.ssh.host; the API path (observe/
+    // operate, no SSH host configured) derives it from the API base URL so the
+    // census `host` field is consistent regardless of which transport served it.
+    host: cfg.ssh.host || hostnameFromBaseUrl(cfg.api?.baseUrl),
     depth,
     sections,
     errors,
@@ -397,7 +401,10 @@ async function buildApiCensus(
     try {
       const s = await nodeOps.nodeStatus();
       const node: NodeSection = {
-        version: s.version ?? "",
+        // #12 — normalize to the bare X.Y.Z via the SAME parser the SSH path
+        // uses, so node.version agrees across transports (the API reports the
+        // full "pve-manager/<ver>/<hash>" string; SSH already strips it).
+        version: s.version ? parsePveVersion(s.version) : "",
         uptime: formatUptime(s.uptimeSecs),
         cpu: s.cpuCount ?? 0,
         memBytes: s.memoryTotal ?? 0,
