@@ -19,6 +19,10 @@ import {
   buildSnapshotCreateCommand,
   buildSnapshotRollbackCommand,
   buildSnapshotDeleteCommand,
+  buildGuestConfigCommand,
+  isSnapshotFeatureError,
+  analyzeSnapshotBlockers,
+  describeSnapshotBlock,
 } from "./snapshots.js";
 
 // ---------------------------------------------------------------------------
@@ -65,6 +69,23 @@ async function guestState(
   return parseGuestStatus(res.stdout);
 }
 
+/**
+ * Read `pct config`/`qm config` and turn a "snapshot feature unavailable"
+ * failure into a structured reason naming the blocking volume(s). Best-effort:
+ * returns null when the config can't be read (the caller keeps the raw error).
+ */
+async function diagnoseSnapshotFeatureFailure(
+  transport: SshTransport,
+  type: GuestType,
+  vmid: number,
+  timeoutMs: number
+): Promise<string | null> {
+  const res = await transport.exec(buildGuestConfigCommand(type, vmid), timeoutMs);
+  if (res.exitCode !== 0) return null;
+  const blockers = analyzeSnapshotBlockers(res.stdout, type);
+  return describeSnapshotBlock(blockers, vmid);
+}
+
 // ---------------------------------------------------------------------------
 // snapshot_create
 // ---------------------------------------------------------------------------
@@ -107,9 +128,21 @@ export async function snapshotCreateHandler(
     }),
     timeoutMs
   );
-  // Surface storage-driver errors verbatim (directory storage refuses snapshots).
+  // Surface storage-driver errors. For the "feature is not available" class —
+  // Proxmox refusing a live snapshot because of a non-snapshottable volume — go
+  // one step further and read the guest config to name the actual blocker (a
+  // bind mount / passthrough), so the caller gets a fix-naming reason rather
+  // than the opaque Proxmox string (#15). Diagnosis is best-effort: a failed
+  // config read falls back to the raw error.
   if (createRes.exitCode !== 0) {
-    throw new Error(`snapshot create failed (exit ${createRes.exitCode}): ${createRes.stderr.trim()}`);
+    const raw = createRes.stderr.trim();
+    if (isSnapshotFeatureError(raw)) {
+      const reason = await diagnoseSnapshotFeatureFailure(transport, type, input.vmid, timeoutMs);
+      if (reason) {
+        throw new Error(`snapshot create failed (exit ${createRes.exitCode}): ${reason} [proxmox: ${raw}]`);
+      }
+    }
+    throw new Error(`snapshot create failed (exit ${createRes.exitCode}): ${raw}`);
   }
 
   const record = buildAuditRecord({

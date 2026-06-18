@@ -88,6 +88,65 @@ describe("snapshotCreateHandler", () => {
     t.setExecResult("pct snapshot 101 mcp-20260609-213000", { stdout: "", stderr: "storage does not support snapshots", exitCode: 1 });
     await expect(snapshotCreateHandler({ vmid: 101 }, t, audit, cfg, NOW)).rejects.toThrow(/does not support snapshots/i);
   });
+
+  it("enriches a 'feature is not available' failure with the bind-mount blocker (#15)", async () => {
+    const t = new FakeTransport();
+    t.setExecResult("pct list", { stdout: PCT_LIST_101, stderr: "", exitCode: 0 });
+    t.setExecResult("pct listsnapshot 101", { stdout: "", stderr: "", exitCode: 0 });
+    t.setExecResult("pct snapshot 101 mcp-20260609-213000", {
+      stdout: "",
+      stderr: "snapshot feature is not available",
+      exitCode: 255,
+    });
+    // The CT101 real case: mp0 bind-mounts /mnt/media.
+    t.setExecResult("pct config 101", {
+      stdout: ["rootfs: local-lvm:vm-101-disk-0,size=8G", "mp0: /mnt/media,mp=/data"].join("\n"),
+      stderr: "",
+      exitCode: 0,
+    });
+    await expect(snapshotCreateHandler({ vmid: 101 }, t, audit, cfg, NOW)).rejects.toThrow(
+      /mp0 \(host dir \/mnt\/media bind-mounted at \/data\).*guest_backup/s
+    );
+    // The raw Proxmox string is preserved for the operator.
+    await expect(snapshotCreateHandler({ vmid: 101 }, t, audit, cfg, NOW)).rejects.toThrow(
+      /proxmox: snapshot feature is not available/
+    );
+  });
+
+  it("falls back to the raw error when the config read fails (#15)", async () => {
+    const t = new FakeTransport();
+    t.setExecResult("pct list", { stdout: PCT_LIST_101, stderr: "", exitCode: 0 });
+    t.setExecResult("pct listsnapshot 101", { stdout: "", stderr: "", exitCode: 0 });
+    t.setExecResult("pct snapshot 101 mcp-20260609-213000", {
+      stdout: "",
+      stderr: "snapshot feature is not available",
+      exitCode: 255,
+    });
+    t.setExecResult("pct config 101", { stdout: "", stderr: "permission denied", exitCode: 1 });
+    const err = await snapshotCreateHandler({ vmid: 101 }, t, audit, cfg, NOW).catch((e) => e as Error);
+    expect(err.message).toContain("snapshot feature is not available");
+    expect(err.message).not.toContain("[proxmox:"); // no enrichment wrapper
+  });
+
+  it("does NOT read the config for an unrelated failure (#15)", async () => {
+    const t = new FakeTransport();
+    const seen: string[] = [];
+    const wrapped: typeof t.exec = async (cmd, ms) => {
+      seen.push(cmd);
+      return t.exec(cmd, ms);
+    };
+    t.setExecResult("pct list", { stdout: PCT_LIST_101, stderr: "", exitCode: 0 });
+    t.setExecResult("pct listsnapshot 101", { stdout: "", stderr: "", exitCode: 0 });
+    t.setExecResult("pct snapshot 101 mcp-20260609-213000", {
+      stdout: "",
+      stderr: "got lock request timeout",
+      exitCode: 1,
+    });
+    await expect(
+      snapshotCreateHandler({ vmid: 101 }, { ...t, exec: wrapped } as typeof t, audit, cfg, NOW)
+    ).rejects.toThrow(/lock request timeout/);
+    expect(seen).not.toContain("pct config 101");
+  });
 });
 
 describe("snapshotListHandler", () => {

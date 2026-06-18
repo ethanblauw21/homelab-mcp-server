@@ -131,3 +131,95 @@ export function buildSnapshotDeleteCommand(type: GuestType, vmid: number, name: 
 export function parseGuestStatus(output: string): string {
   return parsePctStatus(output);
 }
+
+// ---------------------------------------------------------------------------
+// Snapshot-feature failure diagnosis (#15) — turn a raw "feature is not
+// available" into the actual blocking reason (a bind mount / passthrough),
+// computed purely from the guest config so callers don't diagnose by hand.
+// ---------------------------------------------------------------------------
+
+/** `pct config <vmid>` / `qm config <vmid>` — the source for blocker diagnosis. */
+export function buildGuestConfigCommand(type: GuestType, vmid: number): string {
+  return `${type} config ${vmid}`;
+}
+
+/**
+ * True when a failed snapshot create is the "snapshot feature unavailable" class
+ * (Proxmox refuses live-snapshotting a guest with a non-snapshottable volume) —
+ * the only failure worth enriching with a config diagnosis.
+ */
+export function isSnapshotFeatureError(stderr: string): boolean {
+  return /feature\s+is\s+not\s+available|does not support snapshots|snapshot.*not supported/i.test(stderr);
+}
+
+export interface SnapshotBlocker {
+  /** Config key, e.g. "mp0", "scsi1", "hostpci0". */
+  key: string;
+  kind: "bind-mount" | "device-passthrough" | "raw-disk";
+  /** Human detail, e.g. "host dir /mnt/media bind-mounted at /data". */
+  detail: string;
+}
+
+/**
+ * Find the volumes that prevent a live snapshot, purely from `pct config` /
+ * `qm config` text. The high-confidence signal is a **bind mount** (an `mpN:` /
+ * disk whose volume is an absolute host path, not a `storage:volume` reference) —
+ * Proxmox cannot snapshot a guest backed by a host directory. Device passthrough
+ * (`hostpciN`, `devN`) is the other common blocker. Returns [] when nothing
+ * obvious is found (the caller then keeps the raw error + a generic hint).
+ */
+export function analyzeSnapshotBlockers(configText: string, type: GuestType): SnapshotBlocker[] {
+  const blockers: SnapshotBlocker[] = [];
+  for (const raw of configText.split("\n")) {
+    const line = raw.trim();
+    const colon = line.indexOf(":");
+    if (colon === -1) continue;
+    const key = line.slice(0, colon).trim();
+    const value = line.slice(colon + 1).trim();
+    if (!key || !value) continue;
+    const volume = value.split(",")[0]?.trim() ?? "";
+
+    if (type === "pct") {
+      // mpN / rootfs whose volume is an absolute host path ⇒ bind mount.
+      if (/^mp\d+$/.test(key) && volume.startsWith("/")) {
+        const mp = value.match(/(?:^|,)mp=([^,]+)/)?.[1];
+        blockers.push({
+          key,
+          kind: "bind-mount",
+          detail: `host dir ${volume}${mp ? ` bind-mounted at ${mp}` : ""}`,
+        });
+      } else if (/^dev\d+$/.test(key)) {
+        blockers.push({ key, kind: "device-passthrough", detail: `device passthrough ${volume}` });
+      }
+    } else {
+      // qm: a disk pointing at a raw host path/device, or PCI passthrough.
+      if (/^hostpci\d+$/.test(key)) {
+        blockers.push({ key, kind: "device-passthrough", detail: `PCI passthrough ${volume}` });
+      } else if (/^(scsi|virtio|sata|ide)\d+$/.test(key) && volume.startsWith("/")) {
+        blockers.push({ key, kind: "raw-disk", detail: `raw host disk ${volume}` });
+      }
+    }
+  }
+  return blockers;
+}
+
+/**
+ * Build the enriched, single-line reason from the blockers (or a generic hint
+ * when none were identifiable). vzdump is always offered as the fallback — it is
+ * the ADR-008 §6 rollback path for snapshot-incapable guests.
+ */
+export function describeSnapshotBlock(blockers: SnapshotBlocker[], vmid: number): string {
+  if (blockers.length === 0) {
+    return (
+      `snapshot feature unavailable for guest ${vmid} and no blocking volume was identifiable from its config. ` +
+      `A non-snapshottable storage (e.g. directory-type) or a passthrough device is the usual cause. ` +
+      `vzdump backup (guest_backup) is available as the rollback path instead.`
+    );
+  }
+  const list = blockers.map((b) => `${b.key} (${b.detail})`).join("; ");
+  return (
+    `snapshot feature unavailable for guest ${vmid}: ${list} ` +
+    `${blockers.length > 1 ? "are" : "is"} not snapshottable, so Proxmox refuses a live snapshot. ` +
+    `Use vzdump backup (guest_backup) for this guest instead — it is the supported rollback path.`
+  );
+}
