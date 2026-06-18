@@ -45,6 +45,10 @@ export async function executeHandler(
       tool: "execute",
       host: cfg.ssh.host,
       cmd: input.command,
+      // ADR-009: an exec can mutate any file; its scope is unknowable up front, so
+      // it anchors to "unknown" — query_audit's unknownScopeOnly surfaces these as
+      // candidate causes when verify_integrity reports unexplained drift.
+      hashScope: "unknown",
       exitCode: result.exitCode,
       signal: result.signal,
       timedOut: result.timedOut,

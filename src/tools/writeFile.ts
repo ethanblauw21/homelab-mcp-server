@@ -9,6 +9,7 @@ import type { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
 import { computeUnifiedDiff } from "../util/diff.js";
 import type { ConfigHistory } from "../history/configHistory.js";
+import { contentLeafHash } from "../integrity/leafHash.js";
 
 export const WriteFileInputSchema = z.object({
   path: z.string().min(1).describe("Absolute path on the Proxmox host"),
@@ -162,6 +163,11 @@ export async function writeFileHandler(
     prevSha256: prevHash ?? undefined,
     newSha256: newHash,
     bytes: newContent.length,
+    // ADR-009 hash anchor: the L2/L3 forest content-leaf hashes, so a later
+    // verify_integrity recognizes this write as the explainer for the drift.
+    beforeHash: prevContent ? contentLeafHash(prevContent) : undefined,
+    afterHash: contentLeafHash(newContent),
+    hashScope: input.path,
     ...(rootTier ? { rootTier: true } : {}),
     isLargeChange: largeChange.isLarge,
     isRevertible: backupResult.revertible,

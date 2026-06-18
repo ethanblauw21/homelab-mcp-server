@@ -21,6 +21,7 @@ import {
 } from "./dockerFiles.js";
 import type { DockerInspect } from "./dockerHelpers.js";
 import type { ConfigHistory } from "../history/configHistory.js";
+import { contentLeafHash } from "../integrity/leafHash.js";
 
 export const RevertFileInputSchema = z.object({
   backupPath: z.string().min(1).describe(
@@ -209,6 +210,11 @@ export async function revertFileHandler(
     prevSha256: prevHash,
     newSha256: sha256(restored),
     bytes: restored.length,
+    // ADR-009 hash anchor: a revert is a write, so it must also explain the drift
+    // it produces (host/pct match a forest leaf; qm/docker are fingerprints only).
+    beforeHash: currentContent ? contentLeafHash(currentContent) : undefined,
+    afterHash: contentLeafHash(restored),
+    hashScope: target.remotePath,
     note: `Reverted from backup: ${input.backupPath}`,
   });
 

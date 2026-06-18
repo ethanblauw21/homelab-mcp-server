@@ -150,6 +150,31 @@ if (wasInteractive && !bootstrapMode) {
   bootstrapMode = "auto";
 }
 
+// ADR-009 — integrity forest tracking depth (companion only; the forest reads file
+// content over the same SSH transport). Maps the operator's intent to a level:
+//   last-edited   → L1 (mtime; cheap, spoofable — "what looks touched?")
+//   coarse        → L2 (config-file content; catches real config edits, ignores noise)
+//   fine          → L3 (every file's content; strongest, heaviest)
+// Conservativeness (auto-accept thresholds) stays at the ADR defaults — explained
+// folds always, L1-only mtime touches fold, L2 config changes always flag.
+let integrityLevel = "";
+if (tier === "companion" && wasInteractive) {
+  console.log("  Integrity forest — how deeply should drift be tracked?");
+  console.log("");
+  console.log("    [1] last-edited   mtime only — cheapest, but a touch can be spoofed");
+  console.log("    [2] coarse        config-file contents (recommended) — real edits, less noise");
+  console.log("    [3] fine          every file's content — strongest, heaviest to hash");
+  console.log("");
+  const lvlChoice = await prompt("  Level [1/2/3, default: 2]: ");
+  const lvlMap = { "1": "l1", "2": "l2", "3": "l3", "": "l2" };
+  if (lvlMap[lvlChoice] === undefined) {
+    console.error(`Invalid integrity level: '${lvlChoice}'. Enter 1, 2, or 3.`);
+    rl.close(); process.exit(1);
+  }
+  integrityLevel = lvlMap[lvlChoice];
+  console.log("");
+}
+
 // ---------------------------------------------------------------------------
 // Confirmed config
 // ---------------------------------------------------------------------------
@@ -414,6 +439,7 @@ if (tlsFp)             envArgs.push("-e", `PVE_API_TLS_FINGERPRINT=${tlsFp}`);
 if (tier === "companion") {
   envArgs.push("-e", `SSH_HOST=${nodeHost}`, "-e", "SSH_USER=root", "-e", `SSH_KEY_PATH=${sshKeyPath}`);
   if (sshFp) envArgs.push("-e", `SSH_HOST_KEY_FINGERPRINT=${sshFp}`);
+  if (integrityLevel) envArgs.push("-e", `INTEGRITY_LEVEL=${integrityLevel}`); // ADR-009 tracking depth
 }
 
 spawnSync("claude", ["mcp", "remove", "homelab", "--scope", "user"], { encoding: "utf8" });
@@ -444,6 +470,7 @@ console.log(`  Enforced   ${enforcedBy}`);
 console.log(`  Token      ${tokenId}`);
 if (nodeName) console.log(`  Node       ${nodeName}`);
 if (tier === "companion") console.log(`  SSH key    ${sshKeyPath}`);
+if (integrityLevel) console.log(`  Integrity  ${integrityLevel} (forest tracking depth)`);
 console.log("");
 console.log(`  ${c(36, "→ Restart Claude Code to activate the 'homelab' server.")}`);
 console.log("");

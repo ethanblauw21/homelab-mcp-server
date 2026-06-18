@@ -16,6 +16,7 @@ import {
 } from "./pctFiles.js";
 import { computeUnifiedDiff } from "../util/diff.js";
 import type { ConfigHistory } from "../history/configHistory.js";
+import { contentLeafHash } from "../integrity/leafHash.js";
 
 export const PctWriteFileInputSchema = z.object({
   vmid: z.number().int().positive().describe("LXC container ID"),
@@ -198,6 +199,10 @@ export async function pctWriteFileHandler(
     prevSha256: prevHash ?? undefined,
     newSha256: newHash,
     bytes: newContent.length,
+    // ADR-009 hash anchor: matches the pct/<vmid> forest content-leaf hash.
+    beforeHash: prevContent ? contentLeafHash(prevContent) : undefined,
+    afterHash: contentLeafHash(newContent),
+    hashScope: input.path,
     isLargeChange: largeChange.isLarge,
     isRevertible: backupResult.revertible,
     note: largeChange.isLarge ? largeChange.reason : undefined,

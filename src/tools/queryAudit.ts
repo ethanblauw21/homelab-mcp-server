@@ -10,6 +10,13 @@ export const QueryAuditInputSchema = z.object({
   since: z.string().optional().describe("ISO timestamp lower bound (inclusive)"),
   until: z.string().optional().describe("ISO timestamp upper bound (inclusive)"),
   largeOnly: z.boolean().optional().describe("Only records flagged isLargeChange"),
+  // ADR-009 hash-anchored filters — bridge from a verify_integrity drift back to its
+  // cause. `hashScopeContains` finds writes touching a path; `unknownScopeOnly` finds
+  // exec-family calls (hashScope "unknown") that may have caused unexplained drift;
+  // `hashEquals` finds the exact write that produced a given forest leaf hash.
+  hashScopeContains: z.string().optional().describe("Substring match on the record hashScope"),
+  unknownScopeOnly: z.boolean().optional().describe('Only records with hashScope "unknown" (exec-family)'),
+  hashEquals: z.string().optional().describe("Exact match on the record's beforeHash or afterHash"),
   limit: z.number().int().positive().optional().describe("Max records returned (default 50, capped)"),
 });
 
@@ -35,6 +42,9 @@ export interface AuditFilters {
   since?: string;
   until?: string;
   largeOnly?: boolean;
+  hashScopeContains?: string;
+  unknownScopeOnly?: boolean;
+  hashEquals?: string;
 }
 
 /**
@@ -50,6 +60,9 @@ export function filterAuditRecords(records: AuditRecord[], f: AuditFilters): Aud
     if (f.since !== undefined && r.ts < f.since) return false;
     if (f.until !== undefined && r.ts > f.until) return false;
     if (f.largeOnly === true && r.isLargeChange !== true) return false;
+    if (f.hashScopeContains !== undefined && !(r.hashScope ?? "").includes(f.hashScopeContains)) return false;
+    if (f.unknownScopeOnly === true && r.hashScope !== "unknown") return false;
+    if (f.hashEquals !== undefined && r.beforeHash !== f.hashEquals && r.afterHash !== f.hashEquals) return false;
     return true;
   });
 }

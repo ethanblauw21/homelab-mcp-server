@@ -48,6 +48,7 @@ export async function pctExecHandler(
       host: cfg.ssh.host,
       vmid: input.vmid,
       cmd: input.command,
+      hashScope: "unknown", // ADR-009: exec scope is unknowable up front.
       exitCode: result.exitCode,
       signal: result.signal,
       timedOut: result.timedOut,

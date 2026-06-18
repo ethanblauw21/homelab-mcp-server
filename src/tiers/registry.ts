@@ -73,6 +73,14 @@ export const TOOL_MIN_TIER: Record<string, Tier> = {
   revert_file: "companion",
   config_sweep: "companion",
 
+  // ADR-009 — the Merkle integrity forest reads file content (host SFTP / pct pull)
+  // to fold L2/L3 hashes, so it sits at companion alongside the other content-reading
+  // tools. All three are read-mostly: verify_integrity is read-only; compute_tree and
+  // accept_truth only mutate the *local* node store (never the node).
+  compute_tree: "companion",
+  verify_integrity: "companion",
+  accept_truth: "companion",
+
   // ADR-008 — the Docker layer rides the companion-tier `pct exec` plumbing; the
   // daemon socket is never exposed. A `docker` write target is companion-grade
   // via assertTargetTier (targetMinTier("docker") = "companion"), so revert_file /
