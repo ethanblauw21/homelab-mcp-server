@@ -1,6 +1,10 @@
 FROM alpine:3.20
 
-RUN apk add --no-cache openssh-server bash && \
+# coreutils gives us GNU `timeout` (with --signal=/--kill-after= long options) to
+# match the deployment target (Proxmox/Debian). Alpine's default BusyBox `timeout`
+# rejects those options, so the ADR-004 command wrapper in ssh/command.ts would
+# fail before running any inner command. The harness must mirror the real node.
+RUN apk add --no-cache openssh-server bash coreutils && \
     ssh-keygen -A && \
     mkdir -p /root/.ssh && \
     chmod 700 /root/.ssh
