@@ -244,6 +244,28 @@ const ConfigSchema = z.object({
       "/dev/pve",
     ]),
   }),
+  // ADR-010 — localhost UI sidecar. A SECOND, standing, human-facing process
+  // (`npm run ui`), separate from the stdio MCP server. The renderer half reads
+  // only client-side artifacts (no credentials); the executor half runs ONLY the
+  // bounded §5 human-tool set and is OFF by default (strict renderer-only).
+  ui: z.object({
+    // Loopback-only by hard rule (§Security). The server refuses any non-loopback
+    // bind address — remote access is explicitly out of ADR-010's scope.
+    bindAddress: z.string().default("127.0.0.1"),
+    port: z.number().default(7311),
+    // Strict renderer-only is the default-safe mode (action item 7): live
+    // human-tool buttons are disabled and the executor is never constructed, so
+    // the standing process holds zero node credentials — the ADR-001 property in
+    // its empty-set form. Setting this true opts into the bounded executor.
+    enableActions: z.boolean().default(false),
+    // Cached-state snapshot stores for the two panels whose source tools are NOT
+    // otherwise persisted (health_check, verify_integrity). The MCP server writes
+    // these on each run so the UI shows the last state with no live session.
+    healthDir: z.string(),
+    driftDir: z.string(),
+    healthRetentionCap: z.number().default(30),
+    driftRetentionCap: z.number().default(30),
+  }),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -432,6 +454,19 @@ function loadConfig(): Config {
       containerBackingPaths: process.env.INTEGRITY_CONTAINER_BACKING_PATHS
         ? process.env.INTEGRITY_CONTAINER_BACKING_PATHS.split(",").map((s) => s.trim()).filter(Boolean)
         : undefined,
+    },
+    ui: {
+      bindAddress: process.env.UI_BIND_ADDRESS ?? "127.0.0.1",
+      port: process.env.UI_PORT ? parseInt(process.env.UI_PORT) : 7311,
+      enableActions: process.env.UI_ENABLE_ACTIONS === "true",
+      healthDir: process.env.UI_HEALTH_DIR ?? path.join(LOCAL_DATA_DIR, "health"),
+      driftDir: process.env.UI_DRIFT_DIR ?? path.join(LOCAL_DATA_DIR, "drift"),
+      healthRetentionCap: process.env.UI_HEALTH_RETENTION_CAP
+        ? parseInt(process.env.UI_HEALTH_RETENTION_CAP)
+        : 30,
+      driftRetentionCap: process.env.UI_DRIFT_RETENTION_CAP
+        ? parseInt(process.env.UI_DRIFT_RETENTION_CAP)
+        : 30,
     },
   };
   return ConfigSchema.parse(raw);

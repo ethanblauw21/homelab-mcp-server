@@ -37,7 +37,8 @@ import { DockerExecInputSchema, dockerExecHandler } from "./tools/dockerExec.js"
 import { DockerLogsInputSchema, dockerLogsHandler } from "./tools/dockerLogs.js";
 import { DockerReadFileInputSchema, dockerReadFileHandler } from "./tools/dockerReadFile.js";
 import { DockerWriteFileInputSchema, dockerWriteFileHandler } from "./tools/dockerWriteFile.js";
-import { HealthCheckInputSchema, healthCheckHandler } from "./tools/healthCheck.js";
+import { HealthCheckInputSchema, healthCheckHandler, type HealthCheckResult } from "./tools/healthCheck.js";
+import { SnapshotStore } from "./ui/snapshotStore.js";
 import { TailLogInputSchema, tailLogHandler } from "./tools/tailLog.js";
 import { QueryAuditInputSchema, queryAuditHandler } from "./tools/queryAudit.js";
 import { DiffConfigInputSchema, diffConfigHandler } from "./tools/diffConfig.js";
@@ -108,6 +109,14 @@ const censusStore = new CensusStore(config.census.censusDir, config.census.snaps
 // disabled and no-ops if git is absent). Mutation commits are best-effort; the
 // config_sweep tool is registered only when the subsystem is enabled.
 const configHistory = new ConfigHistory(config.history);
+
+// ADR-010 §2 — cached-state sinks for the localhost UI sidecar. `health_check` and
+// `verify_integrity` are otherwise computed live and never written to disk; here the
+// stdio (agent) path persists each result to the same dirs the UI renderer reads, so
+// the dashboard shows the last agent-run health/drift with no live session. Both
+// payloads carry no secret-bearing fields (metrics/statuses; forest paths + hashes).
+const healthSink = new SnapshotStore<HealthCheckResult>(config.ui.healthDir, config.ui.healthRetentionCap);
+const driftSink = new SnapshotStore<unknown>(config.ui.driftDir, config.ui.driftRetentionCap);
 
 // ADR-007 §3 — NodeOps backend selection. The API backend rides every tier and is
 // preferred whenever fully configured (it's the only path that works at observe/
@@ -577,7 +586,7 @@ register(
   },
   async (input) => {
     try {
-      const result = await healthCheckHandler(input, sshTransport, config, nodeOps, activeTier);
+      const result = await healthCheckHandler(input, sshTransport, config, nodeOps, activeTier, healthSink);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }
@@ -781,7 +790,7 @@ if (isToolEnabled("verify_integrity", activeTier)) {
     },
     async (input) => {
       try {
-        const result = await verifyIntegrityHandler(input, integrityEngine, config);
+        const result = await verifyIntegrityHandler(input, integrityEngine, config, driftSink);
         return { content: [{ type: "text", text: JSON.stringify(result) }] };
       } catch (err) { return errResult(err); }
     }
