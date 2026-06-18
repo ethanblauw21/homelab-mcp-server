@@ -8,6 +8,7 @@ import { BackupStore } from "./backup/store.js";
 import { ExecuteInputSchema, executeHandler } from "./tools/execute.js";
 import { ReadFileInputSchema, readFileHandler } from "./tools/readFile.js";
 import { WriteFileInputSchema, writeFileHandler } from "./tools/writeFile.js";
+import { EditFileInputSchema, editFileHandler } from "./tools/editFile.js";
 import { ListDirectoryInputSchema, listDirectoryHandler } from "./tools/listDirectory.js";
 import { PctExecInputSchema, pctExecHandler } from "./tools/pctExec.js";
 import { PctListInputSchema, pctListHandler } from "./tools/pctList.js";
@@ -17,6 +18,7 @@ import { DescribeHomelabInputSchema, describeHomelabHandler } from "./tools/desc
 import { CensusStore } from "./tools/censusStore.js";
 import { PctReadFileInputSchema, pctReadFileHandler } from "./tools/pctReadFile.js";
 import { PctWriteFileInputSchema, pctWriteFileHandler } from "./tools/pctWriteFile.js";
+import { PctEditFileInputSchema, pctEditFileHandler } from "./tools/pctEditFile.js";
 import {
   SnapshotCreateInputSchema,
   snapshotCreateHandler,
@@ -32,11 +34,13 @@ import { QmAgentPingInputSchema, qmAgentPingHandler } from "./tools/qmAgentPing.
 import { QmExecInputSchema, qmExecHandler } from "./tools/qmExec.js";
 import { QmReadFileInputSchema, qmReadFileHandler } from "./tools/qmReadFile.js";
 import { QmWriteFileInputSchema, qmWriteFileHandler } from "./tools/qmWriteFile.js";
+import { QmEditFileInputSchema, qmEditFileHandler } from "./tools/qmEditFile.js";
 import { DockerPsInputSchema, dockerPsHandler } from "./tools/dockerPs.js";
 import { DockerExecInputSchema, dockerExecHandler } from "./tools/dockerExec.js";
 import { DockerLogsInputSchema, dockerLogsHandler } from "./tools/dockerLogs.js";
 import { DockerReadFileInputSchema, dockerReadFileHandler } from "./tools/dockerReadFile.js";
 import { DockerWriteFileInputSchema, dockerWriteFileHandler } from "./tools/dockerWriteFile.js";
+import { DockerEditFileInputSchema, dockerEditFileHandler } from "./tools/dockerEditFile.js";
 import { HealthCheckInputSchema, healthCheckHandler, type HealthCheckResult } from "./tools/healthCheck.js";
 import { SnapshotStore } from "./ui/snapshotStore.js";
 import { TailLogInputSchema, tailLogHandler } from "./tools/tailLog.js";
@@ -203,6 +207,22 @@ register(
 );
 
 register(
+  "edit_file",
+  {
+    description:
+      "Edit a host file by find-and-replace (oldString→newString) instead of resending the whole file (ADR-011). " +
+      "oldString must be unique unless replaceAll. File must already exist and be text. Same backup/audit/diff pipeline as write_file.",
+    inputSchema: EditFileInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await editFileHandler(input, sshTransport, audit, backupStore, config, configHistory, isRootTier);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
   "list_directory",
   {
     description: "List the contents of a directory on the Proxmox host",
@@ -330,6 +350,23 @@ register(
   async (input) => {
     try {
       const result = await pctWriteFileHandler(input, sshTransport, audit, backupStore, config, configHistory);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "pct_edit_file",
+  {
+    description:
+      "Edit a file inside an LXC container by find-and-replace (oldString→newString) instead of resending " +
+      "the whole file (ADR-011). oldString must be unique unless replaceAll. File must already exist and be " +
+      "text. Same backup/audit/diff pipeline as pct_write_file; requires the container to be running.",
+    inputSchema: PctEditFileInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await pctEditFileHandler(input, sshTransport, audit, backupStore, config, configHistory);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }
@@ -483,6 +520,23 @@ register(
   }
 );
 
+register(
+  "qm_edit_file",
+  {
+    description:
+      "Edit a file inside a VM by find-and-replace (oldString→newString) instead of resending the whole " +
+      "file (ADR-011). oldString must be unique unless replaceAll. File must already exist and be text. " +
+      "Same backup/audit pipeline + guest-agent write cap as qm_write_file; requires the guest agent.",
+    inputSchema: QmEditFileInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await qmEditFileHandler(input, sshTransport, audit, backupStore, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
 // ADR-008 — Docker layer (companion tier). All five ride the LXC `pct exec`
 // plumbing; the daemon socket is never exposed. docker_read_file is faithful
 // (no redaction); docker_logs is always redacted; docker_write_file runs the
@@ -569,6 +623,24 @@ register(
   async (input) => {
     try {
       const result = await dockerWriteFileHandler(input, sshTransport, audit, backupStore, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "docker_edit_file",
+  {
+    description:
+      "Edit a file inside a Docker container by find-and-replace (oldString→newString) instead of resending " +
+      "the whole file (ADR-011). oldString must be unique unless replaceAll. File must already exist and be " +
+      "text. Same bind-mount/docker-cp + backup/audit/diff pipeline as docker_write_file; requires the LXC " +
+      "container to be running.",
+    inputSchema: DockerEditFileInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await dockerEditFileHandler(input, sshTransport, audit, backupStore, config);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }

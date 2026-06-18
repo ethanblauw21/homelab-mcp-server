@@ -4,7 +4,19 @@ FROM alpine:3.20
 # match the deployment target (Proxmox/Debian). Alpine's default BusyBox `timeout`
 # rejects those options, so the ADR-004 command wrapper in ssh/command.ts would
 # fail before running any inner command. The harness must mirror the real node.
-RUN apk add --no-cache openssh-server bash coreutils && \
+#
+# openssh-sftp-server provides /usr/lib/ssh/sftp-server — the binary sshd_config's
+# `Subsystem sftp` line points at. Alpine's openssh-server package does NOT bundle
+# it, so without this every SFTP op (read_file/write_file/list_directory/
+# config_sweep) fails with "Channel open failure: open failed". exec is unaffected,
+# which is why this stayed hidden behind the BusyBox timeout failure above.
+#
+# findutils gives us GNU `find` (with -printf), which config_sweep's enumeration
+# (`find … -type f -printf '%s\t%p\n'`, configSweep.ts) relies on. Alpine's BusyBox
+# find has no -printf and coreutils does not ship `find`, so the sweep enumerated
+# nothing (0 files) until this. Same Debian/Proxmox-representativeness rationale as
+# coreutils — the real node has the GNU userland.
+RUN apk add --no-cache openssh-server openssh-sftp-server bash coreutils findutils && \
     ssh-keygen -A && \
     mkdir -p /root/.ssh && \
     chmod 700 /root/.ssh

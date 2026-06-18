@@ -4,7 +4,7 @@ import { validatePath } from "../guardrails/pathValidation.js";
 import { detectLargeFileWrite } from "../guardrails/largeChange.js";
 import { selectBackupKind, contentHash, isTextContent } from "../backup/policy.js";
 import type { BackupStore } from "../backup/store.js";
-import { buildAuditRecord, sha256 } from "../audit/record.js";
+import { buildAuditRecord, sha256, type AuditTool } from "../audit/record.js";
 import type { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
 import {
@@ -58,41 +58,69 @@ export interface PctWriteFileDryRunResult {
   note?: string;
 }
 
-export async function pctWriteFileHandler(
-  input: PctWriteFileInput,
+/** The previous in-container content of a target, read once (ADR-011 §3). */
+export interface PctPrev {
+  prevContent: Buffer | null;
+  prevHash: string | null;
+  isNewFile: boolean;
+}
+
+/**
+ * Read a container file's current bytes via the pull flow, gated on a running
+ * guest (A3.1). Shared by `pct_write_file` and `pct_edit_file` so the edit door
+ * applies its replacement to the SAME bytes the pipeline backs up (ADR-011 §3).
+ * A null pull result means file-not-found (new file); any other pull failure
+ * throws inside pullContainerFile and is surfaced, never reinterpreted.
+ */
+export async function readPctPrev(
   transport: SshTransport,
-  audit: AuditLog,
-  backupStore: BackupStore,
+  vmid: number,
+  path: string,
   cfg: Config,
-  history?: ConfigHistory
-): Promise<PctWriteFileResult | PctWriteFileDryRunResult> {
-  const pathResult = validatePath(input.path, {
-    allowlist: cfg.guardrails.pathAllowlist,
-    denylist: cfg.guardrails.pathDenylist,
-  });
-  if (!pathResult.valid) {
-    throw new Error(`Invalid path: ${pathResult.reason}`);
-  }
-
-  const newContent = Buffer.from(input.content, input.encoding);
-  const timeoutMs = cfg.ssh.commandTimeoutMs;
-
-  // A3.1: refuse on a stopped container so a failed pull is never misread as
-  // "new file" against a guest that can't receive the push.
-  await assertContainerRunning(transport, input.vmid, timeoutMs);
-
-  // Read previous content via the pull flow. A null result means the file does
-  // not exist (running + file-not-found specifically); any other pull failure
-  // throws inside pullContainerFile and is surfaced, never reinterpreted.
+  timeoutMs: number
+): Promise<PctPrev> {
+  await assertContainerRunning(transport, vmid, timeoutMs);
   const { content: prevContent } = await pullContainerFile(
     transport,
-    input.vmid,
-    input.path,
+    vmid,
+    path,
     cfg.container.nodeTempDir,
     timeoutMs
   );
-  const isNewFile = prevContent === null;
-  const prevHash = prevContent ? sha256(prevContent) : null;
+  return {
+    prevContent,
+    prevHash: prevContent ? sha256(prevContent) : null,
+    isNewFile: prevContent === null,
+  };
+}
+
+export interface WriteResolvedPctArgs {
+  vmid: number;
+  path: string;
+  dryRun?: boolean;
+  prev: PctPrev;
+  newContent: Buffer;
+  tool: Extract<AuditTool, "pct_write_file" | "pct_edit_file">;
+  transport: SshTransport;
+  audit: AuditLog;
+  backupStore: BackupStore;
+  cfg: Config;
+  history?: ConfigHistory;
+  timeoutMs: number;
+}
+
+/**
+ * The post-read container write pipeline (ADR-011 §3): both `pct_write_file` and
+ * `pct_edit_file` funnel through here, inheriting backup, perm-preservation,
+ * the hash-anchored audit record (ADR-009), and config-history capture (ADR-006)
+ * byte-for-byte.
+ */
+export async function writeResolvedPct(
+  args: WriteResolvedPctArgs
+): Promise<PctWriteFileResult | PctWriteFileDryRunResult> {
+  const { vmid, path, prev, newContent, tool, transport, audit, backupStore, cfg, history, timeoutMs } =
+    args;
+  const { prevContent, prevHash, isNewFile } = prev;
 
   const largeChange = detectLargeFileWrite(
     newContent.length,
@@ -113,7 +141,7 @@ export async function pctWriteFileHandler(
 
   // dryRun: run the full pipeline READ-ONLY and return a preview. No push, no
   // backup stored, no audit record — a dry run has zero side effects (ADR-004 §6).
-  if (input.dryRun) {
+  if (args.dryRun) {
     const existingHashMap = backupStore.buildExistingHashMap(cfg.backup.baseDir);
     const kind = await selectBackupKind({
       newContent,
@@ -127,7 +155,7 @@ export async function pctWriteFileHandler(
 
     return {
       dryRun: true,
-      vmid: input.vmid,
+      vmid,
       isNewFile,
       kind: kind.type,
       isLargeChange: largeChange.isLarge,
@@ -162,7 +190,7 @@ export async function pctWriteFileHandler(
   // Local backup is written BEFORE the push, so a leaked node temp never holds
   // the only copy. File key derives from the pct: descriptor (no host collision).
   const backupResult = await backupStore.storeBackup(
-    { kind: "pct", vmid: input.vmid, remotePath: input.path },
+    { kind: "pct", vmid, remotePath: path },
     kind,
     newHash
   );
@@ -173,7 +201,7 @@ export async function pctWriteFileHandler(
     perms = { mode: cfg.container.newFileMode, uid: cfg.container.newFileUid, gid: cfg.container.newFileGid };
   } else {
     perms =
-      (await statContainerPerms(transport, input.vmid, input.path, timeoutMs)) ?? {
+      (await statContainerPerms(transport, vmid, path, timeoutMs)) ?? {
         mode: cfg.container.newFileMode,
         uid: cfg.container.newFileUid,
         gid: cfg.container.newFileGid,
@@ -182,8 +210,8 @@ export async function pctWriteFileHandler(
 
   await pushContainerFile(
     transport,
-    input.vmid,
-    input.path,
+    vmid,
+    path,
     newContent,
     perms,
     cfg.container.nodeTempDir,
@@ -191,10 +219,10 @@ export async function pctWriteFileHandler(
   );
 
   const record = buildAuditRecord({
-    tool: "pct_write_file",
+    tool,
     host: cfg.ssh.host,
-    vmid: input.vmid,
-    path: input.path,
+    vmid,
+    path,
     prevBackup: backupResult.backupPath ?? backupResult.existingPath,
     prevSha256: prevHash ?? undefined,
     newSha256: newHash,
@@ -202,7 +230,7 @@ export async function pctWriteFileHandler(
     // ADR-009 hash anchor: matches the pct/<vmid> forest content-leaf hash.
     beforeHash: prevContent ? contentLeafHash(prevContent) : undefined,
     afterHash: contentLeafHash(newContent),
-    hashScope: input.path,
+    hashScope: path,
     isLargeChange: largeChange.isLarge,
     isRevertible: backupResult.revertible,
     note: largeChange.isLarge ? largeChange.reason : undefined,
@@ -212,9 +240,9 @@ export async function pctWriteFileHandler(
   if (history) {
     record.historyCommitted = await history.recordMutation(
       transport,
-      { kind: "pct", vmid: input.vmid, remotePath: input.path },
+      { kind: "pct", vmid, remotePath: path },
       newContent,
-      "pct_write_file",
+      tool,
       record.id,
       timeoutMs
     );
@@ -226,9 +254,45 @@ export async function pctWriteFileHandler(
     backupPath: backupResult.backupPath ?? backupResult.existingPath ?? null,
     auditId: record.id,
     revertible: backupResult.revertible,
-    vmid: input.vmid,
+    vmid,
     newFile: isNewFile,
     diff: diff ? diff.diff : null,
     diffTruncated: diff ? diff.truncated : undefined,
   };
+}
+
+export async function pctWriteFileHandler(
+  input: PctWriteFileInput,
+  transport: SshTransport,
+  audit: AuditLog,
+  backupStore: BackupStore,
+  cfg: Config,
+  history?: ConfigHistory
+): Promise<PctWriteFileResult | PctWriteFileDryRunResult> {
+  const pathResult = validatePath(input.path, {
+    allowlist: cfg.guardrails.pathAllowlist,
+    denylist: cfg.guardrails.pathDenylist,
+  });
+  if (!pathResult.valid) {
+    throw new Error(`Invalid path: ${pathResult.reason}`);
+  }
+
+  const timeoutMs = cfg.ssh.commandTimeoutMs;
+  const prev = await readPctPrev(transport, input.vmid, input.path, cfg, timeoutMs);
+  const newContent = Buffer.from(input.content, input.encoding);
+
+  return writeResolvedPct({
+    vmid: input.vmid,
+    path: input.path,
+    dryRun: input.dryRun,
+    prev,
+    newContent,
+    tool: "pct_write_file",
+    transport,
+    audit,
+    backupStore,
+    cfg,
+    history,
+    timeoutMs,
+  });
 }

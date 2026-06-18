@@ -103,10 +103,19 @@ export const TOOL_MIN_TIER: Record<string, Tier> = {
   guest_backup_restore: "companion",
   compose_redeploy: "companion",
 
+  // ADR-011 — find-and-replace edit tools share their write surface's tier
+  // EXACTLY: an edit's blast radius equals a write's (it produces a full new
+  // file through the same pipeline), so pct/qm/docker edits are companion and
+  // the host edit is root — identical floors to the matching *_write_file rows.
+  pct_edit_file: "companion",
+  qm_edit_file: "companion",
+  docker_edit_file: "companion",
+
   // root — everything on the host (flag-gated; MCP-enforced).
   execute: "root",
   read_file: "root",
   write_file: "root",
+  edit_file: "root",
   list_directory: "root",
 };
 

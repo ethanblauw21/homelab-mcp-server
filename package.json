@@ -34,6 +34,7 @@
     "ui:dev": "tsx watch src/ui/server.ts",
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/doctor.mjs",
+    "demo:integrity": "tsx scripts/integrity-demo.mts",
     "test": "vitest run",
     "test:unit": "vitest run --project unit",
     "test:int": "vitest run --project integration",
