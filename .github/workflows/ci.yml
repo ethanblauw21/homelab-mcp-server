@@ -21,6 +21,17 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      # better-sqlite3 ships no Node-20 Windows prebuilt (lowest win32-x64 node
+      # prebuilt is the Node-22 ABI), so on this cell npm must compile it from
+      # source. Node 20's bundled npm carries node-gyp@10.1.0, whose PowerShell
+      # Visual Studio finder crashes with ERR_CHILD_PROCESS_STDIO_MAXBUFFER on the
+      # runner's VS 2026 ("18") install and reports "unknown version undefined" —
+      # the bug fixed in node-gyp >=10.2. Refresh npm (which carries a modern
+      # node-gyp) so the native build can find the toolchain. Windows-only; the
+      # other matrix cells either find a prebuilt or have a working compiler.
+      - name: Modernize node-gyp toolchain (Windows)
+        if: runner.os == 'Windows'
+        run: npm install -g npm@latest
       - run: npm ci
       - run: npm run build
       - run: npm run typecheck
