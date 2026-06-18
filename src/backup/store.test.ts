@@ -87,3 +87,60 @@ describe("BackupStore — meta target descriptor", () => {
     expect(store.readBackupTarget(metaPath)).toEqual({ kind: "host", remotePath: "/etc/legacy.conf" });
   });
 });
+
+describe("BackupStore — ADR-014 chain anchor + dedup-map exclusion", () => {
+  let tmpDir: string;
+  let cfg: Config;
+  let store: BackupStore;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "store-014-"));
+    cfg = makeConfig(tmpDir);
+    store = new BackupStore(cfg.backup);
+  });
+
+  const target = { kind: "host" as const, remotePath: "/etc/svc.conf" };
+
+  it("latestBaseHash returns null with no backups, then the newest meta hash", async () => {
+    expect(store.latestBaseHash(target)).toBeNull();
+
+    await store.storeBackup(target, { type: "gzip-full", blob: Buffer.from("a") }, "HASH_OLD");
+    await new Promise((r) => setTimeout(r, 5)); // distinct ISO timestamp
+    await store.storeBackup(target, { type: "gzip-full", blob: Buffer.from("b") }, "HASH_NEW");
+
+    expect(store.latestBaseHash(target)).toBe("HASH_NEW");
+  });
+
+  it("storeBackup persists requiresBaseHash + reanchored into the meta", async () => {
+    const res = await store.storeBackup(
+      target,
+      { type: "gzip-diff", blob: Buffer.from("d"), requiresBaseHash: "BASE" },
+      "NEWH"
+    );
+    const meta = JSON.parse(fs.readFileSync(res.backupPath!.replace(/\.gz$/, ".meta"), "utf8"));
+    expect(meta.requiresBaseHash).toBe("BASE");
+    expect(meta.reanchored).toBe(false);
+
+    const versions = store.listBackupsForPath(target);
+    expect(versions[0].requiresBaseHash).toBe("BASE");
+    expect(versions[0].reanchored).toBe(false);
+    expect(versions[0].hash).toBe("NEWH");
+  });
+
+  it("a re-anchor snapshot is excluded from the dedup map (blob ≠ meta hash)", async () => {
+    // The blob holds prevContent ("DRIFTED") but the meta hash records newContent.
+    await store.storeBackup(
+      target,
+      { type: "gzip-full", blob: Buffer.from("DRIFTED"), reanchored: true },
+      "NEWCONTENT_HASH"
+    );
+    const map = store.buildExistingHashMap(cfg.backup.baseDir);
+    expect(map.has("NEWCONTENT_HASH")).toBe(false);
+  });
+
+  it("a normal gzip-full IS in the dedup map", async () => {
+    await store.storeBackup(target, { type: "gzip-full", blob: Buffer.from("x") }, "NORMAL_HASH");
+    const map = store.buildExistingHashMap(cfg.backup.baseDir);
+    expect(map.has("NORMAL_HASH")).toBe(true);
+  });
+});

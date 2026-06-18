@@ -122,6 +122,9 @@ export async function writeResolvedPct(
     args;
   const { prevContent, prevHash, isNewFile } = prev;
 
+  // ADR-014 §2 — last managed write's content hash; drives the re-anchor on drift.
+  const chainBaseHash = backupStore.latestBaseHash({ kind: "pct", vmid, remotePath: path });
+
   const largeChange = detectLargeFileWrite(
     newContent.length,
     isNewFile,
@@ -151,6 +154,7 @@ export async function writeResolvedPct(
       largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
       largeFilePolicy: cfg.backup.largeFilePolicy,
       existingHashToPaths: existingHashMap,
+      chainBaseHash,
     });
 
     return {
@@ -184,6 +188,7 @@ export async function writeResolvedPct(
     largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
     largeFilePolicy: cfg.backup.largeFilePolicy,
     existingHashToPaths: existingHashMap,
+    chainBaseHash,
   });
 
   const newHash = contentHash(newContent);

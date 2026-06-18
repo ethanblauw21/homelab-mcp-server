@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { listBackupsHandler } from "./listBackups.js";
 import { BackupStore } from "../backup/store.js";
 import type { Config } from "../config.js";
+import { FakeTransport } from "../ssh/fakeTransport.js";
+import { contentHash } from "../backup/policy.js";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -161,5 +163,76 @@ describe("listBackupsHandler", () => {
     await expect(
       listBackupsHandler({ path: "/etc/../etc/shadow" }, backupStore, cfg)
     ).rejects.toThrow(/invalid path/i);
+  });
+
+  // ADR-014 §1 — honest revertibility: a delta backup is revertible only while the
+  // live file still hashes to the delta's recorded base. Seed a gzip-diff meta with
+  // an explicit requiresBaseHash and vary the live-file content the transport returns.
+  function seedDeltaEntry(keyDir: string, ts: string, requiresBaseHash: string): void {
+    fs.writeFileSync(path.join(keyDir, `${ts}.gz`), zlib.gzipSync(Buffer.from("delta-envelope")));
+    fs.writeFileSync(
+      path.join(keyDir, `${ts}.meta`),
+      JSON.stringify({ kind: "gzip-diff", hash: "newh", requiresBaseHash })
+    );
+  }
+
+  it("delta is revertible when the live file still matches the recorded base", async () => {
+    const remotePath = "/tmp/test.txt";
+    const keyDir = path.join(cfg.backup.baseDir, fileKey(remotePath));
+    fs.mkdirSync(keyDir, { recursive: true });
+    const live = Buffer.from("CURRENT ON-DISK CONTENT");
+    seedDeltaEntry(keyDir, "2024-01-01T00-00-00-000Z", contentHash(live));
+
+    const transport = new FakeTransport();
+    transport.setFile(remotePath, live);
+
+    const result = await listBackupsHandler({ path: remotePath }, backupStore, cfg, transport);
+    expect(result.currentVerified).toBe(true);
+    expect(result.versions[0].revertible).toBe(true);
+  });
+
+  it("delta is NOT revertible when the live file drifted out-of-band", async () => {
+    const remotePath = "/tmp/test.txt";
+    const keyDir = path.join(cfg.backup.baseDir, fileKey(remotePath));
+    fs.mkdirSync(keyDir, { recursive: true });
+    seedDeltaEntry(keyDir, "2024-01-01T00-00-00-000Z", contentHash(Buffer.from("WHAT WE LAST WROTE")));
+
+    const transport = new FakeTransport();
+    transport.setFile(remotePath, Buffer.from("EDITED BEHIND OUR BACK"));
+
+    const result = await listBackupsHandler({ path: remotePath }, backupStore, cfg, transport);
+    expect(result.currentVerified).toBe(true);
+    expect(result.versions[0].revertible).toBe(false);
+    expect(result.versions[0].revertReason).toMatch(/out-of-band|no longer be applied/i);
+  });
+
+  it("a re-anchored self-contained snapshot stays revertible despite drift", async () => {
+    const remotePath = "/tmp/test.txt";
+    const keyDir = path.join(cfg.backup.baseDir, fileKey(remotePath));
+    fs.mkdirSync(keyDir, { recursive: true });
+    // A re-anchor is a gzip-full with requiresBaseHash null → self-contained.
+    fs.writeFileSync(path.join(keyDir, `2024-01-02T00-00-00-000Z.gz`), zlib.gzipSync(Buffer.from("snapshot")));
+    fs.writeFileSync(
+      path.join(keyDir, `2024-01-02T00-00-00-000Z.meta`),
+      JSON.stringify({ kind: "gzip-full", hash: "snaph", requiresBaseHash: null, reanchored: true })
+    );
+
+    const transport = new FakeTransport();
+    transport.setFile(remotePath, Buffer.from("ANYTHING ELSE NOW"));
+
+    const result = await listBackupsHandler({ path: remotePath }, backupStore, cfg, transport);
+    expect(result.versions[0].revertible).toBe(true);
+  });
+
+  it("without a transport, a delta degrades to non-revertible (base unverifiable)", async () => {
+    const remotePath = "/tmp/test.txt";
+    const keyDir = path.join(cfg.backup.baseDir, fileKey(remotePath));
+    fs.mkdirSync(keyDir, { recursive: true });
+    seedDeltaEntry(keyDir, "2024-01-01T00-00-00-000Z", contentHash(Buffer.from("x")));
+
+    const result = await listBackupsHandler({ path: remotePath }, backupStore, cfg);
+    expect(result.currentVerified).toBe(false);
+    expect(result.versions[0].revertible).toBe(false);
+    expect(result.versions[0].revertReason).toMatch(/unreadable or missing/i);
   });
 });

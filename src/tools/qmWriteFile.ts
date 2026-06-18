@@ -110,6 +110,9 @@ export async function writeResolvedQm(
   const { vmid, path, prev, newContent, tool, transport, audit, backupStore, cfg, timeoutMs } = args;
   const { node, prevContent, prevHash, isNewFile } = prev;
 
+  // ADR-014 §2 — last managed write's content hash; drives the re-anchor on drift.
+  const chainBaseHash = backupStore.latestBaseHash({ kind: "qm", vmid, remotePath: path });
+
   // Size cap on the RESOLVED payload — the guest-agent write endpoint bounds a
   // single payload, so a write/edit over the cap is refused (use qm_exec for
   // larger in-guest edits) rather than truncated in the guest.
@@ -137,6 +140,7 @@ export async function writeResolvedQm(
       largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
       largeFilePolicy: cfg.backup.largeFilePolicy,
       existingHashToPaths: existingHashMap,
+      chainBaseHash,
     });
 
     const diffable =
@@ -180,6 +184,7 @@ export async function writeResolvedQm(
     largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
     largeFilePolicy: cfg.backup.largeFilePolicy,
     existingHashToPaths: existingHashMap,
+    chainBaseHash,
   });
 
   const newHash = contentHash(newContent);

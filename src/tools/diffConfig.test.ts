@@ -4,6 +4,7 @@ import { FakeTransport } from "../ssh/fakeTransport.js";
 import { buildPctExecCommand } from "./pctHelpers.js";
 import { buildPctStatusCommand, buildPctPullCommand } from "./pctFiles.js";
 import { buildDockerInspectCommand } from "./dockerHelpers.js";
+import { contentHash } from "../backup/policy.js";
 import type { BackupStore, BackupTarget, BackupVersionInfo } from "../backup/store.js";
 import type { Config } from "../config.js";
 
@@ -138,5 +139,64 @@ describe("diffConfigHandler", () => {
     // current has the extra "b=2" line a revert would remove.
     expect(res.removedLines).toBe(1);
     expect(res.diff).toContain("- b=2");
+  });
+
+  // ADR-014 §1 — a delta backup whose recorded base no longer matches the live file
+  // (an out-of-band edit broke the chain) is reported as a structured non-revertible
+  // response with a reason, instead of surfacing restore()'s raw "changed since" throw.
+  it("returns structured non-revertible when a delta's base drifted out-of-band", async () => {
+    const t = new FakeTransport();
+    t.setFile("/etc/hosts", "EDITED OUT OF BAND\n");
+    const restoreCalled = { value: false };
+    const store = {
+      readBackupTarget: () => HOST_TARGET,
+      listBackupsForPath: (): BackupVersionInfo[] => [
+        {
+          backupPath: "/b/delta.gz",
+          timestamp: "delta",
+          kind: "gzip-diff",
+          sizeBytes: 10,
+          revertible: true, // content-bearing per the listing; the handler overlays the honest verdict
+          hash: "newh",
+          requiresBaseHash: contentHash(Buffer.from("WHAT WE LAST WROTE\n")),
+        },
+      ],
+      restore: async () => {
+        restoreCalled.value = true;
+        return Buffer.from("never reached\n");
+      },
+    } as unknown as BackupStore;
+
+    const res = await diffConfigHandler({ path: "/etc/hosts" }, t, store, makeConfig());
+    expect(res.revertible).toBe(false);
+    expect(res.revertReason).toMatch(/out-of-band|no longer be applied/i);
+    expect(res.diff).toBeUndefined();
+    // The classify gate must short-circuit BEFORE restore is attempted.
+    expect(restoreCalled.value).toBe(false);
+  });
+
+  it("still diffs a delta backup when the live file matches its recorded base", async () => {
+    const t = new FakeTransport();
+    const live = "127.0.0.1 localhost\nextra\n";
+    t.setFile("/etc/hosts", live);
+    const store = fakeStore({
+      target: HOST_TARGET,
+      versions: [
+        {
+          backupPath: "/b/delta.gz",
+          timestamp: "delta",
+          kind: "gzip-diff",
+          sizeBytes: 10,
+          revertible: true,
+          hash: "newh",
+          requiresBaseHash: contentHash(Buffer.from(live)),
+        },
+      ],
+      restoreContent: Buffer.from("127.0.0.1 localhost\n"),
+    });
+
+    const res = await diffConfigHandler({ path: "/etc/hosts" }, t, store, makeConfig());
+    expect(res.revertible).toBe(true);
+    expect(res.removedLines).toBe(1);
   });
 });

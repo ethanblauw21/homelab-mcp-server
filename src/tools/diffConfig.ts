@@ -4,8 +4,8 @@ import type { BackupStore, BackupTarget, BackupVersionInfo } from "../backup/sto
 import type { Config } from "../config.js";
 import { sha256 } from "../audit/record.js";
 import { computeUnifiedDiff } from "../util/diff.js";
-import { assertContainerRunning, pullContainerFile } from "./pctFiles.js";
-import { resolveDockerContainer, readDockerFile } from "./dockerFiles.js";
+import { classifyRevertibility, contentHash } from "../backup/policy.js";
+import { readCurrentForTarget } from "./targetContent.js";
 
 export const DiffConfigInputSchema = z
   .object({
@@ -36,6 +36,8 @@ export interface DiffConfigResult {
   timestamp: string;
   kind: string;
   revertible: boolean;
+  /** ADR-014 §1 — set when not revertible: why (metadata-only, or a delta whose base drifted). */
+  revertReason?: string;
   /** Present only when the backup is revertible (metadata-only backups carry no content). */
   diff?: string;
   diffTruncated?: boolean;
@@ -135,46 +137,30 @@ export async function diffConfigHandler(
 
   // Read the current content of the live file so the diff reflects "what a revert
   // would change right now". A missing file is treated as empty content.
-  let currentContent: Buffer | undefined;
-  const timeoutMs = cfg.ssh.commandTimeoutMs;
-  if (target.kind === "pct") {
-    if (target.vmid === undefined) {
-      throw new Error("Container backup is missing its vmid; cannot read current content.");
-    }
-    await assertContainerRunning(transport, target.vmid, timeoutMs);
-    const { content } = await pullContainerFile(
-      transport,
-      target.vmid,
-      target.remotePath,
-      cfg.container.nodeTempDir,
-      timeoutMs
-    );
-    if (content) currentContent = content;
-  } else if (target.kind === "docker") {
-    if (target.vmid === undefined || !target.container) {
-      throw new Error("Docker backup is missing its vmid/container; cannot read current content.");
-    }
-    await assertContainerRunning(transport, target.vmid, timeoutMs);
-    const inspect = await resolveDockerContainer(transport, target.vmid, target.container, timeoutMs);
-    const { content } = await readDockerFile(
-      transport,
-      target.vmid,
-      target.container,
-      target.remotePath,
-      inspect,
-      cfg.container.nodeTempDir,
-      timeoutMs
-    );
-    if (content) currentContent = content;
-  } else {
-    try {
-      currentContent = await transport.readFile(target.remotePath);
-    } catch {
-      /* file may not exist — treat as empty */
-    }
+  const current = await readCurrentForTarget(transport, target, cfg);
+  const currentContent: Buffer | undefined = current ?? undefined;
+  const currentHash = current === null ? null : contentHash(current);
+
+  // ADR-014 §1 — classify BEFORE attempting restore: a delta backup whose base no
+  // longer matches the live file (out-of-band edit) is honestly reported as
+  // non-revertible, instead of surfacing the raw "changed since" throw from restore.
+  const verdict = classifyRevertibility(
+    { kind: chosen.kind, requiresBaseHash: chosen.requiresBaseHash, hash: chosen.hash },
+    currentHash
+  );
+  if (!verdict.revertible) {
+    return { ...base, revertible: false, revertReason: verdict.reason, note: verdict.reason };
   }
 
-  const backupContent = await backupStore.restore(chosen.backupPath, currentContent);
+  // Restore is still guarded (a legacy bare blob with no meta can't be classified):
+  // a stale-base throw degrades to a structured non-revertible response.
+  let backupContent: Buffer | null;
+  try {
+    backupContent = await backupStore.restore(chosen.backupPath, currentContent);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { ...base, revertible: false, revertReason: reason, note: reason };
+  }
   if (backupContent === null) {
     // Defensive: listing said revertible but restore returned null.
     return {

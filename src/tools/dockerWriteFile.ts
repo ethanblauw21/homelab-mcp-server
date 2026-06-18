@@ -157,6 +157,9 @@ export async function writeResolvedDocker(
     args;
   const { inspect, prevContent, viaBindMount, prevHash, isNewFile } = prev;
 
+  // ADR-014 §2 — last managed write's content hash; drives the re-anchor on drift.
+  const chainBaseHash = backupStore.latestBaseHash({ kind: "docker", vmid, container, remotePath: path });
+
   const largeChange = detectLargeFileWrite(
     newContent.length,
     isNewFile,
@@ -176,6 +179,7 @@ export async function writeResolvedDocker(
       largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
       largeFilePolicy: cfg.backup.largeFilePolicy,
       existingHashToPaths: existingHashMap,
+      chainBaseHash,
     });
     return {
       dryRun: true,
@@ -216,6 +220,7 @@ export async function writeResolvedDocker(
     largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
     largeFilePolicy: cfg.backup.largeFilePolicy,
     existingHashToPaths: existingHashMap,
+    chainBaseHash,
   });
 
   const newHash = contentHash(newContent);
