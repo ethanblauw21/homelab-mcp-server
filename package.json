@@ -47,6 +47,7 @@
     "@modelcontextprotocol/sdk": "^1.12.1",
     "better-sqlite3": "^12.10.1",
     "ssh2": "^1.16.0",
+    "yaml": "^2.6.0",
     "zod": "^3.24.4"
   },
   "devDependencies": {

@@ -39,6 +39,7 @@ A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zo
 | `guest_backup` | vzdump archive of a guest — the rollback path for snapshot-incapable guests (confirm-gated; `mcp-` tagged; per-guest retention) | 008 |
 | `guest_backup_restore` | Restore a guest from a server-managed (`mcp-`) vzdump archive (confirm + mcp-only + run-state gated) | 008 |
 | `compose_redeploy` | `docker compose -f <path> up -d` inside an LXC (confirm-gated; pairs with `revert_file` for stack rollback) | 008 |
+| `compose_preflight` | Static, read-only hazard analysis of a proposed compose change before deploy (shared-netns port collisions, netns-provider recreate deadlock, ports already bound); not audited | 012 |
 | `compute_tree` | Build/refresh the Merkle integrity baseline at L1/L2/L3 (mutates only the local node store) | 009 |
 | `verify_integrity` | Read-only drift report: diff forest vs baseline, classify each leaf explained/unexplained; `smart` escalation; optional audited auto-accept | 009 |
 | `accept_truth` | Explicit human override: fold current state into all three Merkle baselines (audited) | 009 |
