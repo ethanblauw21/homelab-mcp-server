@@ -94,47 +94,9 @@ export async function diffConfigHandler(
         : { kind: "host", remotePath: input.path! };
   }
 
-  // Choose the backup version: the named one, or the newest for the target.
-  const versions = backupStore.listBackupsForPath(target);
-  let chosen: BackupVersionInfo | undefined;
-  if (input.backupPath !== undefined) {
-    chosen = versions.find((v) => samePath(v.backupPath, input.backupPath!));
-    if (chosen === undefined) {
-      // Not in the listing (e.g. legacy path); synthesize from the path itself.
-      const isMeta = input.backupPath.endsWith(".meta");
-      chosen = {
-        backupPath: input.backupPath,
-        timestamp: input.backupPath.replace(/^.*[\\/]/, "").replace(/\.(gz|meta)$/, ""),
-        kind: isMeta ? "metadata-only" : "unknown",
-        sizeBytes: 0,
-        revertible: !isMeta,
-      };
-    }
-  } else {
-    if (versions.length === 0) {
-      throw new Error(`No backups found for ${target.remotePath}.`);
-    }
-    // Prefer the newest revertible version; fall back to newest (metadata-only).
-    chosen = versions.find((v) => v.revertible) ?? versions[0];
-  }
-
-  const base = {
-    target,
-    backupPath: chosen.backupPath,
-    timestamp: chosen.timestamp,
-    kind: chosen.kind,
-  };
-
-  if (!chosen.revertible) {
-    return {
-      ...base,
-      revertible: false,
-      note: "Backup is metadata-only (large/binary write) — no content stored, so no diff and no revert.",
-    };
-  }
-
-  // Read the current content of the live file so the diff reflects "what a revert
-  // would change right now". A missing file is treated as empty content.
+  // Read the current content of the live file FIRST so the diff reflects "what a
+  // revert would change right now" AND so revertibility is computed against the
+  // real live hash (#20). A missing file is treated as empty content.
   let currentContent: Buffer | undefined;
   const timeoutMs = cfg.ssh.commandTimeoutMs;
   if (target.kind === "pct") {
@@ -172,6 +134,64 @@ export async function diffConfigHandler(
     } catch {
       /* file may not exist — treat as empty */
     }
+  }
+  const currentHash = currentContent ? sha256(currentContent) : sha256(Buffer.alloc(0));
+
+  // Choose the backup version: the named one, or the newest for the target.
+  // Listing with the live hash makes each version's `revertible` honest (#20).
+  const versions = backupStore.listBackupsForPath(target, currentHash);
+  let chosen: BackupVersionInfo | undefined;
+  if (input.backupPath !== undefined) {
+    chosen = versions.find((v) => samePath(v.backupPath, input.backupPath!));
+    if (chosen === undefined) {
+      // Not in the listing (e.g. legacy path); synthesize from the path itself.
+      const isMeta = input.backupPath.endsWith(".meta");
+      chosen = {
+        backupPath: input.backupPath,
+        timestamp: input.backupPath.replace(/^.*[\\/]/, "").replace(/\.(gz|meta)$/, ""),
+        kind: isMeta ? "metadata-only" : "unknown",
+        sizeBytes: 0,
+        revertible: !isMeta,
+      };
+    }
+  } else {
+    if (versions.length === 0) {
+      throw new Error(`No backups found for ${target.remotePath}.`);
+    }
+    // Prefer the newest revertible version; fall back to newest (so the operator
+    // still sees the stale/metadata reason rather than an opaque failure).
+    chosen = versions.find((v) => v.revertible) ?? versions[0];
+  }
+
+  const base = {
+    target,
+    backupPath: chosen.backupPath,
+    timestamp: chosen.timestamp,
+    kind: chosen.kind,
+  };
+
+  if (!chosen.revertible) {
+    // #20 — distinguish a stale delta base (out-of-band edit) from a genuinely
+    // contentless metadata-only backup. The former is the bug this fix targets:
+    // return a clear structured reason instead of throwing the raw delta error.
+    if (chosen.revertibleReason === "stale-base") {
+      return {
+        ...base,
+        revertible: false,
+        currentSha256: currentHash,
+        backupSha256: chosen.baseHash,
+        note:
+          `This delta backup is anchored to a base the live file no longer matches ` +
+          `(base ${(chosen.baseHash ?? "").slice(0, 8)}…, current ${currentHash.slice(0, 8)}…) — ` +
+          `the file was edited out-of-band since the backup was written, so it cannot be applied. ` +
+          `Revert a more recent (self-contained) backup, or restore manually.`,
+      };
+    }
+    return {
+      ...base,
+      revertible: false,
+      note: "Backup is metadata-only (large/binary write) — no content stored, so no diff and no revert.",
+    };
   }
 
   const backupContent = await backupStore.restore(chosen.backupPath, currentContent);

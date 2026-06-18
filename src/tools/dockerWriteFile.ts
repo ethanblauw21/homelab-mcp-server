@@ -157,6 +157,10 @@ export async function writeResolvedDocker(
     args;
   const { inspect, prevContent, viaBindMount, prevHash, isNewFile } = prev;
 
+  // #20 — re-anchor a delta backup to a self-contained full copy when the live
+  // file drifted out-of-band since the last managed write.
+  const lastBackupBaseHash = backupStore.latestBaseHash({ kind: "docker", vmid, container, remotePath: path });
+
   const largeChange = detectLargeFileWrite(
     newContent.length,
     isNewFile,
@@ -176,6 +180,7 @@ export async function writeResolvedDocker(
       largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
       largeFilePolicy: cfg.backup.largeFilePolicy,
       existingHashToPaths: existingHashMap,
+      lastBackupBaseHash,
     });
     return {
       dryRun: true,
@@ -216,6 +221,7 @@ export async function writeResolvedDocker(
     largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
     largeFilePolicy: cfg.backup.largeFilePolicy,
     existingHashToPaths: existingHashMap,
+    lastBackupBaseHash,
   });
 
   const newHash = contentHash(newContent);

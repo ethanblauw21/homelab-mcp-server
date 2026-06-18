@@ -62,6 +62,15 @@ export interface QmRow {
 export interface TailscaleSummary {
   self: string;
   peerCount: number;
+  /**
+   * #22 — when the host has no tailscale daemon but a guest container does, the
+   * host probe (`tailscale status`) returns nothing. Rather than report a flat
+   * `null` (which reads as "no tailscale anywhere"), the census scans the
+   * already-collected `services` docker rows for a tailscale image and records
+   * where it actually lives. Honest visibility: tailscale is present, just not
+   * on the host. `self`/`peerCount` stay empty/0 (the host daemon, not these).
+   */
+  detectedInGuests?: Array<{ vmid: number; container: string; image: string }>;
 }
 
 export interface ZpoolHealth {
@@ -340,6 +349,28 @@ export function parseTailscaleStatus(output: string): TailscaleSummary | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * #22 — scan already-collected docker rows for a tailscale container so the
+ * census reports tailscale-in-a-guest instead of a flat `null` when the host
+ * has no daemon. Pure: takes the minimal `{ vmid, docker }` shape (not the full
+ * `ServiceEntry`, to avoid a circular import). Returns a `TailscaleSummary` with
+ * empty host identity + `detectedInGuests` populated, or `null` if none found.
+ */
+export function detectTailscaleInGuests(
+  services: Array<{ vmid: number; docker: DockerContainer[] }>
+): TailscaleSummary | null {
+  const detected: NonNullable<TailscaleSummary["detectedInGuests"]> = [];
+  for (const s of services) {
+    for (const c of s.docker) {
+      if (/tailscale/i.test(c.image)) {
+        detected.push({ vmid: s.vmid, container: c.name, image: c.image });
+      }
+    }
+  }
+  if (detected.length === 0) return null;
+  return { self: "", peerCount: 0, detectedInGuests: detected };
 }
 
 /** Parse `zpool status -x` → healthy flag + detail. Absence of ZFS yields healthy:true. */

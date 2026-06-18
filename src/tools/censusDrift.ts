@@ -156,20 +156,41 @@ export function diffSnapshots(
     tailscale: observed(next.sections.tailscale),
   };
 
+  /**
+   * #21 — a sub-diff is only honest when BOTH snapshots actually observed the
+   * section. A section that is undefined (or an Unavailable marker) on EITHER
+   * side is "not observed", not "empty": diffing it would report every item on
+   * the observed side as wholly `added`/`removed`. The classic break is a first
+   * snapshot taken before a section existed (or at a lower tier) compared
+   * against a later full one — every storage/guest would be a false "added".
+   * Mirrors the existing `snapshotCapable`/`unavailableAtTier` suppression rule.
+   */
+  const bothObserved = (key: keyof CensusSnapshot["sections"]): boolean =>
+    observed(prev.sections[key]) !== undefined && observed(next.sections[key]) !== undefined;
+
+  const emptySub = { added: [], removed: [], changed: [] };
+
   const report: DriftReport = {
-    containers: diffGuests(
-      prev.sections.containers,
-      next.sections.containers,
-      sectionTruncated(next, "containers")
-    ),
-    vms: diffGuests(prev.sections.vms, next.sections.vms, sectionTruncated(next, "vms")),
-    storage: diffStorage(prev.sections.storage, next.sections.storage, opts.storageDriftPercent),
-    // ADR-007 §6 — when the NEWER snapshot did not observe a section (an
-    // Unavailable marker at a lower tier), suppress its drift entirely: a section
-    // we did not look at can report neither additions, removals, nor changes.
-    network: observedNext.network
+    containers: bothObserved("containers")
+      ? diffGuests(
+          prev.sections.containers,
+          next.sections.containers,
+          sectionTruncated(next, "containers")
+        )
+      : { ...emptySub },
+    vms: bothObserved("vms")
+      ? diffGuests(prev.sections.vms, next.sections.vms, sectionTruncated(next, "vms"))
+      : { ...emptySub },
+    storage: bothObserved("storage")
+      ? diffStorage(prev.sections.storage, next.sections.storage, opts.storageDriftPercent)
+      : { ...emptySub },
+    // ADR-007 §6 — when EITHER snapshot did not observe the section (an
+    // Unavailable marker at a lower tier, or absent on a baseline), suppress its
+    // drift entirely: a section we did not look at on both sides can report
+    // neither additions, removals, nor changes.
+    network: bothObserved("network") && observedNext.network
       ? diffNetwork(observed(prev.sections.network)?.ifaces, observedNext.network.ifaces)
-      : { added: [], removed: [], changed: [] },
+      : { ...emptySub },
     comparedTo: prev.ts,
   };
 

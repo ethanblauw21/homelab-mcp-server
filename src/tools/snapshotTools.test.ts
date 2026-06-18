@@ -88,6 +88,44 @@ describe("snapshotCreateHandler", () => {
     t.setExecResult("pct snapshot 101 mcp-20260609-213000", { stdout: "", stderr: "storage does not support snapshots", exitCode: 1 });
     await expect(snapshotCreateHandler({ vmid: 101 }, t, audit, cfg, NOW)).rejects.toThrow(/does not support snapshots/i);
   });
+
+  it("enriches a 'feature not available' failure with the bind-mount cause + vzdump fallback (#15)", async () => {
+    const t = new FakeTransport();
+    t.setExecResult("pct list", { stdout: PCT_LIST_101, stderr: "", exitCode: 0 });
+    t.setExecResult("pct listsnapshot 101", { stdout: "", stderr: "", exitCode: 0 });
+    t.setExecResult("pct snapshot 101 mcp-20260609-213000", {
+      stdout: "",
+      stderr: "snapshot feature is not available",
+      exitCode: 1,
+    });
+    // #15 diagnostic fetch: a container with a host-path bind mount.
+    t.setExecResult("pct config 101", {
+      stdout: "rootfs: local-lvm:subvol-101-disk-0,size=8G\nmp0: /srv/media,mp=/media\n",
+      stderr: "",
+      exitCode: 0,
+    });
+
+    await expect(snapshotCreateHandler({ vmid: 101 }, t, audit, cfg, NOW)).rejects.toThrow(
+      /bind mount mp0.*\/srv\/media.*guest_backup \(vzdump\)/is
+    );
+  });
+
+  it("degrades gracefully when the diagnostic config fetch fails (#15)", async () => {
+    const t = new FakeTransport();
+    t.setExecResult("pct list", { stdout: PCT_LIST_101, stderr: "", exitCode: 0 });
+    t.setExecResult("pct listsnapshot 101", { stdout: "", stderr: "", exitCode: 0 });
+    t.setExecResult("pct snapshot 101 mcp-20260609-213000", {
+      stdout: "",
+      stderr: "snapshot feature is not available",
+      exitCode: 1,
+    });
+    t.setExecResult("pct config 101", { stdout: "", stderr: "permission denied", exitCode: 1 });
+
+    // Still names the vzdump fallback even without a diagnosed cause.
+    await expect(snapshotCreateHandler({ vmid: 101 }, t, audit, cfg, NOW)).rejects.toThrow(
+      /guest_backup \(vzdump\)/i
+    );
+  });
 });
 
 describe("snapshotListHandler", () => {

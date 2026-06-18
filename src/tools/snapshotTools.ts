@@ -19,6 +19,8 @@ import {
   buildSnapshotCreateCommand,
   buildSnapshotRollbackCommand,
   buildSnapshotDeleteCommand,
+  buildGuestConfigCommand,
+  enrichSnapshotFailure,
 } from "./snapshots.js";
 
 // ---------------------------------------------------------------------------
@@ -107,9 +109,20 @@ export async function snapshotCreateHandler(
     }),
     timeoutMs
   );
-  // Surface storage-driver errors verbatim (directory storage refuses snapshots).
+  // #15 — a "snapshot feature is not available" failure is structural (device
+  // passthrough, a bind mount, dir-typed storage). Fetch the guest config and
+  // enrich the error with the likely cause + the vzdump (guest_backup) fallback,
+  // instead of surfacing an opaque CLI message. The diagnostic fetch is
+  // best-effort: a failed config read degrades to the plain (un-diagnosed) hint.
   if (createRes.exitCode !== 0) {
-    throw new Error(`snapshot create failed (exit ${createRes.exitCode}): ${createRes.stderr.trim()}`);
+    let configText: string | null = null;
+    try {
+      const cfgRes = await transport.exec(buildGuestConfigCommand(type, input.vmid), timeoutMs);
+      if (cfgRes.exitCode === 0) configText = cfgRes.stdout;
+    } catch {
+      /* diagnosis is best-effort; fall through with configText = null */
+    }
+    throw new Error(enrichSnapshotFailure(createRes.stderr, type, input.vmid, configText));
   }
 
   const record = buildAuditRecord({
