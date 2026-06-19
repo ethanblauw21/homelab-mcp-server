@@ -10,7 +10,7 @@ import {
   parseIpBrief,
   parseInterfacesBridges,
   parseTailscaleStatus,
-  detectTailscaleInGuests,
+  findTailscaleContainer,
   parseZpoolStatusX,
   parseFailedUnits,
   parseDockerPs,
@@ -189,27 +189,58 @@ describe("parseTailscaleStatus", () => {
       peerCount: 0,
     });
   });
-});
-
-describe("detectTailscaleInGuests (#22)", () => {
-  it("finds a tailscale docker image across guests", () => {
-    const out = detectTailscaleInGuests([
-      { vmid: 101, docker: [{ name: "web", image: "nginx:latest", status: "Up" }] },
-      { vmid: 102, docker: [{ name: "ts", image: "ghcr.io/tailscale/tailscale:v1.62", status: "Up" }] },
-    ]);
-    expect(out).toEqual({
-      self: "",
-      peerCount: 0,
-      detectedInGuests: [{ vmid: 102, container: "ts", image: "ghcr.io/tailscale/tailscale:v1.62" }],
+  it("surfaces online state and tailnet IPs when present (#22)", () => {
+    const json = JSON.stringify({
+      Self: { HostName: "ts", Online: true, TailscaleIPs: ["100.64.0.5", "fd7a::1"] },
+      Peer: { a: {} },
+    });
+    expect(parseTailscaleStatus(json)).toEqual({
+      self: "ts",
+      peerCount: 1,
+      online: true,
+      tailnetIPs: ["100.64.0.5", "fd7a::1"],
     });
   });
-  it("returns null when no guest runs tailscale", () => {
-    expect(
-      detectTailscaleInGuests([{ vmid: 101, docker: [{ name: "web", image: "nginx", status: "Up" }] }])
-    ).toBeNull();
+  it("omits online/tailnetIPs when absent (additive, back-compatible)", () => {
+    const r = parseTailscaleStatus(JSON.stringify({ Self: { HostName: "ts" } }));
+    expect(r).not.toHaveProperty("online");
+    expect(r).not.toHaveProperty("tailnetIPs");
   });
-  it("returns null for an empty services list", () => {
-    expect(detectTailscaleInGuests([])).toBeNull();
+  it("records online:false explicitly", () => {
+    const r = parseTailscaleStatus(JSON.stringify({ Self: { HostName: "ts", Online: false } }));
+    expect(r?.online).toBe(false);
+  });
+});
+
+describe("findTailscaleContainer (#22)", () => {
+  const ps = (rows: Array<{ name: string; image: string }>) =>
+    rows.map((r) => ({ name: r.name, image: r.image, status: "Up" }));
+
+  it("matches by image name", () => {
+    const found = findTailscaleContainer(
+      ps([
+        { name: "web", image: "nginx:latest" },
+        { name: "vpn", image: "tailscale/tailscale:latest" },
+      ])
+    );
+    expect(found?.name).toBe("vpn");
+  });
+  it("matches by container name (case-insensitive)", () => {
+    const found = findTailscaleContainer(ps([{ name: "Tailscale", image: "custom/repack" }]));
+    expect(found?.name).toBe("Tailscale");
+  });
+  it("returns the first match when several look like Tailscale", () => {
+    const found = findTailscaleContainer(
+      ps([
+        { name: "ts-a", image: "tailscale/tailscale" },
+        { name: "ts-b", image: "tailscale/tailscale" },
+      ])
+    );
+    expect(found?.name).toBe("ts-a");
+  });
+  it("returns undefined when none look like Tailscale", () => {
+    expect(findTailscaleContainer(ps([{ name: "web", image: "nginx" }]))).toBeUndefined();
+    expect(findTailscaleContainer([])).toBeUndefined();
   });
 });
 

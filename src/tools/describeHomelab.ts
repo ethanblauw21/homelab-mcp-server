@@ -3,6 +3,7 @@ import type { SshTransport } from "../ssh/transport.js";
 import type { Config } from "../config.js";
 import { buildPctExecCommand, parsePctList, type PctContainer } from "./pctHelpers.js";
 import { buildQmAgentPingCommand } from "./qmHelpers.js";
+import { buildDockerExecCommand } from "./dockerHelpers.js";
 import {
   parsePveVersion,
   parseFreeBytes,
@@ -13,11 +14,14 @@ import {
   parseIpBrief,
   parseInterfacesBridges,
   parseTailscaleStatus,
-  detectTailscaleInGuests,
   parseZpoolStatusX,
   parseFailedUnits,
   parseDockerPs,
+  findTailscaleContainer,
   evaluateSnapshotCapable,
+  type DockerContainer,
+  type TailscaleSummary,
+  type TailscaleAbsent,
 } from "./censusParsers.js";
 import { ALL_SECTIONS, CENSUS_SCHEMA_VERSION } from "./censusTypes.js";
 import type {
@@ -107,6 +111,56 @@ function formatUptime(secs?: number): string {
   return "up " + parts.join(" ");
 }
 
+/**
+ * ADR-013 (#22) — host-first, then container-fallback Tailscale probe. Tailscale
+ * is commonly run as a Docker container inside an LXC guest (the netns provider
+ * for a VPN-routed stack), not on the PVE host, so a host-only probe reports a
+ * misleading `null`. Resolution order, first hit wins:
+ *   1. host  `tailscale status --json` (short-circuits when present)
+ *   2. each running guest's Docker containers → first one that looks like
+ *      Tailscale → `pct exec <vmid> -- docker exec <name> tailscale status --json`
+ *   3. a structured `{ scope: "none", reason }` — never a bare null, so the
+ *      operator can tell "not present" from "down".
+ */
+async function probeTailscale(
+  runner: ProbeRunner,
+  getPctRows: (section: CensusSection) => Promise<PctContainer[]>,
+  getContainerDocker: (vmid: number) => Promise<DockerContainer[]>
+): Promise<TailscaleSummary | TailscaleAbsent> {
+  // 1. Host scope.
+  const hostOut = await runner.soft("tailscale status --json");
+  if (hostOut) {
+    const host = parseTailscaleStatus(hostOut);
+    if (host) return { ...host, scope: "host" };
+  }
+
+  // 2. Container scope — scan running guests, first Tailscale container wins.
+  const running = (await getPctRows("tailscale")).filter((r) => r.status === "running");
+  let foundButUnreadable: string | null = null;
+  for (const r of running) {
+    const tsContainer = findTailscaleContainer(await getContainerDocker(r.vmid));
+    if (!tsContainer) continue;
+    const inner = await runner.soft(
+      buildPctExecCommand(r.vmid, buildDockerExecCommand(tsContainer.name, "tailscale status --json"))
+    );
+    const parsed = inner ? parseTailscaleStatus(inner) : null;
+    if (parsed) {
+      return { ...parsed, scope: "container", vmid: r.vmid, container: tsContainer.name };
+    }
+    foundButUnreadable =
+      `found a Tailscale container '${tsContainer.name}' in guest ${r.vmid}, but ` +
+      `'tailscale status' returned no parseable output`;
+  }
+
+  // 3. None found.
+  return {
+    scope: "none",
+    reason:
+      foundButUnreadable ??
+      "no host-level Tailscale; no Tailscale container found in running guests",
+  };
+}
+
 export async function describeHomelabHandler(
   input: DescribeHomelabInput,
   transport: SshTransport,
@@ -143,6 +197,23 @@ export async function describeHomelabHandler(
       );
     }
     return pctRows;
+  }
+
+  // #22 — a guest's `docker ps` feeds BOTH `services` and the tailscale
+  // container-fallback probe; memoize per vmid so both sections share one call.
+  const dockerPsCache = new Map<number, DockerContainer[]>();
+  async function getContainerDocker(vmid: number): Promise<DockerContainer[]> {
+    const cached = dockerPsCache.get(vmid);
+    if (cached) return cached;
+    const out = await runner.soft(
+      buildPctExecCommand(
+        vmid,
+        'command -v docker >/dev/null 2>&1 && docker ps --format "{{.Names}}\\t{{.Image}}\\t{{.Status}}" || true'
+      )
+    );
+    const rows = out ? parseDockerPs(out) : [];
+    dockerPsCache.set(vmid, rows);
+    return rows;
   }
 
   if (apiOnly) {
@@ -310,33 +381,21 @@ export async function describeHomelabHandler(
         const failedOut = await runner.soft(
           buildPctExecCommand(r.vmid, "systemctl list-units --failed --no-legend --plain")
         );
-        const dockerOut = await runner.soft(
-          buildPctExecCommand(
-            r.vmid,
-            'command -v docker >/dev/null 2>&1 && docker ps --format "{{.Names}}\\t{{.Image}}\\t{{.Status}}" || true'
-          )
-        );
         svc.push({
           vmid: r.vmid,
           failedUnits: failedOut ? parseFailedUnits(failedOut) : [],
-          docker: dockerOut ? parseDockerPs(dockerOut) : [],
+          docker: await getContainerDocker(r.vmid),
         });
       }
       sections.services = svc;
     }
 
     if (requested.has("tailscale")) {
-      const ts = await runner.soft("tailscale status --json");
-      const host = ts ? parseTailscaleStatus(ts) : null;
-      // #22 — no host daemon? scan the docker rows already gathered by the
-      // services probe for a tailscale container so the census reports
-      // tailscale-in-a-guest instead of a flat null (reads as "none anywhere").
-      // The services probe runs before this one; if it wasn't requested,
-      // `sections.services` is absent and the fallback yields null (unchanged).
-      const inGuests = Array.isArray(sections.services)
-        ? detectTailscaleInGuests(sections.services)
-        : null;
-      sections.tailscale = host ?? inGuests;
+      // ADR-013 (#22): probe Tailscale host-first, then fall back to execing into
+      // a guest's tailscale container for real identity (supersedes #27's
+      // detect-only stopgap, which reported a container's mere presence with empty
+      // identity and a flat null when absent).
+      sections.tailscale = await probeTailscale(runner, getPctRows, getContainerDocker);
     }
   } catch (e) {
     if (e instanceof BudgetExceeded) {
