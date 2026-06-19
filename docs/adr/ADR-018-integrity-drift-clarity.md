@@ -2,6 +2,7 @@
 
 **Status:** Proposed
 **Date:** 2026-06-19
+**Implementation status (2026-06-19, post pressure-test):** Decision §2 (batched L1 `find` enumeration) is **already realized on `master`** and is therefore **descoped from this ADR's implementation** — `buildForestEnumCommand`/`parseForestEnumeration` in `integrity/forest.ts` already emit and parse `find <paths> -printf '%y\t%T@\t%p\n'` for both the host (SSH exec) and each container (`pct exec`), with the pure parser mirroring `sweepPlanner.ts`, the frozen-guest short-circuit preserved, and the L1 mtime encoding aligned (`Math.trunc` epoch seconds → `mtimePayload`). The §4 pressure-test (dimension A) caught this. **Only Decision §1 (the `mode`/`seededReason`/`note` seeded-vs-compared signal + its two result-shape consumers) remains to build.** This drops the ADR from size M to S. The §2 text below is retained as the rationale record for the enumeration technique that now lives on `master`.
 **Deciders:** Ethan
 **Depends on:** ADR-006 (`config_sweep`'s single `find -printf '%s\t%p'` batched enumeration — the technique reused here), ADR-009 (the Merkle integrity forest, `verify_integrity`, the L1/L2/L3 levels, `forest.ts` `SubtreeSource`)
 **Required by:** — none yet —
