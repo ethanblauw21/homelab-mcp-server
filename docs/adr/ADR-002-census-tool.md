@@ -4,6 +4,7 @@
 **Date:** 2026-06-09
 **Deciders:** Ethan
 **Depends on:** ADR-001 (SSH MCP server), TESTING-STRATEGY-ssh-mcp-server.md
+**Required by:** ADR-016 (reuses the redaction module for `docker_inspect` env masking), ADR-017 (output budgeting — `describe_homelab` `status` depth + `describe_guest`, reusing the census parsers), ADR-019 (reuses the redaction module as the opt-in read-redactor)
 
 ## Context
 

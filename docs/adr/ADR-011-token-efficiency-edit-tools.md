@@ -4,6 +4,7 @@
 **Date:** 2026-06-16
 **Deciders:** Ethan
 **Depends on:** ADR-001 (write_file pipeline), ADR-003 (pct file I/O, backup/audit pipeline), ADR-004 (dryRun preview, read caps, path validation), ADR-005 (qm file I/O), ADR-006 (config-history capture path A), ADR-008 (docker file I/O, §3 diff-on-write), ADR-009 (hash-anchored audit records — beforeHash/afterHash)
+**Required by:** ADR-017 (output budgeting — extends the §1 token-economy doctrine from the *input/write* surface to the *output/read* surface)
 
 ## Context
 
@@ -18,7 +19,7 @@ So a one-line edit costs ~1200 lines of token traffic to move ~1 line of actual 
 
 This ADR does two things, deliberately coupled (the user framing: "one general, one a specific implementation of the first"):
 
-- **§1 — a doctrine.** Name token economy as an explicit design axis with a lever taxonomy and a roadmap, so future tools are measured against it the way they are already measured against the node-safety guardrails.
+- **§1 — a doctrine.** Name token economy as an explicit design axis with a lever taxonomy and a roadmap, so future tools are measured against it the way they are already measured against the node-safety guardrails. — The **output-side levers** of this roadmap (projection/depth/scope on the read surface) are realized by ADR-017.
 - **§2–§7 — the first lever.** A **find-and-replace edit tool** across all four write surfaces (`edit_file`, `pct_edit_file`, `qm_edit_file`, `docker_edit_file`) that lets the model send only the bytes that change — `oldString` → `newString` — while the **entire existing safety pipeline (backup → audit → diff → config-history → integrity-anchor) runs unchanged** behind it.
 
 ## Decision
