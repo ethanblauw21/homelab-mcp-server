@@ -39,7 +39,13 @@ function primeInspect(t: FakeTransport, vmid: number, container: string, payload
 }
 
 const BIND_MOUNTS = JSON.stringify([{ Type: "bind", Source: "/srv/config", Destination: "/config", RW: true }]);
-const VOLUME_MOUNTS = JSON.stringify([{ Type: "volume", Source: "/var/lib/docker/volumes/data/_data", Destination: "/data", RW: true }]);
+// A volume on a NON-local driver (NFS) — its Source is not host-visible, so it
+// correctly stays on the docker cp slow path (ADR-016 §4).
+const VOLUME_MOUNTS = JSON.stringify([{ Type: "volume", Source: "/mnt/nfs/data", Destination: "/data", RW: true }]);
+// A local-driver named volume — ADR-016 §4 routes it through the fast path.
+const NAMED_VOLUME_MOUNTS = JSON.stringify([
+  { Type: "volume", Source: "/var/lib/docker/volumes/qb_config/_data", Destination: "/config", RW: true },
+]);
 
 describe("dockerReadFileHandler", () => {
   it("reads via the bind-mount fast path (pct pull on the LXC source)", async () => {
@@ -57,7 +63,28 @@ describe("dockerReadFileHandler", () => {
     expect(r.container).toBe("web");
   });
 
-  it("reads via the docker cp slow path for a non-bind path", async () => {
+  it("ADR-016 §4: reads a local-driver named volume via the fast path (no docker cp)", async () => {
+    const t = new FakeTransport();
+    primeRunning(t, 101);
+    primeNodeTemp(t);
+    primeInspect(t, 101, "qbittorrent", `id123 ${NAMED_VOLUME_MOUNTS}`);
+    // Fast path: the named volume's _data source + remainder is pulled directly.
+    t.setExecResult(
+      buildPctPullCommand(101, "/var/lib/docker/volumes/qb_config/_data/qBittorrent.conf", NODE_TMP),
+      { stdout: "", stderr: "", exitCode: 0 }
+    );
+    t.setFile(NODE_TMP, "named-volume body");
+
+    const r = await dockerReadFileHandler(
+      { vmid: 101, container: "qbittorrent", path: "/config/qBittorrent.conf", encoding: "utf8" },
+      t,
+      makeConfig()
+    );
+    expect(r.content).toBe("named-volume body");
+    expect(r.viaBindMount).toBe(true); // host-visible fast path served it
+  });
+
+  it("reads via the docker cp slow path for a non-host-visible (NFS) volume", async () => {
     const t = new FakeTransport();
     primeRunning(t, 101);
     primeNodeTemp(t);

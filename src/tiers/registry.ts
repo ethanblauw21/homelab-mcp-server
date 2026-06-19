@@ -97,6 +97,14 @@ export const TOOL_MIN_TIER: Record<string, Tier> = {
   docker_write_file: "companion",
   docker_logs: "companion",
 
+  // ADR-016 — Docker introspection. Three read-only, not-audited siblings of
+  // docker_ps, all on the same companion `pct exec docker …` boundary (no new
+  // transport/tier/mutation surface). docker_inspect redacts env values via the
+  // shared module; docker_stats/compose_discover expose only metadata.
+  docker_inspect: "companion",
+  docker_stats: "companion",
+  compose_discover: "companion",
+
   // ADR-008 §6 — outcome-level rollback. Snapshot-tier unification: every
   // service-affecting guest verb (snapshot_*, guest_backup*, compose_redeploy)
   // lands at companion/MCP-enforced, ONE enforcement story. vzdump is

@@ -34,7 +34,10 @@ function makeConfig(tmpDir: string): Config {
 const NODE_TMP = "/tmp/node1";
 const LXC_TMP = "/tmp/lxctmp";
 const BIND_MOUNTS = JSON.stringify([{ Type: "bind", Source: "/srv/config", Destination: "/config", RW: true }]);
-const VOLUME_MOUNTS = JSON.stringify([{ Type: "volume", Source: "/var/lib/docker/volumes/data/_data", Destination: "/data", RW: true }]);
+// A volume on a NON-local driver (NFS) stays on the docker cp slow path; a
+// local-driver named volume (/var/lib/docker/volumes/<n>/_data) would now take
+// the fast path per ADR-016 §4, so the slow-path test uses a non-host-visible source.
+const VOLUME_MOUNTS = JSON.stringify([{ Type: "volume", Source: "/mnt/nfs/data", Destination: "/data", RW: true }]);
 
 function primeRunning(t: FakeTransport, vmid: number) {
   t.setExecResult(buildPctStatusCommand(vmid), { stdout: "status: running\n", stderr: "", exitCode: 0 });
