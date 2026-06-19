@@ -4,6 +4,7 @@
 **Date:** 2026-06-09
 **Deciders:** Ethan
 **Depends on:** ADR-002 (redaction, census), ADR-003 (target descriptors, backup meta), ADR-004 (`ExecResult` shape, `computeUnifiedDiff`, size caps, confirm gate)
+**Required by:** ADR-017 (output budgeting — `query_audit` `cmd` projection + `health_check` pseudo-fs filtering)
 
 ## Context
 

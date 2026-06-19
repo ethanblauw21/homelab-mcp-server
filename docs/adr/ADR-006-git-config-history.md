@@ -4,6 +4,7 @@
 **Date:** 2026-06-10
 **Deciders:** Ethan
 **Depends on:** ADR-001 (backup/audit pipeline), ADR-002 (census drift — conceptual counterpart), ADR-003 (target descriptors, pct pull, running-guest precondition per amendment A3.1), ADR-007 (tiers — this feature is companion+)
+**Required by:** ADR-018 (reuses `config_sweep`'s single `find -printf` batched enumeration for the forest's L1 mtime pass)
 
 ## Context
 

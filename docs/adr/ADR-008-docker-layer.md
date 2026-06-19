@@ -4,6 +4,7 @@
 **Date:** 2026-06-11
 **Deciders:** Ethan
 **Depends on:** ADR-003 (target descriptors, backup pipeline, `pct pull/push`, snapshot guard), ADR-004 (denylist v2, `computeUnifiedDiff`, size caps, confirm gate), ADR-005 (`tail_log` redaction precedent), ADR-006 (`config_sweep`), ADR-007 (tiers, NodeOps/API backend)
+**Required by:** ADR-016 (Docker introspection — structured `docker_inspect`/`docker_stats`/`compose_discover` + named-volume read fast path, extending the `pct exec docker …` plumbing and `dockerHelpers.ts` parsers). *Option D streaming deferral remains open — not realized by ADR-016.*
 **Source:** First real-usage dogfooding report (2026-06-11): file-storage cleanup, Portainer stack fix, homepage config update performed through the server by a Claude session.
 
 ## Context

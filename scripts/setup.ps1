@@ -1,4 +1,4 @@
-&#xFEFF;<#
+﻿<#
 .SYNOPSIS
   Thin PowerShell wrapper — delegates to the cross-platform Node.js setup script.
 
