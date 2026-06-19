@@ -54,6 +54,12 @@ describe("tool → tier registration", () => {
     expect(companion).toContain("config_sweep");
     expect(companion).toContain("snapshot_create");
     expect(companion).toContain("snapshot_list");
+    // ADR-012 — compose_preflight reaches inside an LXC (pct exec/pull), so it
+    // floors at companion alongside compose_redeploy and the docker family; an
+    // observe token cannot exec in a container.
+    expect(companion).toContain("compose_preflight");
+    expect(toolsForTier("operate")).not.toContain("compose_preflight");
+    expect(toolsForTier("observe")).not.toContain("compose_preflight");
     // ADR-011 — guest edit tools share their write surface's companion floor.
     expect(companion).toContain("pct_edit_file");
     expect(companion).toContain("qm_edit_file");

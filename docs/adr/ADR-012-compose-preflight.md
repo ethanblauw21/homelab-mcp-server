@@ -1,6 +1,6 @@
 # ADR-012: `compose_preflight` — static hazard analysis of a compose change before deploy
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-17
 **Deciders:** Ethan
 **Depends on:** ADR-001 (SSH transport, path validation), ADR-004 (denylist/path validation, read caps, dryRun doctrine), ADR-007 (permission tiers, registration filtering, hybrid transport), ADR-008 (Docker layer — `pct exec` plumbing, `docker_ps`/`compose_redeploy`, the three-layer node→LXC→Docker topology)

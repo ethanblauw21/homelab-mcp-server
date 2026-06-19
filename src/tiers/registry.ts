@@ -103,6 +103,13 @@ export const TOOL_MIN_TIER: Record<string, Tier> = {
   guest_backup_restore: "companion",
   compose_redeploy: "companion",
 
+  // ADR-012 — compose_preflight reads a compose file inside an LXC and probes
+  // ports in the guest (pct exec/pull), exactly the Docker family's companion
+  // reach; an observe-tier API token cannot exec in a container, so it would be
+  // inert there. Read-only and NOT audited (like diff_config) — the agent-principal
+  // companion floor is about credential reach, not whether the tool mutates.
+  compose_preflight: "companion",
+
   // ADR-011 — find-and-replace edit tools share their write surface's tier
   // EXACTLY: an edit's blast radius equals a write's (it produces a full new
   // file through the same pipeline), so pct/qm/docker edits are companion and

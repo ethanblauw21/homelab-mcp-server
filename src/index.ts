@@ -69,6 +69,7 @@ import {
   guestBackupRestoreHandler,
 } from "./tools/backupTools.js";
 import { ComposeRedeployInputSchema, composeRedeployHandler } from "./tools/composeRedeploy.js";
+import { ComposePreflightInputSchema, composePreflightHandler } from "./tools/composePreflightHandler.js";
 import {
   ComputeTreeInputSchema,
   computeTreeHandler,
@@ -816,6 +817,28 @@ register(
   async (input) => {
     try {
       const result = await composeRedeployHandler(input, sshTransport, audit, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+// ADR-012 — compose_preflight: static hazard analysis BEFORE a stack deploy. The
+// read-only, never-audited counterpart to compose_redeploy (predict the bad
+// outcome cheaply, like dryRun/diff_config/health_check). Companion tier.
+register(
+  "compose_preflight",
+  {
+    description:
+      "Statically analyze a proposed Docker Compose change for deploy hazards BEFORE you deploy: internal-port " +
+      "collisions across a shared network namespace, the netns-provider recreate deadlock (a tailscale-style " +
+      "provider edit that wedges an in-place up -d), and declared ports already bound in the guest. Pass " +
+      "composeContent to preflight an edit you have in hand (proposed vs on-disk). Read-only, not audited; run it " +
+      "before compose_redeploy. Companion tier.",
+    inputSchema: ComposePreflightInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await composePreflightHandler(input, sshTransport, config);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }
