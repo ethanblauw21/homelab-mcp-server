@@ -1,6 +1,6 @@
 # ADR-016: Docker Introspection — Structured `docker_inspect` / `docker_stats` / `compose_discover` + Named-Volume Read Fast Path
 
-**Status:** Proposed
+**Status:** Accepted (implemented 2026-06-19)
 **Date:** 2026-06-19
 **Deciders:** Ethan
 **Depends on:** ADR-002 (shared redaction module — env-value redaction), ADR-004 (read caps, path validation, denylist), ADR-008 (the Docker layer: `pct exec docker …` plumbing, `dockerHelpers.ts` pure builders/parsers, the `docker:<vmid>:<container>:<path>` descriptor, the bind-mount fast path)
@@ -63,3 +63,15 @@ ADR-008's `docker_read_file` has a bind-mount fast path (resolve the host-visibl
 - **Redaction:** `docker_inspect` routes env values through the ADR-002 redaction module (same module `tail_log`/`docker_logs` use).
 - **Registry (`tiers/registry.ts`):** three new `TOOL_MIN_TIER` rows at `companion`. No tier-rule change.
 - **CLAUDE.md:** add the three tools to the tool table and the Docker-layer section **once implemented** (not at proposal time).
+
+## Implementation status (2026-06-19)
+
+Implemented on branch `adr-016-docker-introspection`; +35 unit tests, full suite green (1169), typecheck + lint clean.
+
+- **§1 `docker_inspect` (`dockerInspect.ts` + `parseContainerInspect`/`projectInspectFields`/`buildContainerInspectCommand`).** Naming: the existing ADR-008 `parseDockerInspect`/`DockerInspect` (id + mounts, for the bind resolver) was **left untouched**; the new richer projection is `parseContainerInspect`/`ContainerInspect` to avoid a collision. **Dimension-C directive honored:** env redaction runs on the **parsed** `{KEY:val}` map via `redactRecord(...)` (imported into the otherwise-pure helpers — `redactRecord` is itself pure), never on JSON-escaped text. Benign config (TZ/PUID) stays readable; secret-named/secret-valued entries are masked, with an `envRedactedCount` for transparency.
+  - **Honest deviation from §1's "first `RepoDigest`":** container inspect does not expose `RepoDigests` (that lives on the *image* object, a second round trip). We surface `imageId` (`.Image`, the resolved `sha256:` content hash) as the container-level pin instead — equivalent identity, one round trip. Documented in the parser/handler doc-comments.
+- **§2 `docker_stats` (`dockerStats.ts` + `parseDockerStats`/`parseDockerSize`).** `--no-stream` single sample, sorted by memory used descending; `parseDockerSize` handles both binary (MiB/GiB) and decimal (MB/GB) suffixes. No streaming (ADR-008 Option D stays deferred).
+- **§3 `compose_discover` (`composeDiscover.ts` + `parseComposeProjects`/`parseDockerLabels`).** Built from `docker ps --format '{{json .}}'` Labels (reuses `buildDockerPsCommand` — one round trip), grouped by `com.docker.compose.project`, sorted + service-deduped. The honest "running-only" limit is surfaced as a `note` in the result.
+- **§4 named-volume fast path.** `resolveBindMount` was **broadened** (not duplicated): a new pure `isHostVisibleMount` predicate matches binds (always) plus local-driver named volumes whose `Source` is under `/var/lib/docker/volumes/<name>/_data` (regex-anchored — a non-local/NFS volume or tmpfs stays on the `docker cp` relay). **Honest deviation:** the read/write result field stays named `viaBindMount` (now meaning "served by the host-visible fast path") to avoid churning the audit/response shape; the broadened meaning is documented at the resolver. Two pre-existing slow-path tests (read + write) used a `_data` volume fixture that now resolves fast — they were repointed to a non-local (NFS) volume source, and a new fast-path test proves the named-volume win.
+- **Tier/registration:** three `companion` rows in `tiers/registry.ts`; registered in `index.ts`. No tier-rule change, no new mutation surface — all three are read-only and not audited.
+- **Live smoke:** read-only `docker_inspect`/`docker_stats`/`compose_discover` against a real LXC on `proxlab` are available on request (not gated on merge, per the Safety rule).

@@ -42,6 +42,9 @@ import { DockerLogsInputSchema, dockerLogsHandler } from "./tools/dockerLogs.js"
 import { DockerReadFileInputSchema, dockerReadFileHandler } from "./tools/dockerReadFile.js";
 import { DockerWriteFileInputSchema, dockerWriteFileHandler } from "./tools/dockerWriteFile.js";
 import { DockerEditFileInputSchema, dockerEditFileHandler } from "./tools/dockerEditFile.js";
+import { DockerInspectInputSchema, dockerInspectHandler } from "./tools/dockerInspect.js";
+import { DockerStatsInputSchema, dockerStatsHandler } from "./tools/dockerStats.js";
+import { ComposeDiscoverInputSchema, composeDiscoverHandler } from "./tools/composeDiscover.js";
 import { HealthCheckInputSchema, healthCheckHandler, type HealthCheckResult } from "./tools/healthCheck.js";
 import { SnapshotStore } from "./ui/snapshotStore.js";
 import { TailLogInputSchema, tailLogHandler } from "./tools/tailLog.js";
@@ -665,6 +668,62 @@ register(
   async (input) => {
     try {
       const result = await dockerEditFileHandler(input, sshTransport, audit, backupStore, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+// ADR-016 — Docker introspection (companion tier, read-only, not audited). The
+// dominant dogfooding pattern (hand-rolled `pct_exec docker inspect/stats` loops)
+// gets first-class structured tools on the same `pct exec docker …` boundary.
+register(
+  "docker_inspect",
+  {
+    description:
+      "Structured single-container view via docker inspect inside an LXC. Returns image + resolved " +
+      "image id (the pin), status/health, restart policy, networks, mounts, published ports, and " +
+      "compose labels; env keeps names but redacts secret VALUES by default. Pass fields[] to narrow " +
+      "the projection. Read-only, not audited.",
+    inputSchema: DockerInspectInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await dockerInspectHandler(input, sshTransport, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "docker_stats",
+  {
+    description:
+      "Point-in-time resource snapshot via docker stats --no-stream inside an LXC: per-container CPU%, " +
+      "memory used/limit/%, net and block IO, sorted by memory descending. A single sample, not a live " +
+      "feed. Read-only, not audited.",
+    inputSchema: DockerStatsInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await dockerStatsHandler(input, sshTransport, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "compose_discover",
+  {
+    description:
+      "Read-only compose project map from the running containers' compose labels inside an LXC: " +
+      "[{ project, configFile, services: [{ name, image, ports }] }]. Produces the composePath that " +
+      "compose_redeploy/compose_preflight need. Sees only running containers (a down project is " +
+      "invisible). Read-only, not audited.",
+    inputSchema: ComposeDiscoverInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await composeDiscoverHandler(input, sshTransport, config);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }

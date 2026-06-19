@@ -61,6 +61,11 @@ describe("tool → tier registration", () => {
     // ADR-017 §4 — describe_guest is exec-bound (config/docker/units), companion floor.
     expect(companion).toContain("describe_guest");
     expect(toolsForTier("observe")).not.toContain("describe_guest");
+    // ADR-016 — Docker introspection trio rides the companion `pct exec docker …` boundary.
+    expect(companion).toContain("docker_inspect");
+    expect(companion).toContain("docker_stats");
+    expect(companion).toContain("compose_discover");
+    expect(toolsForTier("observe")).not.toContain("docker_inspect");
     expect(toolsForTier("operate")).not.toContain("compose_preflight");
     expect(toolsForTier("observe")).not.toContain("compose_preflight");
     // ADR-011 — guest edit tools share their write surface's companion floor.
