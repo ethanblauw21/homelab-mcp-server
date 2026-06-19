@@ -266,6 +266,16 @@ const ConfigSchema = z.object({
     healthRetentionCap: z.number().default(30),
     driftRetentionCap: z.number().default(30),
   }),
+  // ADR-015 — derived operational metrics. Pure aggregation over artifacts already
+  // on the Windows host (audit JSONL, retained drift snapshots, backup metas);
+  // surfaced as renderer-only panels in the ADR-010 sidecar. No new tool, no new
+  // network surface, no new credential. Drift-trend depth reuses ui.driftRetentionCap.
+  metrics: z.object({
+    // Default look-back window for audit stats when the caller omits one (days).
+    defaultWindowDays: z.number().default(30),
+    // Default throughput time-series granularity.
+    defaultBucket: z.enum(["hour", "day"]).default("day"),
+  }),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -467,6 +477,12 @@ function loadConfig(): Config {
       driftRetentionCap: process.env.UI_DRIFT_RETENTION_CAP
         ? parseInt(process.env.UI_DRIFT_RETENTION_CAP)
         : 30,
+    },
+    metrics: {
+      defaultWindowDays: process.env.METRICS_DEFAULT_WINDOW_DAYS
+        ? parseInt(process.env.METRICS_DEFAULT_WINDOW_DAYS)
+        : 30,
+      defaultBucket: (process.env.METRICS_DEFAULT_BUCKET ?? "day") as "hour" | "day",
     },
   };
   return ConfigSchema.parse(raw);

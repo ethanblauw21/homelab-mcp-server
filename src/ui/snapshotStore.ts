@@ -61,6 +61,23 @@ export class SnapshotStore<T> {
     }
   }
 
+  /**
+   * ADR-015 §2 — load the whole retained window (newest-first, like `listSnapshots`),
+   * skipping any unreadable file. The metrics aggregators need the full series, not
+   * just the latest; the count is already bounded by `retentionCap` on every `save`.
+   */
+  loadAll(): StoredSnapshot<T>[] {
+    const out: StoredSnapshot<T>[] = [];
+    for (const p of this.listSnapshots()) {
+      try {
+        out.push(JSON.parse(fs.readFileSync(p, "utf8")) as StoredSnapshot<T>);
+      } catch {
+        /* skip unreadable snapshot */
+      }
+    }
+    return out;
+  }
+
   /** Persist a snapshot (filename derived from the save time) and run retention. */
   save(data: T): string {
     this.ensureDir();
