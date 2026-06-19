@@ -291,7 +291,11 @@ register(
   },
   async (input) => {
     try {
-      const result = await listBackupsHandler(input, backupStore, config);
+      // ADR-014 §1 — hand list_backups the SSH transport only at companion+ (where
+      // an SSH credential exists, gauged by pct_exec being enabled) so it can hash
+      // the live file and report honest revertibility. Below that it stays local-only.
+      const sshForRevertibility = isToolEnabled("pct_exec", activeTier) ? sshTransport : undefined;
+      const result = await listBackupsHandler(input, backupStore, config, sshForRevertibility);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }

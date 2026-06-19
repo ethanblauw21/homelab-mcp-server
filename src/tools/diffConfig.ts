@@ -4,8 +4,8 @@ import type { BackupStore, BackupTarget, BackupVersionInfo } from "../backup/sto
 import type { Config } from "../config.js";
 import { sha256 } from "../audit/record.js";
 import { computeUnifiedDiff } from "../util/diff.js";
-import { assertContainerRunning, pullContainerFile } from "./pctFiles.js";
-import { resolveDockerContainer, readDockerFile } from "./dockerFiles.js";
+import { classifyRevertibility, contentHash } from "../backup/policy.js";
+import { readCurrentForTarget } from "./targetContent.js";
 
 export const DiffConfigInputSchema = z
   .object({
@@ -36,6 +36,8 @@ export interface DiffConfigResult {
   timestamp: string;
   kind: string;
   revertible: boolean;
+  /** ADR-014 §1 — set when not revertible: why (metadata-only, or a delta whose base drifted). */
+  revertReason?: string;
   /** Present only when the backup is revertible (metadata-only backups carry no content). */
   diff?: string;
   diffTruncated?: boolean;
@@ -94,52 +96,8 @@ export async function diffConfigHandler(
         : { kind: "host", remotePath: input.path! };
   }
 
-  // Read the current content of the live file FIRST so the diff reflects "what a
-  // revert would change right now" AND so revertibility is computed against the
-  // real live hash (#20). A missing file is treated as empty content.
-  let currentContent: Buffer | undefined;
-  const timeoutMs = cfg.ssh.commandTimeoutMs;
-  if (target.kind === "pct") {
-    if (target.vmid === undefined) {
-      throw new Error("Container backup is missing its vmid; cannot read current content.");
-    }
-    await assertContainerRunning(transport, target.vmid, timeoutMs);
-    const { content } = await pullContainerFile(
-      transport,
-      target.vmid,
-      target.remotePath,
-      cfg.container.nodeTempDir,
-      timeoutMs
-    );
-    if (content) currentContent = content;
-  } else if (target.kind === "docker") {
-    if (target.vmid === undefined || !target.container) {
-      throw new Error("Docker backup is missing its vmid/container; cannot read current content.");
-    }
-    await assertContainerRunning(transport, target.vmid, timeoutMs);
-    const inspect = await resolveDockerContainer(transport, target.vmid, target.container, timeoutMs);
-    const { content } = await readDockerFile(
-      transport,
-      target.vmid,
-      target.container,
-      target.remotePath,
-      inspect,
-      cfg.container.nodeTempDir,
-      timeoutMs
-    );
-    if (content) currentContent = content;
-  } else {
-    try {
-      currentContent = await transport.readFile(target.remotePath);
-    } catch {
-      /* file may not exist — treat as empty */
-    }
-  }
-  const currentHash = currentContent ? sha256(currentContent) : sha256(Buffer.alloc(0));
-
   // Choose the backup version: the named one, or the newest for the target.
-  // Listing with the live hash makes each version's `revertible` honest (#20).
-  const versions = backupStore.listBackupsForPath(target, currentHash);
+  const versions = backupStore.listBackupsForPath(target);
   let chosen: BackupVersionInfo | undefined;
   if (input.backupPath !== undefined) {
     chosen = versions.find((v) => samePath(v.backupPath, input.backupPath!));
@@ -158,8 +116,7 @@ export async function diffConfigHandler(
     if (versions.length === 0) {
       throw new Error(`No backups found for ${target.remotePath}.`);
     }
-    // Prefer the newest revertible version; fall back to newest (so the operator
-    // still sees the stale/metadata reason rather than an opaque failure).
+    // Prefer the newest revertible version; fall back to newest (metadata-only).
     chosen = versions.find((v) => v.revertible) ?? versions[0];
   }
 
@@ -171,22 +128,6 @@ export async function diffConfigHandler(
   };
 
   if (!chosen.revertible) {
-    // #20 — distinguish a stale delta base (out-of-band edit) from a genuinely
-    // contentless metadata-only backup. The former is the bug this fix targets:
-    // return a clear structured reason instead of throwing the raw delta error.
-    if (chosen.revertibleReason === "stale-base") {
-      return {
-        ...base,
-        revertible: false,
-        currentSha256: currentHash,
-        backupSha256: chosen.baseHash,
-        note:
-          `This delta backup is anchored to a base the live file no longer matches ` +
-          `(base ${(chosen.baseHash ?? "").slice(0, 8)}…, current ${currentHash.slice(0, 8)}…) — ` +
-          `the file was edited out-of-band since the backup was written, so it cannot be applied. ` +
-          `Revert a more recent (self-contained) backup, or restore manually.`,
-      };
-    }
     return {
       ...base,
       revertible: false,
@@ -194,7 +135,32 @@ export async function diffConfigHandler(
     };
   }
 
-  const backupContent = await backupStore.restore(chosen.backupPath, currentContent);
+  // Read the current content of the live file so the diff reflects "what a revert
+  // would change right now". A missing file is treated as empty content.
+  const current = await readCurrentForTarget(transport, target, cfg);
+  const currentContent: Buffer | undefined = current ?? undefined;
+  const currentHash = current === null ? null : contentHash(current);
+
+  // ADR-014 §1 — classify BEFORE attempting restore: a delta backup whose base no
+  // longer matches the live file (out-of-band edit) is honestly reported as
+  // non-revertible, instead of surfacing the raw "changed since" throw from restore.
+  const verdict = classifyRevertibility(
+    { kind: chosen.kind, requiresBaseHash: chosen.requiresBaseHash, hash: chosen.hash },
+    currentHash
+  );
+  if (!verdict.revertible) {
+    return { ...base, revertible: false, revertReason: verdict.reason, note: verdict.reason };
+  }
+
+  // Restore is still guarded (a legacy bare blob with no meta can't be classified):
+  // a stale-base throw degrades to a structured non-revertible response.
+  let backupContent: Buffer | null;
+  try {
+    backupContent = await backupStore.restore(chosen.backupPath, currentContent);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { ...base, revertible: false, revertReason: reason, note: reason };
+  }
   if (backupContent === null) {
     // Defensive: listing said revertible but restore returned null.
     return {

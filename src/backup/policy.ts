@@ -6,9 +6,16 @@ const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
 
 export type BackupKind =
+  // A reverse-diff against newContent. `requiresBaseHash` is the hash the current
+  // on-disk file must have for the delta to apply (= sha256(newContent)); `null`
+  // means the blob is the large-file raw fallback (self-contained prevContent).
   | { type: "dedup"; existingPath: string }
-  | { type: "gzip-diff"; blob: Buffer }
-  | { type: "gzip-full"; blob: Buffer }
+  | { type: "gzip-diff"; blob: Buffer; requiresBaseHash: string | null }
+  // `reanchored` marks a self-contained snapshot of prevContent stored because the
+  // file drifted out-of-band since the last managed write (ADR-014 §2). Its blob
+  // holds prevContent while the meta hash records newContent, so it must be kept
+  // OUT of the dedup map.
+  | { type: "gzip-full"; blob: Buffer; reanchored?: boolean }
   | { type: "metadata-only" };
 
 export interface BackupPolicyInput {
@@ -20,12 +27,14 @@ export interface BackupPolicyInput {
   largeFilePolicy: "diff" | "metadata-only";
   existingHashToPaths: Map<string, string>;
   /**
-   * #20 — the `baseHash` of the most recent backup for this target (the live
-   * content it expects). When the about-to-be-written `prevHash` differs, the
-   * live file drifted out-of-band and a delta would be born stale, so a
-   * self-contained full copy is stored instead. Optional/absent ⇒ no re-anchor.
+   * ADR-014 §2 — the hash of the most recent managed backup for this target (what
+   * the file *should* be if nothing touched it since our last write). When the
+   * current on-disk content (`prevHash`) differs, the file drifted out-of-band and
+   * the delta we are about to take would be unreachable; instead we re-anchor with
+   * a self-contained snapshot of prevContent. Undefined/null ⇒ no chain yet, no
+   * drift check (the common first-write path; preserves pre-ADR-014 behaviour).
    */
-  lastBackupBaseHash?: string | null;
+  chainBaseHash?: string | null;
 }
 
 export function contentHash(buf: Buffer): string {
@@ -126,14 +135,22 @@ function applyHunks(hunks: DiffHunk[], newLines: string[]): Buffer {
 /**
  * Produce a reverse-diff blob that, when applied to newContent, reconstructs prevContent.
  * Falls back to raw prevContent for very large files (> MAX_DIFF_LINES per side).
+ *
+ * Returns the blob plus the `baseHash` the current file must match to apply it.
+ * `baseHash` is `null` for the large-file raw fallback — that blob is self-contained
+ * prevContent, so it carries no base requirement (ADR-014 §1: self-contained ⇒
+ * always revertible).
  */
-function computeReverseDiff(newContent: Buffer, prevContent: Buffer): Buffer {
+function computeReverseDiff(
+  newContent: Buffer,
+  prevContent: Buffer
+): { buf: Buffer; baseHash: string | null } {
   const newLines = newContent.toString("utf8").split("\n");
   const prevLines = prevContent.toString("utf8").split("\n");
 
   if (newLines.length > MAX_DIFF_LINES || prevLines.length > MAX_DIFF_LINES) {
     // Fall back: store full prevContent; applyReverseDiff will return it directly.
-    return prevContent;
+    return { buf: prevContent, baseHash: null };
   }
 
   const envelope: ReverseDiffEnvelope = {
@@ -141,7 +158,7 @@ function computeReverseDiff(newContent: Buffer, prevContent: Buffer): Buffer {
     baseHash: contentHash(newContent),
     hunks: buildHunks(newLines, prevLines),
   };
-  return Buffer.from(JSON.stringify(envelope), "utf8");
+  return { buf: Buffer.from(JSON.stringify(envelope), "utf8"), baseHash: envelope.baseHash };
 }
 
 /**
@@ -190,77 +207,12 @@ export async function applyReverseDiff(diffBlob: Buffer, currentContent?: Buffer
 }
 
 /**
- * #20 — the on-disk base a delta backup was anchored to drifted out-of-band.
- *
- * Each delta (gzip-diff envelope) backup can only be applied while the live file
- * still hashes to the bytes that were current when it was written. When the file
- * is edited outside the server (`sed -i` via `pct_exec`, a package upgrade), the
- * NEXT managed write sees a `prevHash` that no longer matches what the most
- * recent backup expected as the live base — proof the chain base drifted. In
- * that case we must NOT store another fragile delta: a self-contained full copy
- * of the pre-write content is the only thing that survives further live churn.
- *
- * Pure predicate: drift is detected only when both hashes are known and differ.
+ * ADR-014 §2 — has the file drifted out-of-band since our last managed write?
+ * True only when we have a chain anchor AND a current on-disk hash AND they
+ * disagree. A first write (no chain) or an unreadable current file never trips it.
  */
-export function chainBaseDrifted(
-  prevHash: string | null,
-  lastBackupBaseHash: string | null | undefined
-): boolean {
-  return (
-    prevHash !== null &&
-    lastBackupBaseHash !== null &&
-    lastBackupBaseHash !== undefined &&
-    prevHash !== lastBackupBaseHash
-  );
-}
-
-/**
- * #20 — classify whether a (decompressed) backup blob can actually be reverted,
- * honestly, against the file's current content hash.
- *
- * A blob is one of two shapes (NOT distinguishable from `meta.kind` alone — a
- * "gzip-diff" blob falls back to raw content for very large files):
- *  - an `mcp-rdiff-v1` envelope → a **delta**, applicable ONLY when the live file
- *    still hashes to `baseHash`; `requiresLiveMatch: true`.
- *  - anything else (raw/full) → **self-contained**, unconditionally revertible.
- *
- * `currentHash === null` means the caller could not read the live file (e.g. the
- * observe-tier `list_backups`, which has no node access): a delta then cannot be
- * confirmed, so it is reported non-revertible with `requiresLiveMatch` so the
- * caller knows a companion-tier `diff_config` can still verify it.
- */
-export interface BlobRevertibility {
-  revertible: boolean;
-  requiresLiveMatch: boolean;
-  baseHash?: string;
-  reason?: "stale-base" | "current-unknown" | "metadata-only";
-}
-
-export function classifyBlobRevertibility(
-  decompressed: Buffer,
-  currentHash: string | null
-): BlobRevertibility {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(decompressed.toString("utf8"));
-  } catch {
-    parsed = null;
-  }
-  if (
-    typeof parsed === "object" && parsed !== null &&
-    (parsed as ReverseDiffEnvelope).format === "mcp-rdiff-v1"
-  ) {
-    const baseHash = (parsed as ReverseDiffEnvelope).baseHash;
-    if (currentHash === null) {
-      return { revertible: false, requiresLiveMatch: true, baseHash, reason: "current-unknown" };
-    }
-    if (currentHash === baseHash) {
-      return { revertible: true, requiresLiveMatch: true, baseHash };
-    }
-    return { revertible: false, requiresLiveMatch: true, baseHash, reason: "stale-base" };
-  }
-  // Raw / full self-contained content — applies regardless of the live file.
-  return { revertible: true, requiresLiveMatch: false };
+function driftedSinceLastWrite(prevHash: string | null, chainBaseHash: string | null | undefined): boolean {
+  return chainBaseHash != null && prevHash != null && prevHash !== chainBaseHash;
 }
 
 export async function selectBackupKind(input: BackupPolicyInput): Promise<BackupKind> {
@@ -268,42 +220,116 @@ export async function selectBackupKind(input: BackupPolicyInput): Promise<Backup
 
   const newHash = contentHash(newContent);
 
-  // Dedup: if we've already stored a blob with this hash, reuse it
+  // Dedup: if we've already stored a blob with this hash, reuse it. (The drift
+  // check below sits AFTER this, so a genuinely-identical re-write still dedups.)
   if (existingHashToPaths.has(newHash)) {
     return { type: "dedup", existingPath: existingHashToPaths.get(newHash)! };
   }
 
-  // #20 — if the live file drifted out-of-band since the last managed write, a
-  // delta would be born stale; store a self-contained full copy of prevContent
-  // instead so the pre-write state survives further live churn.
-  const reanchor = chainBaseDrifted(prevHash, input.lastBackupBaseHash);
+  // ADR-014 §2 — re-anchor: if the current content drifted out-of-band, a delta
+  // against it would be unreachable. Store a self-contained snapshot of the
+  // drifted prevContent instead, so it stays revertible regardless of future writes.
+  const drifted = driftedSinceLastWrite(prevHash, input.chainBaseHash);
 
   // Large-file policy
   if (newContent.length > largeFileBytesThreshold) {
     if (largeFilePolicy === "metadata-only" || !isText) {
       return { type: "metadata-only" };
     }
-    // diff if text and policy allows (but a drifted base forces a full copy)
-    if (prevContent !== null && !reanchor) {
-      const diff = computeReverseDiff(newContent, prevContent);
-      const blob = await gzip(diff);
-      return { type: "gzip-diff", blob };
+    // diff if text and policy allows
+    if (prevContent !== null) {
+      if (drifted) {
+        const blob = await gzip(prevContent);
+        return { type: "gzip-full", blob, reanchored: true };
+      }
+      const { buf, baseHash } = computeReverseDiff(newContent, prevContent);
+      const blob = await gzip(buf);
+      return { type: "gzip-diff", blob, requiresBaseHash: baseHash };
     }
-    const blob = await gzip(reanchor && prevContent !== null ? prevContent : newContent);
+    const blob = await gzip(newContent);
     return { type: "gzip-full", blob };
   }
 
-  // Normal text file: prefer reverse diff over prev (unless the base drifted)
-  if (isText && prevContent !== null && prevHash !== null && !reanchor) {
-    const diff = computeReverseDiff(newContent, prevContent);
-    const blob = await gzip(diff);
-    return { type: "gzip-diff", blob };
+  // Normal text file: prefer reverse diff over prev
+  if (isText && prevContent !== null && prevHash !== null) {
+    if (drifted) {
+      const blob = await gzip(prevContent);
+      return { type: "gzip-full", blob, reanchored: true };
+    }
+    const { buf, baseHash } = computeReverseDiff(newContent, prevContent);
+    const blob = await gzip(buf);
+    return { type: "gzip-diff", blob, requiresBaseHash: baseHash };
   }
 
-  // Fallback / re-anchor: gzipped full copy. When re-anchoring we store the
-  // pre-write content (the recoverable state); otherwise the new content.
-  const blob = await gzip(reanchor && prevContent !== null ? prevContent : newContent);
+  // Fallback: gzipped full copy
+  const blob = await gzip(newContent);
   return { type: "gzip-full", blob };
+}
+
+// --- ADR-014 §1: honest revertibility classification ---
+
+/** What a stored backup version exposes to the revertibility classifier. */
+export interface RevertibilityView {
+  /** Stored kind: "gzip-full" | "gzip-diff" | "metadata-only" | "unknown". */
+  kind: string;
+  /**
+   * For ADR-014+ backups: the hash the current file must match for a delta to
+   * apply, or `null` for a self-contained blob. Absent (`undefined`) for legacy
+   * backups — then the classifier degrades conservatively (see below).
+   */
+  requiresBaseHash?: string | null;
+  /** The meta `hash` (= sha256 of newContent). Used to recover a legacy delta's base. */
+  hash?: string;
+}
+
+export interface Revertibility {
+  revertible: boolean;
+  reason?: string;
+}
+
+/**
+ * Decide whether a backup version can actually be reverted *right now*, given the
+ * current on-disk hash (or `null` if the live file is unreadable/missing).
+ *
+ * - metadata-only → never (no content stored).
+ * - self-contained (`requiresBaseHash === null`, i.e. a gzip-full, the large-file
+ *   raw fallback, or a re-anchor snapshot) → always.
+ * - delta (`requiresBaseHash` a hash) → only while the file still matches that base.
+ * - legacy (no `requiresBaseHash`): a `gzip-diff` is assumed to need its recorded
+ *   `hash` as the base (understating, never overstating, is the safe direction); a
+ *   `gzip-full` is self-contained. An `unknown` kind (a bare blob with no meta) is
+ *   treated as self-contained — the caller still guards the actual restore.
+ */
+export function classifyRevertibility(view: RevertibilityView, currentHash: string | null): Revertibility {
+  if (view.kind === "metadata-only") {
+    return { revertible: false, reason: "metadata-only backup — no content stored, nothing to revert" };
+  }
+
+  let baseReq: string | null;
+  if (view.requiresBaseHash !== undefined) {
+    baseReq = view.requiresBaseHash; // ADR-014+ exact (null ⇒ self-contained)
+  } else if (view.kind === "gzip-diff") {
+    baseReq = view.hash ?? null; // legacy delta: envelope baseHash == meta.hash
+  } else {
+    baseReq = null; // gzip-full / unknown legacy ⇒ assume self-contained
+  }
+
+  if (baseReq === null) return { revertible: true };
+
+  if (currentHash === null) {
+    return {
+      revertible: false,
+      reason: "current file is unreadable or missing, so this delta backup cannot be verified for revert",
+    };
+  }
+  if (currentHash === baseReq) return { revertible: true };
+  return {
+    revertible: false,
+    reason:
+      `delta backup needs the current file to match base ${baseReq.slice(0, 8)}…, ` +
+      `but it is ${currentHash.slice(0, 8)}… — the file was edited out-of-band since this backup, ` +
+      `so this version can no longer be applied (revert a more recent version, or restore manually)`,
+  };
 }
 
 export { isTextContent };

@@ -103,9 +103,10 @@ export async function writeResolvedHost(
   const { prevContent, prevHash, isNewFile } = prev;
   const rootTier = args.rootTier ?? false;
 
-  // #20 — the base the most recent backup expects; lets selectBackupKind detect
-  // an out-of-band drift and re-anchor to a self-contained full copy.
-  const lastBackupBaseHash = backupStore.latestBaseHash({ kind: "host", remotePath: path });
+  // ADR-014 §2 — the last managed write's content hash for this target; passed to
+  // selectBackupKind so an out-of-band drift since then re-anchors instead of
+  // taking an unreachable delta.
+  const chainBaseHash = backupStore.latestBaseHash({ kind: "host", remotePath: path });
 
   const largeChange = detectLargeFileWrite(
     newContent.length,
@@ -137,7 +138,7 @@ export async function writeResolvedHost(
       largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
       largeFilePolicy: cfg.backup.largeFilePolicy,
       existingHashToPaths: existingHashMap,
-      lastBackupBaseHash,
+      chainBaseHash,
     });
 
     return {
@@ -171,7 +172,7 @@ export async function writeResolvedHost(
     largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
     largeFilePolicy: cfg.backup.largeFilePolicy,
     existingHashToPaths: existingHashMap,
-    lastBackupBaseHash,
+    chainBaseHash,
   });
 
   const newHash = contentHash(newContent);

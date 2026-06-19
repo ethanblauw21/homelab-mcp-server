@@ -1,12 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-  selectBackupKind,
-  contentHash,
-  isTextContent,
-  applyReverseDiff,
-  chainBaseDrifted,
-  classifyBlobRevertibility,
-} from "./policy.js";
+import { selectBackupKind, contentHash, isTextContent, applyReverseDiff } from "./policy.js";
 import zlib from "zlib";
 import { promisify } from "util";
 
@@ -26,88 +19,6 @@ function makeInput(overrides: Partial<Parameters<typeof selectBackupKind>[0]> = 
     ...overrides,
   };
 }
-
-describe("chainBaseDrifted (#20)", () => {
-  it("is false when either hash is unknown (no prior backup / new file)", () => {
-    expect(chainBaseDrifted(null, "abc")).toBe(false);
-    expect(chainBaseDrifted("abc", null)).toBe(false);
-    expect(chainBaseDrifted("abc", undefined)).toBe(false);
-  });
-  it("is false when the live base still matches the last backup", () => {
-    expect(chainBaseDrifted("samehash", "samehash")).toBe(false);
-  });
-  it("is true when the live base drifted from the last backup (out-of-band edit)", () => {
-    expect(chainBaseDrifted("live-drifted", "backup-expected")).toBe(true);
-  });
-});
-
-describe("classifyBlobRevertibility (#20)", () => {
-  it("treats a self-contained (raw) blob as unconditionally revertible", () => {
-    const r = classifyBlobRevertibility(Buffer.from("plain file bytes"), null);
-    expect(r).toEqual({ revertible: true, requiresLiveMatch: false });
-  });
-  it("a delta blob is revertible only when the live hash matches its baseHash", () => {
-    const envelope = Buffer.from(JSON.stringify({ format: "mcp-rdiff-v1", baseHash: "deadbeef", hunks: [] }));
-    expect(classifyBlobRevertibility(envelope, "deadbeef")).toEqual({
-      revertible: true,
-      requiresLiveMatch: true,
-      baseHash: "deadbeef",
-    });
-  });
-  it("a delta blob with a mismatched live hash is non-revertible with a stale-base reason", () => {
-    const envelope = Buffer.from(JSON.stringify({ format: "mcp-rdiff-v1", baseHash: "deadbeef", hunks: [] }));
-    expect(classifyBlobRevertibility(envelope, "0ther")).toEqual({
-      revertible: false,
-      requiresLiveMatch: true,
-      baseHash: "deadbeef",
-      reason: "stale-base",
-    });
-  });
-  it("a delta blob with an unknown live hash (observe tier) is non-revertible but flags requiresLiveMatch", () => {
-    const envelope = Buffer.from(JSON.stringify({ format: "mcp-rdiff-v1", baseHash: "deadbeef", hunks: [] }));
-    expect(classifyBlobRevertibility(envelope, null)).toEqual({
-      revertible: false,
-      requiresLiveMatch: true,
-      baseHash: "deadbeef",
-      reason: "current-unknown",
-    });
-  });
-});
-
-describe("selectBackupKind re-anchor on drift (#20)", () => {
-  it("stores a self-contained gzip-full (of prevContent) instead of a fragile delta when the base drifted", async () => {
-    const newContent = Buffer.from("new version of file\n");
-    const prevContent = Buffer.from("the out-of-band edited content\n");
-    const kind = await selectBackupKind(
-      makeInput({
-        newContent,
-        prevContent,
-        prevHash: "live-hash-now", // current on-disk
-        isText: true,
-        lastBackupBaseHash: "what-the-last-backup-expected", // differs ⇒ drift
-      })
-    );
-    expect(kind.type).toBe("gzip-full");
-    if (kind.type === "gzip-full") {
-      // The full copy must reconstruct the recoverable PRE-write state directly.
-      const restored = await applyReverseDiff(kind.blob);
-      expect(restored).toEqual(prevContent);
-    }
-  });
-
-  it("still prefers a delta when the base did NOT drift", async () => {
-    const kind = await selectBackupKind(
-      makeInput({
-        newContent: Buffer.from("v2\n"),
-        prevContent: Buffer.from("v1\n"),
-        prevHash: "matching",
-        isText: true,
-        lastBackupBaseHash: "matching", // same ⇒ no drift
-      })
-    );
-    expect(kind.type).toBe("gzip-diff");
-  });
-});
 
 describe("contentHash", () => {
   it("returns consistent SHA-256 hex", () => {

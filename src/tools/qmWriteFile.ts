@@ -110,9 +110,8 @@ export async function writeResolvedQm(
   const { vmid, path, prev, newContent, tool, transport, audit, backupStore, cfg, timeoutMs } = args;
   const { node, prevContent, prevHash, isNewFile } = prev;
 
-  // #20 — re-anchor a delta backup to a self-contained full copy when the live
-  // file drifted out-of-band since the last managed write.
-  const lastBackupBaseHash = backupStore.latestBaseHash({ kind: "qm", vmid, remotePath: path });
+  // ADR-014 §2 — last managed write's content hash; drives the re-anchor on drift.
+  const chainBaseHash = backupStore.latestBaseHash({ kind: "qm", vmid, remotePath: path });
 
   // Size cap on the RESOLVED payload — the guest-agent write endpoint bounds a
   // single payload, so a write/edit over the cap is refused (use qm_exec for
@@ -141,7 +140,7 @@ export async function writeResolvedQm(
       largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
       largeFilePolicy: cfg.backup.largeFilePolicy,
       existingHashToPaths: existingHashMap,
-      lastBackupBaseHash,
+      chainBaseHash,
     });
 
     const diffable =
@@ -185,7 +184,7 @@ export async function writeResolvedQm(
     largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
     largeFilePolicy: cfg.backup.largeFilePolicy,
     existingHashToPaths: existingHashMap,
-    lastBackupBaseHash,
+    chainBaseHash,
   });
 
   const newHash = contentHash(newContent);

@@ -1,11 +1,10 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
-import zlib from "zlib";
 import type { BackupEntry } from "./eviction.js";
-import type { BackupKind, BlobRevertibility } from "./policy.js";
+import type { BackupKind } from "./policy.js";
 import { planEviction, isOverCap } from "./eviction.js";
-import { applyReverseDiff, classifyBlobRevertibility } from "./policy.js";
+import { applyReverseDiff } from "./policy.js";
 import type { Config } from "../config.js";
 
 /**
@@ -46,18 +45,21 @@ export interface BackupVersionInfo {
   timestamp: string;
   kind: string;
   sizeBytes: number;
-  revertible: boolean;
   /**
-   * #20 — true for a delta (`mcp-rdiff-v1`) blob: it can only be applied while
-   * the live file still matches its `baseHash`. When `revertible` is false on a
-   * version carrying this flag, a companion-tier `diff_config` can still confirm
-   * applicability against the live file (observe-tier `list_backups` cannot).
+   * Whether the version carries restorable content at all (content-bearing). This
+   * is NOT the honest "can I revert right now" verdict — that depends on the live
+   * file and is computed by the list_backups handler via classifyRevertibility
+   * (ADR-014 §1), which overwrites this flag and may add `revertReason`.
    */
-  requiresLiveMatch?: boolean;
-  /** #20 — the live content hash a delta backup is anchored to (present for deltas). */
-  baseHash?: string;
-  /** #20 — why a version is non-revertible: stale base, unknown current, or metadata-only. */
-  revertibleReason?: "stale-base" | "current-unknown" | "metadata-only";
+  revertible: boolean;
+  /** ADR-014 §1 — the meta `hash` (= sha256 of the content the write produced). */
+  hash?: string;
+  /** ADR-014 §1 — base the live file must match for a delta to apply (null ⇒ self-contained). */
+  requiresBaseHash?: string | null;
+  /** ADR-014 §2 — true if this is a self-contained snapshot of out-of-band-drifted content. */
+  reanchored?: boolean;
+  /** ADR-014 §1 — why a version is not revertible right now (set by the handler). */
+  revertReason?: string;
 }
 
 function fileKey(target: BackupTarget): string {
@@ -118,6 +120,10 @@ export class BackupStore {
         try {
           const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
           if (!meta.hash) continue;
+          // ADR-014 §2 — a re-anchor snapshot's blob holds prevContent while its
+          // meta.hash records newContent. Mapping that hash → blob would hand a
+          // future dedup the WRONG bytes, so re-anchor metas are never dedup targets.
+          if (meta.reanchored === true) continue;
           let blob: string | undefined = meta.blobPath;
           if (!blob) {
             // Legacy meta without blobPath: derive the sibling .gz.
@@ -182,12 +188,27 @@ export class BackupStore {
     const blobPath = path.join(keyDir, `${ts}.gz`);
     fs.writeFileSync(blobPath, kind.blob);
 
+    // ADR-014 §1 — record what a revert needs from the live file. A gzip-diff
+    // carries its base requirement (null ⇒ self-contained large-file fallback); a
+    // gzip-full is always self-contained. `reanchored` marks a self-contained
+    // snapshot of drifted prevContent (its blob ≠ its hash — see buildExistingHashMap).
+    const requiresBaseHash = kind.type === "gzip-diff" ? kind.requiresBaseHash : null;
+    const reanchored = kind.type === "gzip-full" ? kind.reanchored === true : false;
+
     // Write companion meta carrying the target descriptor + blob pointer so
     // revert can route restoration (host SFTP vs. pct push) from the meta alone.
     const metaPath = path.join(keyDir, `${ts}.meta`);
     fs.writeFileSync(
       metaPath,
-      JSON.stringify({ target, remotePath: target.remotePath, blobPath, hash: newHash, kind: kind.type })
+      JSON.stringify({
+        target,
+        remotePath: target.remotePath,
+        blobPath,
+        hash: newHash,
+        kind: kind.type,
+        requiresBaseHash,
+        reanchored,
+      })
     );
 
     return { backupPath: blobPath, kind: kind.type, revertible: true };
@@ -209,20 +230,7 @@ export class BackupStore {
     return { kind: "host", remotePath: meta.remotePath };
   }
 
-  /**
-   * #20 — list backup versions with **honest** revertibility.
-   *
-   * A `.gz` blob is inspected (decompressed locally — no node access) to learn
-   * whether it is self-contained or an `mcp-rdiff-v1` delta. A delta is only
-   * applicable while the live file still hashes to its `baseHash`:
-   *  - `currentHash` supplied (companion `diff_config`, which reads the live
-   *    file): the delta's `revertible` is the real `currentHash === baseHash`.
-   *  - `currentHash` omitted (observe `list_backups`, no node access): a delta
-   *    cannot be confirmed, so `revertible: false` with `requiresLiveMatch: true`
-   *    + `baseHash` — never the old overstated `revertible: true`.
-   * Self-contained blobs are unconditionally `revertible: true`.
-   */
-  listBackupsForPath(target: BackupTarget, currentHash?: string | null): BackupVersionInfo[] {
+  listBackupsForPath(target: BackupTarget): BackupVersionInfo[] {
     const key = fileKey(target);
     const keyDir = path.join(this.cfg.baseDir, key);
     if (!fs.existsSync(keyDir)) return [];
@@ -230,7 +238,6 @@ export class BackupStore {
     const files = fs.readdirSync(keyDir);
     const timestamps = new Set(files.map((f) => f.replace(/\.(gz|meta)$/, "")));
     const results: BackupVersionInfo[] = [];
-    const liveHash = currentHash ?? null;
 
     for (const ts of timestamps) {
       const gzPath = path.join(keyDir, `${ts}.gz`);
@@ -239,32 +246,33 @@ export class BackupStore {
       if (fs.existsSync(gzPath)) {
         const stat = fs.statSync(gzPath);
         let kind = "gzip-full";
+        let hash: string | undefined;
+        let requiresBaseHash: string | null | undefined;
+        let reanchored: boolean | undefined;
         if (fs.existsSync(metaPath)) {
           try {
             const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
             kind = meta.kind ?? "gzip-full";
+            hash = meta.hash;
+            // `requiresBaseHash` may be legitimately null (self-contained); only
+            // treat it as "absent" (legacy meta) when the key is missing entirely.
+            requiresBaseHash = "requiresBaseHash" in meta ? meta.requiresBaseHash : undefined;
+            reanchored = meta.reanchored === true;
           } catch { /* use default */ }
         }
-        // Inspect the blob itself — meta.kind alone is not authoritative (a
-        // "gzip-diff" blob falls back to raw content for very large files).
-        let rev: BlobRevertibility = { revertible: true, requiresLiveMatch: false };
-        try {
-          const decompressed = zlib.gunzipSync(fs.readFileSync(gzPath));
-          rev = classifyBlobRevertibility(decompressed, liveHash);
-        } catch { /* unreadable blob — leave optimistic default */ }
         results.push({
           backupPath: gzPath,
           timestamp: ts,
           kind,
           sizeBytes: stat.size,
-          revertible: rev.revertible,
-          requiresLiveMatch: rev.requiresLiveMatch || undefined,
-          baseHash: rev.baseHash,
-          revertibleReason: rev.reason,
+          revertible: true,
+          hash,
+          requiresBaseHash,
+          reanchored,
         });
       } else if (fs.existsSync(metaPath)) {
         const stat = fs.statSync(metaPath);
-        results.push({ backupPath: metaPath, timestamp: ts, kind: "metadata-only", sizeBytes: stat.size, revertible: false, revertibleReason: "metadata-only" });
+        results.push({ backupPath: metaPath, timestamp: ts, kind: "metadata-only", sizeBytes: stat.size, revertible: false });
       }
     }
 
@@ -272,30 +280,26 @@ export class BackupStore {
   }
 
   /**
-   * #20 — the `baseHash` of the newest stored backup for a target: the live
-   * content hash that backup expects (`meta.hash` === SHA-256 of the content
-   * written at that time). The write path compares the about-to-be-written
-   * `prevHash` against this to detect an out-of-band drift and re-anchor to a
-   * self-contained full copy (see `chainBaseDrifted`). Returns null when no
-   * prior content backup exists.
+   * ADR-014 §2 — the `hash` of the most recent managed backup for this target: the
+   * content that write produced, i.e. what the live file *should* be if nothing has
+   * touched it since. The next write compares its current-on-disk hash against this
+   * to detect out-of-band drift. Returns null when there is no chain yet (first
+   * write) or no readable meta — either way the caller skips the drift check.
    */
   latestBaseHash(target: BackupTarget): string | null {
     const key = fileKey(target);
     const keyDir = path.join(this.cfg.baseDir, key);
     if (!fs.existsSync(keyDir)) return null;
 
-    const metas = fs
-      .readdirSync(keyDir)
-      .filter((f) => f.endsWith(".meta"))
-      .sort((a, b) => b.localeCompare(a)); // newest timestamp first
-    for (const m of metas) {
+    const metas = fs.readdirSync(keyDir).filter((f) => f.endsWith(".meta"));
+    if (metas.length === 0) return null;
+    // Newest by timestamp (filename is the ISO-ish stamp; lexical sort = chronological).
+    metas.sort((a, b) => b.localeCompare(a));
+    for (const f of metas) {
       try {
-        const meta = JSON.parse(fs.readFileSync(path.join(keyDir, m), "utf8"));
-        // Only content backups anchor a chain; metadata-only carries no live base.
-        if (meta.kind && meta.kind !== "metadata-only" && typeof meta.hash === "string") {
-          return meta.hash as string;
-        }
-      } catch { /* skip corrupt meta */ }
+        const meta = JSON.parse(fs.readFileSync(path.join(keyDir, f), "utf8"));
+        if (typeof meta.hash === "string") return meta.hash;
+      } catch { /* skip corrupt meta, try the next-newest */ }
     }
     return null;
   }
