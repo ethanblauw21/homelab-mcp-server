@@ -72,6 +72,12 @@ export const TOOL_MIN_TIER: Record<string, Tier> = {
   diff_config: "companion",
   revert_file: "companion",
   config_sweep: "companion",
+  // ADR-017 §4 — single-guest census. Reuses the same `pct config`/`pct exec`
+  // (docker/units) probes as the companion-tier census internals, so it lands at
+  // companion even though `describe_homelab` is observe (the whole-node census
+  // degrades exec-bound sections below companion; describe_guest is exec-bound by
+  // construction — config/docker/units all need SSH).
+  describe_guest: "companion",
 
   // ADR-009 — the Merkle integrity forest reads file content (host SFTP / pct pull)
   // to fold L2/L3 hashes, so it sits at companion alongside the other content-reading

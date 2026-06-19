@@ -129,6 +129,41 @@ export function rollupStatus(findings: { status: HealthStatus }[]): HealthStatus
 }
 
 /**
+ * ADR-017 §2 — is this `df` mount target a pseudo/virtual filesystem (tmpfs,
+ * devtmpfs, cgroup, efivars, …) rather than a real disk? A homelab `df` lists a
+ * dozen of these at 0.0% use; they are pure noise for capacity health. Matched
+ * by mount-point prefix (the only signal `df --output=target` gives us): the
+ * `/dev`, `/run`, `/sys`, `/proc` trees plus the bare points themselves.
+ */
+export function isPseudoMount(target: string): boolean {
+  if (target === "/dev" || target === "/run" || target === "/sys" || target === "/proc") return true;
+  return (
+    target.startsWith("/dev/") ||
+    target.startsWith("/run/") ||
+    target.startsWith("/sys/") ||
+    target.startsWith("/proc/")
+  );
+}
+
+/**
+ * ADR-017 §2 — the **display** filter for health findings. Drops `storage`
+ * findings whose `fs:<target>` is a pseudo mount (per `isPseudoMount`) UNLESS
+ * `includePseudoFs` is set. NON-storage findings and `store:` findings always
+ * pass. This is applied to the *returned* list only — the rollup status is
+ * computed over the FULL set upstream, so hiding a 0.0%-used tmpfs never changes
+ * the ok/warn/crit verdict. `includePseudoFs: true` restores today's full list.
+ */
+export function filterDisplayFindings<T extends { section: string; check: string }>(
+  findings: T[],
+  includePseudoFs: boolean
+): T[] {
+  if (includePseudoFs) return findings;
+  return findings.filter(
+    (f) => !(f.section === "storage" && f.check.startsWith("fs:") && isPseudoMount(f.check.slice(3)))
+  );
+}
+
+/**
  * Parse `grep -H '^onboot:' /etc/pve/lxc/*.conf /etc/pve/qemu-server/*.conf`.
  * Lines look like `/etc/pve/lxc/101.conf:onboot: 1`. Returns vmid → onboot bool.
  * Tolerant: unmatched lines are skipped.

@@ -58,6 +58,9 @@ describe("tool → tier registration", () => {
     // floors at companion alongside compose_redeploy and the docker family; an
     // observe token cannot exec in a container.
     expect(companion).toContain("compose_preflight");
+    // ADR-017 §4 — describe_guest is exec-bound (config/docker/units), companion floor.
+    expect(companion).toContain("describe_guest");
+    expect(toolsForTier("observe")).not.toContain("describe_guest");
     expect(toolsForTier("operate")).not.toContain("compose_preflight");
     expect(toolsForTier("observe")).not.toContain("compose_preflight");
     // ADR-011 — guest edit tools share their write surface's companion floor.

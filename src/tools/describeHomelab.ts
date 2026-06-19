@@ -50,9 +50,12 @@ export const DescribeHomelabInputSchema = z.object({
     .optional()
     .describe("Sections to include; defaults to all"),
   depth: z
-    .enum(["summary", "full"])
+    .enum(["summary", "status", "full"])
     .default("summary")
-    .describe("summary (default): identity + status; full: includes redacted per-guest config"),
+    .describe(
+      "summary (default): identity + status; status: + snapshotCapable, no config/docker roster; " +
+        "full: includes redacted per-guest config + service docker roster"
+    ),
   saveSnapshot: z.boolean().default(true).describe("Persist the snapshot locally (default true)"),
   compareToPrevious: z
     .boolean()
@@ -304,7 +307,9 @@ export async function describeHomelabHandler(
       const entries: GuestEntry[] = [];
       for (const r of rows) {
         const entry: GuestEntry = { vmid: r.vmid, name: r.name, status: r.status, lock: r.lock };
-        if (depth === "full") {
+        // ADR-017 §3 — both `status` and `full` need the config probe (it feeds
+        // snapshotCapable); only `full` attaches the bulky redacted config blob.
+        if (depth === "full" || depth === "status") {
           const cfgText = await runProbe(
             runner,
             {
@@ -318,8 +323,9 @@ export async function describeHomelabHandler(
           );
           // Raw (unredacted) here; redaction happens once in finalizeInventory.
           if (cfgText !== null) {
-            entry.config = parseGuestConfig(cfgText);
-            entry.snapshotCapable = evaluateSnapshotCapable(entry.config, storageTypeByName);
+            const parsed = parseGuestConfig(cfgText);
+            entry.snapshotCapable = evaluateSnapshotCapable(parsed, storageTypeByName);
+            if (depth === "full") entry.config = parsed;
           }
         }
         entries.push(entry);
@@ -338,7 +344,9 @@ export async function describeHomelabHandler(
       for (const r of rows) {
         const entry: GuestEntry = { vmid: r.vmid, name: r.name, status: r.status };
         let agentEnabled: boolean | undefined;
-        if (depth === "full") {
+        // ADR-017 §3 — `status` and `full` both probe config (for snapshotCapable +
+        // agent-enabled); only `full` attaches the redacted config blob.
+        if (depth === "full" || depth === "status") {
           const cfgText = await runProbe(
             runner,
             {
@@ -352,9 +360,9 @@ export async function describeHomelabHandler(
           );
           if (cfgText !== null) {
             const parsed = parseGuestConfig(cfgText);
-            entry.config = parsed;
             entry.snapshotCapable = evaluateSnapshotCapable(parsed, storageTypeByName);
             agentEnabled = parseAgentEnabled(parsed["agent"]);
+            if (depth === "full") entry.config = parsed;
           }
         }
         // ADR-005 §Part 1: surface qemu-guest-agent coverage on the map (R6 slot).
@@ -384,7 +392,9 @@ export async function describeHomelabHandler(
         svc.push({
           vmid: r.vmid,
           failedUnits: failedOut ? parseFailedUnits(failedOut) : [],
-          docker: await getContainerDocker(r.vmid),
+          // ADR-017 §3 — the docker image roster is the heavy part of a service
+          // entry; `status` depth drops it. `summary`/`full` keep today's behaviour.
+          docker: depth === "status" ? [] : await getContainerDocker(r.vmid),
         });
       }
       sections.services = svc;

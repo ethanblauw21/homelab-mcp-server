@@ -280,6 +280,47 @@ describe("describeHomelabHandler — summary depth", () => {
   });
 });
 
+describe("describeHomelabHandler — status depth (ADR-017 §3)", () => {
+  it("adds snapshotCapable but omits config and the service docker roster", async () => {
+    const t = baseTransport();
+    // status depth runs the config probe (feeds snapshotCapable) for both guests.
+    t.setExecResult("pct config 101", {
+      stdout: "arch: amd64\nrootfs: local-lvm:subvol-101-disk-0,size=8G\npassword: supersecret",
+      stderr: "",
+      exitCode: 0,
+    });
+    t.setExecResult("pct config 102", { stdout: "arch: amd64\nrootfs: local-lvm:subvol-102-disk-0,size=8G", stderr: "", exitCode: 0 });
+    // A docker roster IS available — but status depth must NOT fetch it.
+    t.setExecResult(
+      buildPctExecCommand(
+        101,
+        'command -v docker >/dev/null 2>&1 && docker ps --format "{{.Names}}\\t{{.Image}}\\t{{.Status}}" || true'
+      ),
+      { stdout: "web\tnginx:latest\tUp 2 days\n", stderr: "", exitCode: 0 }
+    );
+
+    const store = new CensusStore(tmpDir, 30);
+    const snap = await describeHomelabHandler(
+      parse({ depth: "status", sections: ["containers", "services"] }),
+      t,
+      store,
+      makeConfig(tmpDir)
+    );
+
+    expect(snap.depth).toBe("status");
+    const ct101 = snap.sections.containers?.find((c) => c.vmid === 101);
+    // snapshotCapable present (the status-depth signal)...
+    expect(ct101?.snapshotCapable).toEqual({ capable: true });
+    // ...but the heavy config blob is withheld, so no secret can leak either.
+    expect(ct101?.config).toBeUndefined();
+    expect(JSON.stringify(snap)).not.toContain("supersecret");
+    // services present, but the docker roster is dropped at status depth.
+    const svc = snap.sections.services?.find((s) => s.vmid === 101);
+    expect(svc).toBeDefined();
+    expect(svc?.docker).toEqual([]);
+  });
+});
+
 describe("describeHomelabHandler — full depth redaction", () => {
   it("includes redacted per-guest config and counts redactions", async () => {
     const t = baseTransport();

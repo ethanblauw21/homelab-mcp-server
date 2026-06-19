@@ -3,6 +3,7 @@ import {
   filterAuditRecords,
   summarizeAuditRecords,
   queryAuditHandler,
+  projectAuditCmd,
 } from "./queryAudit.js";
 import type { AuditRecord } from "../audit/record.js";
 import type { AuditLog } from "../audit/log.js";
@@ -103,5 +104,48 @@ describe("queryAuditHandler", () => {
     expect(queryAuditHandler({ limit: 9999 }, audit, makeConfig()).records).toHaveLength(200);
     // summary still reflects everything
     expect(queryAuditHandler({ limit: 9999 }, audit, makeConfig()).summary.total).toBe(300);
+  });
+});
+
+describe("projectAuditCmd (ADR-017 §1 cmd projection)", () => {
+  const LONG = "docker exec qbittorrent sh -c 'cat /config/qBittorrent/qBittorrent.conf | grep -i password'";
+  const SET: AuditRecord[] = [
+    rec({ tool: "qm_exec", cmd: LONG }),
+    rec({ tool: "qm_exec", cmd: "df" }),
+    rec({ tool: "write_file", path: "/etc/hosts" }), // no cmd
+  ];
+
+  it("is a no-op when no cmdMaxChars is given (default-invariance)", () => {
+    const out = projectAuditCmd(SET, {});
+    expect(out).toBe(SET); // same reference — provably additive
+    expect(out[0]?.cmd).toBe(LONG);
+  });
+
+  it("cmdFull forces verbatim even with cmdMaxChars set", () => {
+    const out = projectAuditCmd(SET, { cmdMaxChars: 10, cmdFull: true });
+    expect(out).toBe(SET);
+    expect(out[0]?.cmd).toBe(LONG);
+  });
+
+  it("truncates an over-long cmd to a head window + accurate dropped-count marker", () => {
+    const out = projectAuditCmd(SET, { cmdMaxChars: 20 });
+    const dropped = LONG.length - 20;
+    expect(out[0]?.cmd).toBe(`${LONG.slice(0, 20)}…(+${dropped} chars)`);
+    // does NOT mutate the input
+    expect(SET[0]?.cmd).toBe(LONG);
+  });
+
+  it("leaves a cmd at/under the window and an absent cmd untouched", () => {
+    const out = projectAuditCmd(SET, { cmdMaxChars: 100 });
+    expect(out[1]?.cmd).toBe("df"); // under window, unchanged
+    expect(out[2]?.cmd).toBeUndefined(); // no cmd, passthrough
+    // boundary: exactly equal length is not truncated
+    expect(projectAuditCmd([rec({ cmd: "abcde" })], { cmdMaxChars: 5 })[0]?.cmd).toBe("abcde");
+  });
+
+  it("the handler projects only the returned page, never the summary", () => {
+    const res = queryAuditHandler({ tool: "qm_exec", cmdMaxChars: 5 }, fakeAudit(SET), makeConfig());
+    expect(res.records.find((r) => r.cmd?.startsWith("docke"))?.cmd).toMatch(/^docke…\(\+\d+ chars\)$/);
+    expect(res.summary.total).toBe(2); // summary unaffected by projection
   });
 });
