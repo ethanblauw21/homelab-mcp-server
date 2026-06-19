@@ -1,6 +1,6 @@
 # ADR-015: Derived Operational Metrics — Audit Stats, Drift-Rate Trend, Backup-Store Health
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-19
 **Deciders:** Ethan
 **Depends on:** ADR-002 (census/redaction), ADR-003 (backup pipeline / retention), ADR-005 (`query_audit`, the read-only forensics surface), ADR-006 (config-history `historyCommitted`), ADR-009 (Merkle forest, explained/unexplained drift), ADR-010 (localhost UI sidecar — the renderer/executor split, the honest-UI rule), ADR-014 (re-anchor snapshots, honest revertibility)
