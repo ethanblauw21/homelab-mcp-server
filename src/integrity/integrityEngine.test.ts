@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import crypto from "crypto";
-import { IntegrityEngine, forestToNodePath } from "./integrityEngine.js";
+import { IntegrityEngine, forestToNodePath, seededReasonFor, seededNote } from "./integrityEngine.js";
 import { MemoryNodeStore } from "./nodeStore.js";
 import { AuditLog } from "../audit/log.js";
 import { buildAuditRecord } from "../audit/record.js";
@@ -88,6 +88,25 @@ describe("forestToNodePath", () => {
   });
 });
 
+describe("ADR-018 §1 seeded-reason pure helpers", () => {
+  it("classifies all-empty as no-baseline and partial-empty as level-changed", () => {
+    expect(seededReasonFor(3, 3)).toBe("no-baseline");
+    expect(seededReasonFor(1, 1)).toBe("no-baseline");
+    expect(seededReasonFor(2, 3)).toBe("level-changed");
+    expect(seededReasonFor(1, 3)).toBe("level-changed");
+  });
+
+  it("builds operator notes that distinguish a re-seed from a first seed", () => {
+    expect(seededNote("no-baseline", "")).toMatch(/whole forest/);
+    expect(seededNote("no-baseline", "")).toMatch(/begins on the next run/);
+    const reseed = seededNote("level-changed", "host/etc");
+    expect(reseed).toMatch(/re-seeded/i);
+    expect(reseed).toMatch(/did NOT run/);
+    expect(reseed).toContain("host/etc");
+    expect(seededNote("scope-new", "host/srv")).toMatch(/new scope/i);
+  });
+});
+
 describe("IntegrityEngine.verify", () => {
   let transport: NodeFsTransport;
   let store: MemoryNodeStore;
@@ -108,6 +127,33 @@ describe("IntegrityEngine.verify", () => {
     expect(report.baselineSeeded).toBe(true);
     expect(report.drift).toEqual([]);
     expect(store.allUnder("baseline", "l3", "/").length).toBeGreaterThan(0);
+  });
+
+  it("ADR-018 §1: a first run is mode 'seeded' with reason 'no-baseline' and a note", async () => {
+    const engine = new IntegrityEngine(store, transport, cfg(), audit);
+    const report = await engine.verify("smart");
+    expect(report.mode).toBe("seeded");
+    expect(report.seededReason).toBe("no-baseline");
+    expect(report.note).toMatch(/drift detection begins on the next run/i);
+  });
+
+  it("ADR-018 §1: a comparison run is mode 'compared' with no seededReason/note", async () => {
+    const engine = new IntegrityEngine(store, transport, cfg(), audit);
+    await engine.verify("l3"); // seed
+    const report = await engine.verify("l3");
+    expect(report.mode).toBe("compared");
+    expect(report.baselineSeeded).toBe(false);
+    expect(report.seededReason).toBeUndefined();
+    expect(report.note).toBeUndefined();
+  });
+
+  it("ADR-018 §1: a level-change re-seed is flagged 'level-changed' (the silent case)", async () => {
+    const engine = new IntegrityEngine(store, transport, cfg(), audit);
+    await engine.verify("l1"); // seeds ONLY the L1 baseline
+    const report = await engine.verify("smart"); // L2/L3 still empty ⇒ partial re-seed
+    expect(report.mode).toBe("seeded");
+    expect(report.seededReason).toBe("level-changed");
+    expect(report.note).toMatch(/re-seeded/i);
   });
 
   it("detects an unexplained config-content change at L3", async () => {

@@ -30,6 +30,9 @@ export interface DriftLeafLike {
 export interface DriftReportLike {
   level: string;
   scope: string;
+  /** ADR-018 §1: the field that authoritatively says whether detection ran. */
+  mode?: "seeded" | "compared";
+  /** ADR-009 back-compat flag (pre-ADR-018 snapshots have only this). */
   baselineSeeded?: boolean;
   drift: DriftLeafLike[];
 }
@@ -88,7 +91,8 @@ function summarizeRun(snap: DriftSnapshotLike, sensitiveGlobs: string[]): DriftR
     savedAt: snap.savedAt,
     level: rep.level,
     scope: rep.scope,
-    seeded: rep.baselineSeeded === true,
+    // ADR-018 §1: `mode` is authoritative; fall back to the pre-018 `baselineSeeded` flag.
+    seeded: rep.mode === "seeded" || (rep.mode === undefined && rep.baselineSeeded === true),
     total: leaves.length,
     explained,
     unexplained,
@@ -110,8 +114,13 @@ export function computeDriftTrend(
     .sort((a, b) => a.savedAt.localeCompare(b.savedAt))
     .map((s) => summarizeRun(s, sensitiveGlobs));
 
-  const latest = runs.length ? runs[runs.length - 1].unexplained : null;
-  const previous = runs.length >= 2 ? runs[runs.length - 2].unexplained : null;
+  // ADR-018 §1: a seeded run reports `unexplained: 0` because NO detection occurred —
+  // it must not become a clean data point that falsely flattens the trend. The headline
+  // numbers (latest/previous/max/trend) derive from the runs that actually *compared*;
+  // the full `runs` series is still returned so the chart can mark the seeding points.
+  const compared = runs.filter((r) => !r.seeded);
+  const latest = compared.length ? compared[compared.length - 1].unexplained : null;
+  const previous = compared.length >= 2 ? compared[compared.length - 2].unexplained : null;
 
   let trend: TrendDirection;
   if (latest === null || previous === null) {
@@ -130,7 +139,7 @@ export function computeDriftTrend(
     latestUnexplained: latest,
     previousUnexplained: previous,
     trend,
-    maxUnexplained: runs.reduce((m, r) => Math.max(m, r.unexplained), 0),
+    maxUnexplained: compared.reduce((m, r) => Math.max(m, r.unexplained), 0),
     sensitiveEverNonZero: runs.some((r) => r.sensitive > 0),
   };
 }

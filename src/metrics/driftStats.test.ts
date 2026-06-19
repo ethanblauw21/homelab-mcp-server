@@ -102,4 +102,38 @@ describe("computeDriftTrend", () => {
     expect(t.runs[0].seeded).toBe(true);
     expect(t.runs[0].total).toBe(0);
   });
+
+  it("ADR-018 §1: prefers `mode` and flags a seeded run via it", () => {
+    const t = computeDriftTrend([snap("2026-06-10T00:00:00.000Z", [], { mode: "seeded" })]);
+    expect(t.runs[0].seeded).toBe(true);
+  });
+
+  it("ADR-018 §1: a trailing seeded run does NOT become a clean 0-unexplained trend point", () => {
+    // Two real comparisons (2 → 1 unexplained, a real 'down'), then a seed run that
+    // reports 0. Without the fix the seed's 0 would read as 'down to 0 → flat-ish'
+    // and mask the actual comparison series.
+    const t = computeDriftTrend([
+      snap("2026-06-10T00:00:00.000Z", [leaf({}), leaf({})]), // compared: 2 unexplained
+      snap("2026-06-11T00:00:00.000Z", [leaf({})]), // compared: 1 unexplained
+      snap("2026-06-12T00:00:00.000Z", [], { mode: "seeded", seededReason: "level-changed" }), // SEEDED: 0, no detection
+    ]);
+    // headline derives from the two compared runs, ignoring the seed
+    expect(t.latestUnexplained).toBe(1);
+    expect(t.previousUnexplained).toBe(2);
+    expect(t.trend).toBe("down");
+    expect(t.maxUnexplained).toBe(2);
+    // the full series still carries the seed marker for the chart
+    expect(t.totalRuns).toBe(3);
+    expect(t.runs[2].seeded).toBe(true);
+  });
+
+  it("ADR-018 §1: a series of only seeded runs is insufficient-data (no real comparison)", () => {
+    const t = computeDriftTrend([
+      snap("2026-06-10T00:00:00.000Z", [], { mode: "seeded" }),
+      snap("2026-06-11T00:00:00.000Z", [], { mode: "seeded" }),
+    ]);
+    expect(t.totalRuns).toBe(2);
+    expect(t.latestUnexplained).toBeNull();
+    expect(t.trend).toBe("insufficient-data");
+  });
 });
