@@ -2,12 +2,20 @@ import { z } from "zod";
 import type { SshTransport } from "../ssh/transport.js";
 import { validatePath } from "../guardrails/pathValidation.js";
 import { assertAgentAvailable, resolveNodeName, readVmFile } from "./qmFiles.js";
+import { applyReadRedaction } from "./readRedaction.js";
 import type { Config } from "../config.js";
 
 export const QmReadFileInputSchema = z.object({
   vmid: z.number().int().positive().describe("VM ID (qm guest)"),
   path: z.string().min(1).describe("Absolute path of the file inside the VM"),
   encoding: z.enum(["utf8", "base64"]).default("utf8").describe("Return encoding"),
+  redact: z
+    .boolean()
+    .optional()
+    .describe(
+      "ADR-019: opt into the log tools' secret redaction for this read (utf8 only). " +
+        "Default false = full fidelity. Best-effort, not a security control."
+    ),
   offset: z
     .number()
     .int()
@@ -35,7 +43,15 @@ export async function qmReadFileHandler(
   input: QmReadFileInput,
   transport: SshTransport,
   cfg: Config
-): Promise<{ content: string; encoding: string; bytes: number; offset: number; truncated: boolean }> {
+): Promise<{
+  content: string;
+  encoding: string;
+  bytes: number;
+  offset: number;
+  truncated: boolean;
+  redacted?: boolean;
+  redactionCount?: number;
+}> {
   const pathResult = validatePath(input.path, {
     allowlist: cfg.guardrails.pathAllowlist,
     denylist: cfg.guardrails.pathDenylist,
@@ -75,11 +91,19 @@ export async function qmReadFileHandler(
     buf = content.subarray(offset, offset + length);
   }
 
+  const red = applyReadRedaction(
+    buf.toString(input.encoding),
+    input.encoding,
+    input.redact,
+    input.redact ? cfg.census.redactionExtraKeys : []
+  );
   return {
-    content: buf.toString(input.encoding),
+    content: red.content,
     encoding: input.encoding,
     bytes: buf.length,
     offset,
     truncated,
+    ...(red.redacted !== undefined ? { redacted: red.redacted } : {}),
+    ...(red.redactionCount !== undefined ? { redactionCount: red.redactionCount } : {}),
   };
 }
