@@ -6,6 +6,7 @@ import type { BackupKind } from "./policy.js";
 import { planEviction, isOverCap } from "./eviction.js";
 import { applyReverseDiff } from "./policy.js";
 import type { Config } from "../config.js";
+import type { BackupStatEntry } from "../metrics/backupStats.js";
 
 /**
  * Identifies what a backup belongs to. Host files and guest files share the same
@@ -212,6 +213,53 @@ export class BackupStore {
     );
 
     return { backupPath: blobPath, kind: kind.type, revertible: true };
+  }
+
+  /**
+   * ADR-015 §3 — project the `.meta` sidecars into stat entries for the pure
+   * `summarizeBackupStore`. One entry per version (one meta), with `sizeBytes` =
+   * meta + blob bytes so the total matches what the eviction planner sums. Reuses
+   * the same `baseDir/<key>/*` directory walk as `buildExistingHashMap`; reads metas
+   * only (never blob content), so it is a cheap local-disk scan. Corrupt metas are
+   * skipped. Credential-free — `BackupStore` imports no SSH/API client, so the
+   * ADR-010 renderer may call this without tripping the source-scan test.
+   */
+  storeStats(): BackupStatEntry[] {
+    const baseDir = this.cfg.baseDir;
+    const out: BackupStatEntry[] = [];
+    if (!fs.existsSync(baseDir)) return out;
+
+    for (const key of fs.readdirSync(baseDir)) {
+      const keyDir = path.join(baseDir, key);
+      if (!fs.statSync(keyDir).isDirectory()) continue;
+      for (const file of fs.readdirSync(keyDir)) {
+        if (!file.endsWith(".meta")) continue;
+        const metaPath = path.join(keyDir, file);
+        try {
+          const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+          const kind: string = meta.kind ?? "gzip-full";
+          let sizeBytes = fs.statSync(metaPath).size;
+          // Prefer the meta's blobPath; fall back to the sibling .gz (legacy meta).
+          let blob: string | undefined = meta.blobPath;
+          if (!blob) {
+            const candidate = metaPath.replace(/\.meta$/, ".gz");
+            if (fs.existsSync(candidate)) blob = candidate;
+          }
+          if (blob && fs.existsSync(blob)) sizeBytes += fs.statSync(blob).size;
+          out.push({
+            fileKey: key,
+            kind,
+            sizeBytes,
+            reanchored: meta.reanchored === true,
+            requiresBaseHash: "requiresBaseHash" in meta ? meta.requiresBaseHash : undefined,
+            timestamp: file.replace(/\.meta$/, ""),
+          });
+        } catch {
+          /* skip corrupt meta */
+        }
+      }
+    }
+    return out;
   }
 
   /**

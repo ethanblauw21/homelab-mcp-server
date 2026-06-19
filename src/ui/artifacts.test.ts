@@ -4,6 +4,7 @@ import path from "path";
 import os from "os";
 import { ArtifactReader, snapshotAgeLabel } from "./artifacts.js";
 import { SnapshotStore } from "./snapshotStore.js";
+import { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
 
 /** ADR-010 §2 — the renderer half: pure age labels, credential-free, cached-only. */
@@ -102,5 +103,70 @@ describe("ArtifactReader — cached panels", () => {
     const panel = await reader.changeFeedPanel();
     expect(panel.available).toBe(false);
     expect(panel.ageLabel).toMatch(/no config-history repo/i);
+  });
+});
+
+describe("ArtifactReader — ADR-015 metrics panels", () => {
+  let dir: string;
+  let cfg: Config;
+  const now = new Date("2026-06-14T12:00:00.000Z");
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "ui-metrics-"));
+    cfg = {
+      census: { censusDir: path.join(dir, "census"), snapshotRetentionCap: 5 },
+      ui: {
+        healthDir: path.join(dir, "health"),
+        healthRetentionCap: 5,
+        driftDir: path.join(dir, "drift"),
+        driftRetentionCap: 5,
+      },
+      audit: { logPath: path.join(dir, "audit.jsonl") },
+      history: { configHistoryDir: path.join(dir, "history") },
+      tools: { queryAuditDefaultLimit: 50, queryAuditMaxLimit: 200 },
+      backup: { baseDir: path.join(dir, "backups"), perFileVersionCap: 10, globalSizeCapBytes: 1000 },
+      integrity: { sensitiveGlobs: ["/etc/pve"] },
+      metrics: { defaultWindowDays: 30, defaultBucket: "day" },
+    } as unknown as Config;
+  });
+
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  it("auditStatsPanel reads the local audit log live and honors the window", () => {
+    const log = new AuditLog(cfg.audit.logPath);
+    // Inside the 30-day window (relative to `now`).
+    log.append({ id: "a", ts: "2026-06-13T00:00:00.000Z", tool: "write_file", historyCommitted: false });
+    // Outside the window — must be excluded.
+    log.append({ id: "b", ts: "2026-01-01T00:00:00.000Z", tool: "execute" });
+
+    const reader = new ArtifactReader(cfg, () => now);
+    const panel = reader.auditStatsPanel();
+    expect(panel.available).toBe(true);
+    expect(panel.data?.total).toBe(1);
+    expect(panel.data?.historyMissCount).toBe(1);
+    expect(panel.note).toMatch(/30 day/);
+  });
+
+  it("driftStatsPanel reads the retained drift snapshots and labels the newest run", () => {
+    const driftStore = new SnapshotStore<unknown>(cfg.ui.driftDir, 5, () => new Date("2026-06-14T11:00:00.000Z"));
+    driftStore.save({
+      level: "smart",
+      scope: "",
+      drift: [{ path: "host/etc/pve/x", nodePath: "/etc/pve/x", status: "unexplained", l1: true, l2: true, l3: true }],
+    });
+    const reader = new ArtifactReader(cfg, () => now);
+    const panel = reader.driftStatsPanel();
+    expect(panel.available).toBe(true);
+    expect(panel.data?.totalRuns).toBe(1);
+    expect(panel.data?.sensitiveEverNonZero).toBe(true);
+    expect(panel.ageLabel).toMatch(/1 hour ago/);
+  });
+
+  it("backupStatsPanel reports an empty store as available:false", () => {
+    const reader = new ArtifactReader(cfg, () => now);
+    const panel = reader.backupStatsPanel();
+    expect(panel.available).toBe(false);
+    expect(panel.data?.totalVersions).toBe(0);
+    expect(panel.ageLabel).toMatch(/live/i);
   });
 });

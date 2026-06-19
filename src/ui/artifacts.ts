@@ -6,6 +6,10 @@ import { SnapshotStore } from "./snapshotStore.js";
 import { AuditLog } from "../audit/log.js";
 import { queryAuditHandler, type QueryAuditInput } from "../tools/queryAudit.js";
 import { GitEngine } from "../history/gitEngine.js";
+import { BackupStore } from "../backup/store.js";
+import { computeAuditStats, type AuditStats, type AuditBucket } from "../metrics/auditStats.js";
+import { computeDriftTrend, type DriftTrend, type DriftSnapshotLike } from "../metrics/driftStats.js";
+import { summarizeBackupStore, type BackupStoreStats } from "../metrics/backupStats.js";
 
 /**
  * ADR-010 §2 — the RENDERER half: reads ONLY client-side artifacts and holds NO
@@ -133,6 +137,68 @@ export class ArtifactReader {
       });
     const newest = entries[0]?.date ?? null;
     return { available: true, snapshotTs: newest, ageLabel: snapshotAgeLabel(newest, this.now()), data: entries };
+  }
+
+  /**
+   * ADR-015 §1 — audit-derived statistics over a look-back window (default
+   * `metrics.defaultWindowDays`). A LIVE read of the local audit log (always
+   * current), so the age label tracks the newest audit event, not a cache.
+   */
+  auditStatsPanel(opts: { windowDays?: number; bucket?: AuditBucket } = {}): Panel<AuditStats> {
+    const all = this.audit.readAll();
+    const days = opts.windowDays ?? this.cfg.metrics.defaultWindowDays;
+    const bucket = opts.bucket ?? this.cfg.metrics.defaultBucket;
+    const since = new Date(this.now().getTime() - days * 86_400_000).toISOString();
+    const stats = computeAuditStats(all, { window: { since }, bucket });
+    const newest = all.reduce<string | null>((m, r) => (m === null || r.ts > m ? r.ts : m), null);
+    return {
+      available: all.length > 0,
+      snapshotTs: newest,
+      ageLabel: snapshotAgeLabel(newest, this.now()),
+      data: stats,
+      note: `Computed live from the local audit log over the last ${days} day(s).`,
+    };
+  }
+
+  /**
+   * ADR-015 §2 — drift-rate trend over the retained `verify_integrity` snapshots.
+   * Genuinely a cache read (the series is only as deep as `driftRetentionCap` and
+   * as frequent as verify runs), so it carries the newest run's age label.
+   */
+  driftStatsPanel(): Panel<DriftTrend> {
+    const snaps = this.drift.loadAll() as DriftSnapshotLike[];
+    const trend = computeDriftTrend(snaps, this.cfg.integrity.sensitiveGlobs);
+    const newest = trend.runs.length ? trend.runs[trend.runs.length - 1].savedAt : null;
+    return {
+      available: trend.totalRuns > 0,
+      snapshotTs: newest,
+      ageLabel: snapshotAgeLabel(newest, this.now()),
+      data: trend,
+      note:
+        "Per-verify-run series (not per-unit-time): bounded by driftRetentionCap and " +
+        "how often verify_integrity runs from an MCP session.",
+    };
+  }
+
+  /**
+   * ADR-015 §3 — backup-store health from the local `.meta` sidecars. A live read
+   * of the durability layer; does NOT compute live revertibility (that needs a node
+   * read — list_backups/diff_config remain that path).
+   */
+  backupStatsPanel(): Panel<BackupStoreStats> {
+    const store = new BackupStore(this.cfg.backup);
+    const entries = store.storeStats();
+    const stats = summarizeBackupStore(entries, {
+      perFileVersionCap: this.cfg.backup.perFileVersionCap,
+      globalSizeCapBytes: this.cfg.backup.globalSizeCapBytes,
+    });
+    return {
+      available: entries.length > 0,
+      snapshotTs: null,
+      ageLabel: "Live — computed from the local backup store",
+      data: stats,
+      note: "Kind mix + re-anchor count from local metas only; not a live-revertibility check.",
+    };
   }
 
   private wrap<T>(ts: string | null, data: T | null): Panel<T> {

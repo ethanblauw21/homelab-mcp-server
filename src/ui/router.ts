@@ -90,6 +90,21 @@ export async function routeUiRequest(
       const limit = parsePositiveInt(query.get("limit"));
       return json(200, await deps.reader.changeFeedPanel(limit ?? undefined));
     }
+    // ADR-015 — derived-metrics panels. All renderer reads; never touch the executor.
+    if (pathname === "/api/stats/audit") {
+      const windowDays = parsePositiveInt(query.get("windowDays"));
+      const bucket = query.get("bucket") === "hour" ? "hour" : query.get("bucket") === "day" ? "day" : undefined;
+      return json(200, deps.reader.auditStatsPanel({
+        ...(windowDays !== null ? { windowDays } : {}),
+        ...(bucket ? { bucket } : {}),
+      }));
+    }
+    if (pathname === "/api/stats/drift") {
+      return json(200, deps.reader.driftStatsPanel());
+    }
+    if (pathname === "/api/stats/backups") {
+      return json(200, deps.reader.backupStatsPanel());
+    }
     return json(404, { error: `no such route: GET ${pathname}` });
   }
 

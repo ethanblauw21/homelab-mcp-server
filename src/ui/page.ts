@@ -62,6 +62,7 @@ export const INDEX_HTML = String.raw`<!DOCTYPE html>
   <button data-tab="health">Health</button>
   <button data-tab="audit">Audit</button>
   <button data-tab="changes">Changes</button>
+  <button data-tab="metrics">Metrics</button>
 </nav>
 <main id="view"><div class="empty">Loading…</div></main>
 
@@ -140,7 +141,81 @@ const tabs = {
     for(const c of (p.data||[])) h += '<tr><td class="mono">'+esc(c.date)+'</td><td>'+esc(c.author)+'</td><td>'+esc(c.subject)+' <span class="age mono">'+esc((c.hash||'').slice(0,8))+'</span></td></tr>';
     return h + '</tbody></table>';
   },
+  async metrics(){
+    // ADR-015 — three derived-metric panels: audit stats, drift trend, backup health.
+    const [ap, dp, bp] = await Promise.all([
+      getJSON('/api/stats/audit'), getJSON('/api/stats/drift'), getJSON('/api/stats/backups')
+    ]);
+    let h = '';
+
+    // Drift trend — the flagship (tamper-pressure over time).
+    h += '<div class="card"><div class="row"><strong>Unexplained drift trend</strong>';
+    if(dp.available){
+      const d = dp.data||{};
+      const arrow = d.trend==='up'?'▲':d.trend==='down'?'▼':d.trend==='flat'?'▬':'—';
+      const cls = d.trend==='up'?'status-crit':d.trend==='down'?'status-ok':'';
+      h += '<span class="'+cls+'">'+esc(arrow)+' latest '+esc(d.latestUnexplained)+(d.previousUnexplained!=null?(' (prev '+esc(d.previousUnexplained)+')'):'')+'</span>';
+    } else h += '<span class="age">no runs cached</span>';
+    h += '</div>';
+    if(dp.available){
+      h += ageLine(dp);
+      const d = dp.data||{};
+      if(d.sensitiveEverNonZero) h += '<div class="card status-crit">Sensitive-path drift observed in a retained run — investigate.</div>';
+      h += '<table><thead><tr><th>When</th><th>Lvl</th><th>Total</th><th>Explained</th><th>Unexplained</th><th>L1-only</th><th>Sensitive</th></tr></thead><tbody>';
+      for(const r of (d.runs||[]).slice().reverse()){
+        h += '<tr><td class="mono">'+esc(r.savedAt)+'</td><td>'+esc(r.level)+(r.seeded?' <span class="age">(seeded)</span>':'')+'</td><td>'+esc(r.total)+'</td>'
+          + '<td class="status-ok">'+esc(r.explained)+'</td><td class="'+(r.unexplained>0?'status-crit':'')+'">'+esc(r.unexplained)+'</td>'
+          + '<td>'+esc(r.l1OnlyTouches)+'</td><td class="'+(r.sensitive>0?'status-crit':'')+'">'+esc(r.sensitive)+'</td></tr>';
+      }
+      h += '</tbody></table>';
+    }
+    h += '<div class="age">'+esc(dp.note||'')+'</div></div>';
+
+    // Backup-store health.
+    h += '<div class="card"><strong>Backup store</strong>';
+    if(bp.available){
+      const b = bp.data||{};
+      const pct = Math.round((b.usedFraction||0)*100);
+      h += '<div class="row"><span>Capacity</span><span class="'+(b.overCap?'status-crit':pct>=80?'status-warn':'status-ok')+'">'
+        + esc(fmtBytes(b.totalBytes))+' / '+esc(fmtBytes(b.globalSizeCapBytes))+' ('+esc(pct)+'%)</span></div>';
+      h += '<div class="row"><span>Versions / targets</span><span>'+esc(b.totalVersions)+' over '+esc(b.targetCount)+' target(s)</span></div>';
+      h += '<div class="row"><span>At cap / near cap</span><span class="'+(b.targetsAtCap>0?'status-warn':'')+'">'+esc(b.targetsAtCap)+' / '+esc(b.targetsNearCap)+' (cap '+esc(b.perFileVersionCap)+')</span></div>';
+      const km = b.kindMix||{};
+      h += '<div class="row"><span>Kind mix</span><span>'+esc(km.delta)+' delta · '+esc(km.selfContained)+' self-contained · '+esc(km.metadataOnly)+' meta-only</span></div>';
+      h += '<div class="row"><span>Re-anchors (out-of-band churn)</span><span class="'+(b.reanchorCount>0?'status-warn':'status-ok')+'">'+esc(b.reanchorCount)+' ('+Math.round((b.reanchorFraction||0)*100)+'%)</span></div>';
+    } else h += '<div class="age">no backups stored yet</div>';
+    h += '<div class="age">'+esc(bp.note||'')+'</div></div>';
+
+    // Audit-derived stats.
+    h += '<div class="card"><strong>Audit activity</strong>';
+    if(ap.available){
+      const a = ap.data||{}; const fam = a.family||{};
+      h += ageLine(ap);
+      h += '<div class="row"><span>Total ops (window)</span><span>'+esc(a.total)+'</span></div>';
+      h += '<div class="row"><span>By family</span><span>'+esc(fam.write)+' write · '+esc(fam.exec)+' exec · '+esc(fam.read)+' read · '+esc(fam.other)+' other</span></div>';
+      h += '<div class="row"><span>Large / heavy</span><span>'+esc(a.largeChangeCount)+' large · '+esc(a.heavyCount)+' heavy</span></div>';
+      h += '<div class="row"><span>Gated / root-tier</span><span>'+esc(a.confirmGatedCount)+' confirm · '+esc(a.rootTierCount)+' root</span></div>';
+      h += '<div class="row"><span>History misses</span><span class="'+(a.historyMissCount>0?'status-warn':'status-ok')+'">'+esc(a.historyMissCount)+' / '+esc(a.historyEligibleCount)+' ('+Math.round((a.historyMissRate||0)*100)+'%)</span></div>';
+      h += '<div class="row"><span>Timeouts / signal-kills</span><span class="'+((a.timedOutCount+a.signalKillCount)>0?'status-warn':'status-ok')+'">'+esc(a.timedOutCount)+' timed out · '+esc(a.signalKillCount)+' killed</span></div>';
+      h += '<div class="row"><span>Unknown-scope exec (drift blind spot)</span><span class="'+(a.unknownScopeCount>0?'status-warn':'')+'">'+esc(a.unknownScopeCount)+' / '+esc(a.execTotal)+'</span></div>';
+      const tp = (a.throughput||[]);
+      if(tp.length){
+        h += '<div class="age">Throughput ('+esc(a.bucket)+')</div><table><thead><tr><th>Bucket</th><th>Total</th><th>Write</th><th>Exec</th><th>Read</th></tr></thead><tbody>';
+        for(const t of tp.slice(-30)) h += '<tr><td class="mono">'+esc(t.bucket)+'</td><td>'+esc(t.total)+'</td><td>'+esc(t.write)+'</td><td>'+esc(t.exec)+'</td><td>'+esc(t.read)+'</td></tr>';
+        h += '</tbody></table>';
+      }
+    } else h += '<div class="age">no audit records yet</div>';
+    h += '<div class="age">'+esc(ap.note||'')+'</div></div>';
+
+    return h;
+  },
 };
+
+function fmtBytes(n){
+  n = Number(n)||0; const u=['B','KB','MB','GB']; let i=0;
+  while(n>=1024 && i<u.length-1){ n/=1024; i++; }
+  return (i===0?n:n.toFixed(1))+' '+u[i];
+}
 
 function canAct(tool){ return STATUS.actionsEnabled && STATUS.availableActions.includes(tool); }
 function verifyBtn(){

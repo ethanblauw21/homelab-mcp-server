@@ -13,6 +13,9 @@ function fakeReader(): ArtifactReader {
     driftPanel: () => ({ available: true, snapshotTs: null, ageLabel: "x", data: { drift: [] } }),
     auditPanel: (f: { limit?: number }) => ({ summary: { total: 0 }, records: [], echoLimit: f.limit }),
     changeFeedPanel: async (limit?: number) => ({ available: true, snapshotTs: null, ageLabel: "x", data: [], echoLimit: limit }),
+    auditStatsPanel: (o: { windowDays?: number; bucket?: string }) => ({ available: true, snapshotTs: null, ageLabel: "x", data: { echo: o } }),
+    driftStatsPanel: () => ({ available: true, snapshotTs: null, ageLabel: "x", data: { trend: "flat" } }),
+    backupStatsPanel: () => ({ available: false, snapshotTs: null, ageLabel: "live", data: { totalVersions: 0 } }),
   } as unknown as ArtifactReader;
 }
 
@@ -63,6 +66,18 @@ describe("routeUiRequest — GET renderer routes", () => {
   it("tolerates a trailing slash on an api route", async () => {
     const r = await routeUiRequest("GET", "/api/drift/", q(), "", deps());
     expect(r.status).toBe(200);
+  });
+
+  it("routes the three ADR-015 stats panels", async () => {
+    expect(JSON.parse((await routeUiRequest("GET", "/api/stats/drift", q(), "", deps())).body).data.trend).toBe("flat");
+    expect(JSON.parse((await routeUiRequest("GET", "/api/stats/backups", q(), "", deps())).body).available).toBe(false);
+    const audit = await routeUiRequest("GET", "/api/stats/audit", q("windowDays=7&bucket=hour"), "", deps());
+    expect(JSON.parse(audit.body).data.echo).toEqual({ windowDays: 7, bucket: "hour" });
+  });
+
+  it("ignores a bad windowDays / bucket on the audit stats route", async () => {
+    const r = await routeUiRequest("GET", "/api/stats/audit", q("windowDays=-1&bucket=year"), "", deps());
+    expect(JSON.parse(r.body).data.echo).toEqual({});
   });
 
   it("404s an unknown GET route", async () => {
