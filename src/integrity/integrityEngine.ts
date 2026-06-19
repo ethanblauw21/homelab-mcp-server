@@ -58,13 +58,62 @@ export interface VerifyDriftLeaf {
   l3: boolean;
 }
 
+/** ADR-018 §1: did this run actually compare, or did it just establish truth? */
+export type VerifyMode = "seeded" | "compared";
+
+/**
+ * ADR-018 §1: WHY a run seeded rather than compared.
+ *  - `no-baseline`   — first run ever for these levels; nothing existed to diff against.
+ *  - `level-changed` — a baseline existed for some levels but not the one(s) being verified
+ *                      (e.g. `INTEGRITY_LEVEL` changed, adding a new level tree). The
+ *                      dangerous, silent re-seed: detection was NOT running for that level.
+ *  - `scope-new`     — reserved for per-scope seeding. The current whole-tree seed trigger
+ *                      (`baselineEmpty` over `/`) never emits this; it is part of the
+ *                      documented contract for when scoped seeding lands.
+ */
+export type SeededReason = "no-baseline" | "level-changed" | "scope-new";
+
 export interface VerifyReport {
   level: Level | "smart";
   scope: string;
   rootHash: string | null;
   drift: VerifyDriftLeaf[];
   policy: PolicyOutcome[];
+  /** Back-compat flag (ADR-009). `mode === "seeded"` is the field new consumers read. */
   baselineSeeded: boolean;
+  /** ADR-018 §1: `"seeded"` (this run established truth — NO detection occurred) vs `"compared"`. */
+  mode: VerifyMode;
+  /** ADR-018 §1: present only when `mode === "seeded"` — why the run seeded. */
+  seededReason?: SeededReason;
+  /** ADR-018 §1: human-readable explanation, present only when `mode === "seeded"`. */
+  note?: string;
+}
+
+/** Pretty scope for operator-facing notes: the super-root renders as "whole forest". */
+function scopeLabel(scope: string): string {
+  return scope === SUPER_ROOT ? "whole forest" : scope;
+}
+
+/**
+ * ADR-018 §1 (pure): classify why a verify run seeded. `emptyCount` of `totalCount`
+ * seed levels had an empty baseline. All empty ⇒ first-run-ever (`no-baseline`); a
+ * partial subset empty ⇒ a level/config change re-seeded (`level-changed`, the silent
+ * case worth calling out). `scope-new` is reserved (see `SeededReason`).
+ */
+export function seededReasonFor(emptyCount: number, totalCount: number): SeededReason {
+  return emptyCount >= totalCount ? "no-baseline" : "level-changed";
+}
+
+/** ADR-018 §1 (pure): the operator-facing `note` for a seeded run. */
+export function seededNote(reason: SeededReason, scope: string): string {
+  const where = scopeLabel(scope);
+  if (reason === "level-changed") {
+    return `Baseline re-seeded for ${where} (tracking level/config changed); drift detection did NOT run for the new level and begins on the next run.`;
+  }
+  if (reason === "scope-new") {
+    return `Baseline established for new scope ${where}; drift detection begins on the next run.`;
+  }
+  return `Baseline established for ${where}; drift detection begins on the next run.`;
 }
 
 /** Map a forest path back to its node-absolute path (for sensitive matching). */
@@ -136,10 +185,22 @@ export class IntegrityEngine {
     // First-run seeding: with no baseline there is nothing to diff against. Seed the
     // baseline(s) and report no drift (everything is, by definition, the truth now).
     const seedLevels: Level[] = level === "smart" ? [...LEVELS] : [level];
-    if (seedLevels.some((l) => this.baselineEmpty(l))) {
+    const emptyLevels = seedLevels.filter((l) => this.baselineEmpty(l));
+    if (emptyLevels.length > 0) {
       for (const l of seedLevels) await this.computeTree(l, "baseline");
       const rootHash = this.store.get("baseline", seedLevels[seedLevels.length - 1], SUPER_ROOT)?.hash ?? null;
-      return { level, scope, rootHash, drift: [], policy: [], baselineSeeded: true };
+      const seededReason = seededReasonFor(emptyLevels.length, seedLevels.length);
+      return {
+        level,
+        scope,
+        rootHash,
+        drift: [],
+        policy: [],
+        baselineSeeded: true,
+        mode: "seeded",
+        seededReason,
+        note: seededNote(seededReason, scope),
+      };
     }
 
     const perLevel = new Map<Level, Map<string, DriftEntry>>();
@@ -217,7 +278,7 @@ export class IntegrityEngine {
     }));
     const policy = applyAcceptPolicy(leafDrifts, this.policyConfig());
     const rootHash = this.store.get("working", "l3", SUPER_ROOT)?.hash ?? null;
-    return { level, scope, rootHash, drift, policy, baselineSeeded: false };
+    return { level, scope, rootHash, drift, policy, baselineSeeded: false, mode: "compared" };
   }
 
   /**

@@ -88,7 +88,15 @@ const tabs = {
     const leaves = (rep.drift||[]);
     const flagged = leaves.filter(l => l.status==='unexplained');
     let h = ageLine(p) + verifyBtn();
-    if(rep.baselineSeeded){ h += '<div class="card">Baseline freshly seeded — no drift yet.</div>'; return h; }
+    // ADR-018 §1: a seeded run did NOT detect — never let it read as "all clear".
+    // mode is authoritative; pre-018 snapshots fall back to baselineSeeded.
+    const seeded = rep.mode==='seeded' || (rep.mode===undefined && rep.baselineSeeded);
+    if(seeded){
+      const reseed = rep.seededReason==='level-changed';
+      const msg = esc(rep.note || 'Baseline established — drift detection begins on the next run.');
+      h += '<div class="card '+(reseed?'status-warn':'')+'"><strong>'+(reseed?'Baseline RE-SEEDED — detection was NOT running':'Baseline seeded — no detection yet')+'</strong><br>'+msg+'</div>';
+      return h;
+    }
     h += '<div class="toolbar">';
     if(canAct('accept_truth') && flagged.length) h += '<button class="act" onclick="acceptScope(\'\')">Accept ALL flagged ('+flagged.length+')</button>';
     h += '</div>';
