@@ -148,7 +148,7 @@ export interface CensusSnapshot {
   schemaVersion: number;
   ts: string;
   host: string;
-  depth: "summary" | "full";
+  depth: "summary" | "status" | "full";
   sections: CensusSections;
   errors: CensusError[];
   redactions: number;

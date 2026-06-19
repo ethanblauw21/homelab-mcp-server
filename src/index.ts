@@ -15,6 +15,7 @@ import { PctListInputSchema, pctListHandler } from "./tools/pctList.js";
 import { RevertFileInputSchema, revertFileHandler } from "./tools/revertFile.js";
 import { ListBackupsInputSchema, listBackupsHandler } from "./tools/listBackups.js";
 import { DescribeHomelabInputSchema, describeHomelabHandler } from "./tools/describeHomelab.js";
+import { DescribeGuestInputSchema, describeGuestHandler } from "./tools/describeGuest.js";
 import { CensusStore } from "./tools/censusStore.js";
 import { PctReadFileInputSchema, pctReadFileHandler } from "./tools/pctReadFile.js";
 import { PctWriteFileInputSchema, pctWriteFileHandler } from "./tools/pctWriteFile.js";
@@ -322,6 +323,24 @@ register(
         nodeOps,
         activeTier
       );
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "describe_guest",
+  {
+    description:
+      "Read-only single-guest census (ADR-017 §4): identity + run-state + snapshotCapable, " +
+      "and (LXC) the redacted config, Docker roster, and failed systemd units — scoped to one " +
+      "VMID so you pay for that guest, not the whole node. Reuses the census parsers/redaction; " +
+      "no new node access. Optional `sections` narrows further (config, docker, units).",
+    inputSchema: DescribeGuestInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await describeGuestHandler(input, sshTransport, config);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }

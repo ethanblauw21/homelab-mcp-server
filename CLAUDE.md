@@ -44,6 +44,7 @@ A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zo
 | `verify_integrity` | Read-only drift report: diff forest vs baseline, classify each leaf explained/unexplained; `smart` escalation; optional audited auto-accept | 009 |
 | `accept_truth` | Explicit human override: fold current state into all three Merkle baselines (audited) | 009 |
 | `edit_file` / `pct_edit_file` / `qm_edit_file` / `docker_edit_file` | Find-and-replace front door to the matching `*_write_file` — send `oldString`→`newString`, not the whole file (token-cheaper); reuses the exact write pipeline (`dryRun` preview) | 011 |
+| `describe_guest` | Single-guest census narrowed to one VMID — identity + run-state + `snapshotCapable`, plus (LXC) redacted config / Docker roster / failed units; reuses the census parsers, no new node access (read-only, not audited) | 017 |
 
 > The four `*_edit_file` tools are **not a new mutation surface** — each reads the target once, applies a literal substring replacement (`applyStringEdit`), and funnels the result through the *same* `writeResolved<Surface>` core as its `*_write_file` sibling, so a button-identical backup/audit/diff/history record results. They inherit the write surface's tier (`edit_file` ⇒ root, the guest three ⇒ companion), path validation, caps, and limits (`qm_edit_file` re-checks `qmWriteMaxBytes` on the resolved bytes). Refusals are honest: a missing file, binary content, a not-found `oldString`, an ambiguous match (without `replaceAll`), or a no-op all throw with **no write**. Multi-edit batching + regex are deliberately out of scope for v1 (ADR-011 §5).
 
@@ -52,6 +53,8 @@ A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zo
 > **Tiers gate registration (ADR-007).** Tools above the configured tier are **not registered at all** (`index.ts` filters via `isToolEnabled(name, activeTier)`), so the model never sees them — there is nothing to refuse at runtime. The tool table above is the *root-tier* superset.
 
 > **The localhost UI sidecar (ADR-010) is NOT in this table — it is not an MCP tool.** It is a separate standing process (`npm run ui`) that renders the artifacts the tools above already emit and can run only a tiny **human-principal** subset (`accept_truth`/`verify_integrity`/`compute_tree`/`config_sweep`) when explicitly enabled. The open-ended agent-principal tools above stay reachable **only through an MCP session**. See "Localhost UI sidecar (ADR-010)" below.
+
+> **Output budgeting (ADR-017) — the output side of ADR-011 §1's token-economy doctrine.** Three existing read tools gain opt-in/scoping levers + one new scoped tool, all pure reshaping over data already computed. **`query_audit`** takes `cmdMaxChars` (opt-in: truncate each record's `cmd` to a head window + `…(+N chars)` marker) / `cmdFull` (force verbatim) — the on-disk log is untouched, and truncation is **off by default** (it can hide a forensically-relevant flag). **`health_check`** drops pseudo/virtual mounts (`/dev`, `/run/*`, `/sys/*`, `/proc/*` — `isPseudoMount`) from the storage findings **by default**; `includePseudoFs: true` restores them, and the **rollup status is computed pre-filter** so a hidden mount never changes the verdict. **`describe_homelab`** adds `depth: "status"` between `summary` and `full` — identity + run-state + `snapshotCapable`, **without** the bulky `containers[].config` blob or the `services[].docker` roster. **`describe_guest`** is the new single-VMID census (companion). The per-surface default split is deliberate: §1 stays opt-in (truncation loses data), §2 defaults-on (pseudo mounts are 0.0%-used noise, verdict preserved) — both are provably non-breaking for existing callers/tests.
 
 ## Permission tiers & hybrid transport (ADR-007)
 
@@ -181,10 +184,11 @@ src/
     qmFiles.ts          # Pure agent file-read/write builders+parsers + I/O (node resolve, read/write VM file)
     qmReadFile.ts       # qm_read_file handler (agent precheck, read cap + window)
     qmWriteFile.ts      # qm_write_file handler (backup pipeline, dryRun, qmWriteMaxBytes cap, no perm preserve)
-    healthEvaluators.ts # Pure: threshold evaluators + parsers (load/mem/fs/units/onboot/updates)
-    healthCheck.ts      # health_check handler — fixed probes, section-isolated rollup
+    healthEvaluators.ts # Pure: threshold evaluators + parsers + isPseudoMount/filterDisplayFindings (ADR-017 §2)
+    healthCheck.ts      # health_check handler — fixed probes, section-isolated rollup, pseudo-fs display filter
     tailLog.ts          # tail_log handler + pure buildTailCommand (validate → redact)
-    queryAudit.ts       # Pure filterAuditRecords/summarizeAuditRecords + query_audit handler
+    queryAudit.ts       # Pure filterAuditRecords/summarizeAuditRecords/projectAuditCmd (ADR-017 §1) + query_audit handler
+    describeGuest.ts    # describe_guest handler + pure resolveGuestKind (ADR-017 §4; reuses census parsers/redaction)
     diffConfig.ts       # diff_config handler — current→backup revert preview (read-only)
     configSweep.ts      # config_sweep handler + pure find/sha256 builders (ADR-006 path B)
     integrity.ts        # compute_tree/verify_integrity/accept_truth handlers + zod schemas + SQLite store factory (ADR-009)

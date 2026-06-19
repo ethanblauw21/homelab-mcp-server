@@ -40,7 +40,7 @@ We adopt one principle and one taxonomy.
 | L-2 | Diff-only write returns — a write returns a truncated diff, never the full new content | output | **Banked** (ADR-008 §3) |
 | L-3 | Read windowing — `offset`/`maxBytes` on reads instead of whole-file | input | **Banked** (ADR-004 / ADR-003) |
 | L-4 | Mandatory output bounding — `tail_log`, `query_audit`, dryRun-diff line caps | output | **Banked** (ADR-004/005) |
-| L-5 | Summary-first list/census returns — depth/verbosity is opt-in, terse by default | output | Roadmap |
+| L-5 | Summary-first list/census returns — depth/verbosity is opt-in, terse by default | output | **Banked** (ADR-017 — `describe_homelab depth:"status"`, `query_audit cmdMaxChars`, `health_check` pseudo-fs filter, `describe_guest`) |
 | L-6 | Result pagination / continuation tokens for unbounded enumerations | output | Roadmap |
 | L-7 | Structured-not-prose tool results where the model parses anyway | output | Roadmap |
 

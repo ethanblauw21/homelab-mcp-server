@@ -9,6 +9,8 @@ import {
   evaluateOnbootStopped,
   evaluatePendingUpdates,
   rollupStatus,
+  isPseudoMount,
+  filterDisplayFindings,
   parseOnbootConfig,
   parseAptUpgradeCount,
 } from "./healthEvaluators.js";
@@ -80,6 +82,39 @@ describe("rollupStatus", () => {
     expect(rollupStatus([{ status: "ok" }, { status: "warn" }])).toBe("warn");
     expect(rollupStatus([{ status: "warn" }, { status: "crit" }])).toBe("crit");
     expect(rollupStatus([{ status: "ok" }, { status: "ok" }])).toBe("ok");
+  });
+});
+
+describe("isPseudoMount (ADR-017 §2)", () => {
+  it("flags the /dev /run /sys /proc trees and their bare points", () => {
+    for (const p of ["/dev", "/run", "/sys", "/proc", "/dev/shm", "/run/lock", "/sys/fs/cgroup", "/run/user/0"]) {
+      expect(isPseudoMount(p)).toBe(true);
+    }
+  });
+  it("does NOT flag real disk mounts", () => {
+    for (const p of ["/", "/var/lib/vz", "/mnt/data", "/boot/efi", "/rpool/ROOT"]) {
+      expect(isPseudoMount(p)).toBe(false);
+    }
+  });
+});
+
+describe("filterDisplayFindings (ADR-017 §2)", () => {
+  const FINDINGS = [
+    { section: "node", check: "memory", status: "ok" as const },
+    { section: "storage", check: "fs:/", status: "ok" as const },
+    { section: "storage", check: "fs:/dev/shm", status: "ok" as const },
+    { section: "storage", check: "fs:/run/lock", status: "ok" as const },
+    { section: "storage", check: "store:local", status: "ok" as const },
+  ];
+
+  it("drops pseudo fs: findings by default, keeps real mounts/stores/non-storage", () => {
+    const out = filterDisplayFindings(FINDINGS, false);
+    expect(out.map((f) => f.check)).toEqual(["memory", "fs:/", "store:local"]);
+  });
+
+  it("includePseudoFs restores the full list unchanged (same reference)", () => {
+    const out = filterDisplayFindings(FINDINGS, true);
+    expect(out).toBe(FINDINGS);
   });
 });
 

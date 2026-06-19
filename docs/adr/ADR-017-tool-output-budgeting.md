@@ -1,6 +1,6 @@
 # ADR-017: Tool Output Budgeting — Projection, Depth & Scope Flags for the Read Surface
 
-**Status:** Proposed
+**Status:** Accepted (implemented 2026-06-19)
 **Date:** 2026-06-19
 **Deciders:** Ethan
 **Depends on:** ADR-002 (`describe_homelab` shape, `VOLATILE_FIELDS`, census parsers), ADR-005 (`query_audit`/`summarizeAuditRecords`, `health_check` fixed-probe evaluators), ADR-011 (token economy as an explicit design axis — the lever taxonomy and roadmap)
@@ -65,3 +65,14 @@ A new **read-only, companion-tier** tool that runs the census probes scoped to *
 - **`describe_homelab` (`tools/describeHomelab.ts`):** add `"status"` to the depth enum; gate the `config`/`docker` sub-object assembly on `depth === "full"`.
 - **`describe_guest` (`tools/describeGuest.ts`):** new handler reusing census parsers + redaction, scoped to one vmid; one `TOOL_MIN_TIER` row at `companion`.
 - **Token-economy doctrine:** record in ADR-011 §1's roadmap that the output-side levers are realized here (the reverse marker), and add `describe_guest` to the CLAUDE.md tool table **once implemented**.
+
+## Implementation status (2026-06-19)
+
+Implemented on branch `adr-017-output-budgeting`; +19 unit tests, full suite green (1140), typecheck + lint clean.
+
+- **Default-behaviour reconciliation (the one judgement call).** The Decision/Scope sections promise "every flag defaults to today's output; the savings are opt-in," but §1 and §2's detail prose read as default-ON (`cmdMaxChars` "default ~120"; the storage filter "default" drops pseudo mounts). That is an internal tension. It was resolved **per-surface by risk profile**, both choices provably non-breaking for existing callers/tests:
+  - **§1 `query_audit` — opt-in (default = full `cmd`).** Truncation can hide a forensically-relevant flag past the window (the ADR's own "Honest limit"), so defaulting it on is unsafe. `cmdMaxChars` engages truncation; `cmdFull` forces verbatim even when `cmdMaxChars` is set. The "~120" is the *suggested window when you opt in*, not an auto-applied default. Pure `projectAuditCmd` applied to the returned page only — the summary is untouched.
+  - **§2 `health_check` — default-ON filter (verdict-safe).** Pseudo mounts are 0.0%-used noise and the **rollup status is computed pre-filter** (`filterDisplayFindings` shapes only the returned list), so hiding them never changes ok/warn/crit. Confirmed zero existing-test churn — no current health test feeds a pseudo mount through a successful `df`. `includePseudoFs: true` restores the full list. Pure `isPseudoMount` + `filterDisplayFindings` in `healthEvaluators.ts`.
+- **§3 `describe_homelab depth:"status"`.** `summary`/`full` are byte-for-byte unchanged (verified: the previously-ungated `services[].docker` is dropped **only** at `status`, never at `summary`). `status` runs the config probe to compute `snapshotCapable` but withholds the `config` blob and the docker roster. `CensusSnapshot.depth` widened to `"summary" | "status" | "full"`.
+- **§4 `describe_guest`.** New companion handler (`tools/describeGuest.ts`) + pure `resolveGuestKind`; reuses `parsePctList`/`parseQmList`/`parseGuestConfig`/`evaluateSnapshotCapable`/`parsePvesmStatus`/`parseDockerPs`/`parseFailedUnits`/`redactRecord`. `docker`/`units` are LXC-only and require a running guest; QEMU yields config only. One `TOOL_MIN_TIER` row at `companion`; registered in `index.ts`. Read-only, not audited.
+- **Live smoke:** read-only `describe_guest`/`query_audit cmdMaxChars`/`health_check` calls against `proxlab` are available on request (not gated on the merge, per the Safety rule).

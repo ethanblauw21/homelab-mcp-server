@@ -18,6 +18,20 @@ export const QueryAuditInputSchema = z.object({
   unknownScopeOnly: z.boolean().optional().describe('Only records with hashScope "unknown" (exec-family)'),
   hashEquals: z.string().optional().describe("Exact match on the record's beforeHash or afterHash"),
   limit: z.number().int().positive().optional().describe("Max records returned (default 50, capped)"),
+  // ADR-017 §1 — opt-in `cmd` projection. The exec-family records carry the full
+  // command string; for a wide query that is the bulk of the payload. `cmdMaxChars`
+  // truncates each `cmd` to a head window (with a `…(+N chars)` marker) so a scan
+  // costs few tokens; `cmdFull` forces verbatim even if `cmdMaxChars` is set. Both
+  // are OPT-IN — absent, every `cmd` is returned byte-for-byte as today (the
+  // provably-additive invariant; truncation can hide a forensically-relevant flag,
+  // so it must never be the default).
+  cmdMaxChars: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Truncate each record's cmd to this many chars (opt-in; default = full)"),
+  cmdFull: z.boolean().optional().describe("Force full cmd even when cmdMaxChars is set"),
 });
 
 export type QueryAuditInput = z.infer<typeof QueryAuditInputSchema>;
@@ -86,6 +100,26 @@ export function summarizeAuditRecords(records: AuditRecord[]): AuditSummary {
 }
 
 /**
+ * Pure `cmd`-projection (ADR-017 §1). Opt-in truncation: with no `cmdMaxChars`
+ * (or `cmdFull: true`) every record is returned unchanged — today's behaviour,
+ * byte-for-byte. When `cmdMaxChars` is set, a record whose `cmd` exceeds it is
+ * shallow-copied with the `cmd` replaced by a head window + a `…(+N chars)`
+ * marker (N = the number of dropped chars). Records with no `cmd` pass through.
+ */
+export function projectAuditCmd(
+  records: AuditRecord[],
+  opts: { cmdMaxChars?: number; cmdFull?: boolean }
+): AuditRecord[] {
+  if (opts.cmdFull === true || opts.cmdMaxChars === undefined) return records;
+  const max = opts.cmdMaxChars;
+  return records.map((r) => {
+    if (r.cmd === undefined || r.cmd.length <= max) return r;
+    const dropped = r.cmd.length - max;
+    return { ...r, cmd: `${r.cmd.slice(0, max)}…(+${dropped} chars)` };
+  });
+}
+
+/**
  * `query_audit` — the audit log's first read consumer beyond revert (ADR-005
  * §Part 2). Entirely local: pure filter + summary over `readAll()`. Records are
  * newest-first and bounded by `limit`; the summary describes the FULL filtered
@@ -104,7 +138,10 @@ export function queryAuditHandler(
     input.limit ?? cfg.tools.queryAuditDefaultLimit,
     cfg.tools.queryAuditMaxLimit
   );
-  const records = [...filtered].sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, limit);
+  const page = [...filtered].sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, limit);
+  // Project AFTER paging — only the returned records are shaped; the summary
+  // (computed above over the full filtered set) is untouched.
+  const records = projectAuditCmd(page, { cmdMaxChars: input.cmdMaxChars, cmdFull: input.cmdFull });
 
   return { summary, records };
 }

@@ -96,6 +96,28 @@ describe("healthCheckHandler", () => {
     expect(res.errors.some((e) => e.section === "storage")).toBe(true);
   });
 
+  it("ADR-017 §2: drops pseudo mounts from storage findings by default but rolls up over the FULL set", async () => {
+    const t = new FakeTransport();
+    // df: a real root (ok) + a pseudo /dev/shm pushed to crit usage (95/100).
+    t.setExecResult("df -B1 --output=target,size,used,avail", {
+      stdout: "Mounted 1B-blocks Used Avail\n/ 100 10 90\n/dev/shm 100 95 5\n/run/lock 100 1 99",
+      stderr: "",
+      exitCode: 0,
+    });
+    t.setExecResult("pvesm status", { stdout: "", stderr: "", exitCode: 0 });
+
+    // Default: pseudo mounts hidden from the findings list...
+    const def = await healthCheckHandler({ sections: ["storage"] }, t, makeConfig());
+    expect(def.findings.map((f) => f.check)).toEqual(["fs:/"]);
+    // ...yet the crit pseudo mount STILL drives the rollup (computed pre-filter).
+    expect(def.status).toBe("crit");
+
+    // includePseudoFs restores the full df listing.
+    const full = await healthCheckHandler({ sections: ["storage"], includePseudoFs: true }, t, makeConfig());
+    expect(full.findings.map((f) => f.check).sort()).toEqual(["fs:/", "fs:/dev/shm", "fs:/run/lock"]);
+    expect(full.status).toBe("crit");
+  });
+
   it("tolerates absent ZFS (soft probe) and reports ok overall", async () => {
     const t = new FakeTransport();
     t.setExecResult("nproc", { stdout: "8\n", stderr: "", exitCode: 0 });

@@ -22,6 +22,7 @@ import {
   evaluateOnbootStopped,
   evaluatePendingUpdates,
   rollupStatus,
+  filterDisplayFindings,
   parseOnbootConfig,
   parseAptUpgradeCount,
   type CheckResult,
@@ -37,6 +38,14 @@ export const HealthCheckInputSchema = z.object({
     .array(z.enum(HEALTH_SECTIONS))
     .optional()
     .describe("Sections to probe; defaults to all (node, storage, guests, units, updates)"),
+  // ADR-017 §2 — pseudo/virtual filesystems (tmpfs, devtmpfs, cgroup, …) are
+  // dropped from the storage findings BY DEFAULT (they are 0.0%-used noise and
+  // the rollup status is computed pre-filter, so the verdict is unchanged). Set
+  // this to restore the full df listing.
+  includePseudoFs: z
+    .boolean()
+    .optional()
+    .describe("Include pseudo/virtual mounts (tmpfs, devtmpfs, …) in storage findings; default false"),
 });
 
 export type HealthCheckInput = z.infer<typeof HealthCheckInputSchema>;
@@ -204,7 +213,13 @@ export async function healthCheckHandler(
     }
   }
 
-  const result: HealthCheckResult = { status: rollupStatus(findings), findings, errors };
+  // Rollup over the FULL set; the pseudo-fs filter shapes only the returned list
+  // (ADR-017 §2) so hiding a 0.0%-used tmpfs never moves the ok/warn/crit verdict.
+  const result: HealthCheckResult = {
+    status: rollupStatus(findings),
+    findings: filterDisplayFindings(findings, input.includePseudoFs ?? false),
+    errors,
+  };
   store?.save(result);
   return result;
 }
