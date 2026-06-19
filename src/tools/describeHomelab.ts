@@ -67,6 +67,24 @@ function errMsg(e: unknown): string {
 }
 
 /**
+ * #12 — the snapshot `host` field. `cfg.ssh.host` is the source when SSH is
+ * configured (companion+), but at observe/operate the census rides the API and
+ * `SSH_HOST` is typically unset (empty). Fall back to the API base URL's
+ * hostname so the snapshot is never anonymously blank. Malformed/absent URL ⇒
+ * "" (honest, never a thrown census).
+ */
+function censusHost(cfg: Config): string {
+  if (cfg.ssh.host) return cfg.ssh.host;
+  const base = cfg.api?.baseUrl;
+  if (!base) return "";
+  try {
+    return new URL(base).hostname;
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Interpret a `qm config` `agent:` value as enabled/disabled. Proxmox accepts
  * `agent: 1`, `agent: 0`, or `agent: enabled=1,fstrim_cloned_disks=1`. Absence ⇒
  * undefined (unknown); a present non-"0"/non-"enabled=0" value ⇒ enabled.
@@ -373,6 +391,10 @@ export async function describeHomelabHandler(
     }
 
     if (requested.has("tailscale")) {
+      // ADR-013 (#22): probe Tailscale host-first, then fall back to execing into
+      // a guest's tailscale container for real identity (supersedes #27's
+      // detect-only stopgap, which reported a container's mere presence with empty
+      // identity and a flat null when absent).
       sections.tailscale = await probeTailscale(runner, getPctRows, getContainerDocker);
     }
   } catch (e) {
@@ -390,7 +412,7 @@ export async function describeHomelabHandler(
   const raw: RawCensusSnapshot = {
     schemaVersion: CENSUS_SCHEMA_VERSION,
     ts: new Date(now()).toISOString(),
-    host: cfg.ssh.host,
+    host: censusHost(cfg),
     depth,
     sections,
     errors,
@@ -462,7 +484,10 @@ async function buildApiCensus(
     try {
       const s = await nodeOps.nodeStatus();
       const node: NodeSection = {
-        version: s.version ?? "",
+        // #12 — normalize to the bare manager version (e.g. "8.1.4") so the API
+        // path matches the SSH path (which parses `pveversion`). The API
+        // nodeStatus returns the raw "pve-manager/8.1.4" form.
+        version: s.version ? parsePveVersion(s.version) : "",
         uptime: formatUptime(s.uptimeSecs),
         cpu: s.cpuCount ?? 0,
         memBytes: s.memoryTotal ?? 0,

@@ -448,7 +448,9 @@ describe("describeHomelabHandler — API census path (ADR-007 §6, observe tier)
     const ssh = new FakeTransport();
     const snap = await describeHomelabHandler(parse({}), ssh, store, cfg, Date.now, fakeNode(), "observe");
 
-    expect(snap.sections.node?.version).toBe("pve-manager/8.1.4");
+    // #12 — the API path normalizes "pve-manager/8.1.4" to the bare "8.1.4",
+    // matching the SSH path (which parses `pveversion`).
+    expect(snap.sections.node?.version).toBe("8.1.4");
     expect(snap.sections.node?.cpu).toBe(8);
     expect(snap.sections.node?.memBytes).toBe(16766517248);
     expect(snap.sections.storage?.[0]).toMatchObject({ name: "local", active: true });
@@ -460,6 +462,23 @@ describe("describeHomelabHandler — API census path (ADR-007 §6, observe tier)
     expect(snap.sections.services).toEqual({ unavailableAtTier: "companion" });
     expect(snap.sections.tailscale).toEqual({ unavailableAtTier: "companion" });
     expect(snap.errors).toEqual([]);
+  });
+
+  it("derives the snapshot host from the API base URL when SSH_HOST is empty (#12)", async () => {
+    const store = new CensusStore(tmpDir, 30);
+    const cfg = makeConfig(tmpDir);
+    cfg.ssh.host = ""; // observe/operate: SSH typically unconfigured
+    (cfg as Config & { api: { baseUrl: string } }).api = { baseUrl: "https://pve.lan:8006" };
+    const snap = await describeHomelabHandler(
+      parse({ sections: ["node"] }),
+      new FakeTransport(),
+      store,
+      cfg,
+      Date.now,
+      fakeNode(),
+      "observe"
+    );
+    expect(snap.host).toBe("pve.lan");
   });
 
   it("isolates an API section failure as a recorded error (403 RBAC)", async () => {

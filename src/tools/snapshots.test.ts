@@ -10,7 +10,11 @@ import {
   buildSnapshotDeleteCommand,
   buildSnapshotListCommand,
   buildGuestStatusCommand,
+  buildGuestConfigCommand,
+  detectBindMounts,
+  enrichSnapshotFailure,
 } from "./snapshots.js";
+import { parseGuestConfig } from "./censusParsers.js";
 
 describe("snapshots — ownership boundary", () => {
   it("isMcpSnapshot only matches the mcp- prefix", () => {
@@ -100,5 +104,67 @@ describe("snapshots — command builders", () => {
     expect(buildSnapshotRollbackCommand("qm", 200, "mcp-x")).toBe("qm rollback 200 mcp-x");
     expect(buildSnapshotDeleteCommand("pct", 101, "mcp-x")).toBe("pct delsnapshot 101 mcp-x");
     expect(buildGuestStatusCommand("qm", 200)).toBe("qm status 200");
+  });
+});
+
+describe("#15 — snapshot_create failure enrichment", () => {
+  it("builds the guest config command for both guest types", () => {
+    expect(buildGuestConfigCommand("pct", 101)).toBe("pct config 101");
+    expect(buildGuestConfigCommand("qm", 200)).toBe("qm config 200");
+  });
+
+  describe("detectBindMounts", () => {
+    it("flags a host-path mpN: as a bind mount and names the mount point", () => {
+      const cfg = parseGuestConfig("rootfs: local-lvm:subvol-101-disk-0,size=8G\nmp0: /srv/media,mp=/media\n");
+      const binds = detectBindMounts(cfg);
+      expect(binds).toEqual([{ key: "mp0", hostPath: "/srv/media", mountPoint: "/media" }]);
+    });
+
+    it("does NOT flag a storage-backed mount point (storage:volume, not a host path)", () => {
+      const cfg = parseGuestConfig("mp0: local-lvm:vm-101-disk-1,mp=/data\n");
+      expect(detectBindMounts(cfg)).toEqual([]);
+    });
+
+    it("returns multiple bind mounts and ignores non-mp keys", () => {
+      const cfg = parseGuestConfig("mp0: /a,mp=/x\nmp1: /b,mp=/y\nnet0: name=eth0\n");
+      expect(detectBindMounts(cfg).map((b) => b.key)).toEqual(["mp0", "mp1"]);
+    });
+  });
+
+  describe("enrichSnapshotFailure", () => {
+    const CFG_BIND = "rootfs: local-lvm:subvol-101-disk-0,size=8G\nmp0: /srv/media,mp=/media\n";
+    const CFG_PASSTHRU = "rootfs: local-lvm:subvol-101-disk-0,size=8G\ndev0: /dev/sda\n";
+    const CFG_DIR = "rootfs: backup-dir:subvol-101-disk-0,size=8G\n";
+
+    it("passes a non-feature failure through verbatim (no misleading diagnosis)", () => {
+      const msg = enrichSnapshotFailure("got timeout", "pct", 101, CFG_BIND);
+      expect(msg).toBe("snapshot create failed: got timeout");
+      expect(msg).not.toMatch(/vzdump/);
+    });
+
+    it("names a bind mount as the cause and points at guest_backup/vzdump", () => {
+      const msg = enrichSnapshotFailure("snapshot feature is not available", "pct", 101, CFG_BIND);
+      expect(msg).toMatch(/bind mount mp0 \(\/srv\/media → \/media\)/);
+      expect(msg).toMatch(/guest_backup \(vzdump\)/);
+    });
+
+    it("names device passthrough as the cause", () => {
+      const msg = enrichSnapshotFailure("snapshot feature is not available", "pct", 101, CFG_PASSTHRU);
+      expect(msg).toMatch(/passed-through device/);
+    });
+
+    it("falls back to naming the root storage when no specific blocker is found", () => {
+      const msg = enrichSnapshotFailure("snapshot feature is not available", "pct", 101, CFG_DIR);
+      expect(msg).toMatch(/backup-dir/);
+      expect(msg).toMatch(/guest_backup \(vzdump\)/);
+    });
+
+    it("still names the vzdump fallback when the config could not be read (null)", () => {
+      const msg = enrichSnapshotFailure("snapshot feature is not available", "pct", 101, null);
+      expect(msg).toMatch(/guest_backup \(vzdump\)/);
+      // No invented diagnosis when we have no config (the static fallback list
+      // mentions bind mounts generically; there must be no "Likely cause:" line).
+      expect(msg).not.toMatch(/Likely cause:/);
+    });
   });
 });

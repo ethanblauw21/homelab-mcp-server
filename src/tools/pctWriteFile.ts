@@ -122,6 +122,10 @@ export async function writeResolvedPct(
     args;
   const { prevContent, prevHash, isNewFile } = prev;
 
+  // #20 — re-anchor a delta backup to a self-contained full copy when the live
+  // file drifted out-of-band since the last managed write.
+  const lastBackupBaseHash = backupStore.latestBaseHash({ kind: "pct", vmid, remotePath: path });
+
   const largeChange = detectLargeFileWrite(
     newContent.length,
     isNewFile,
@@ -151,6 +155,7 @@ export async function writeResolvedPct(
       largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
       largeFilePolicy: cfg.backup.largeFilePolicy,
       existingHashToPaths: existingHashMap,
+      lastBackupBaseHash,
     });
 
     return {
@@ -184,6 +189,7 @@ export async function writeResolvedPct(
     largeFileBytesThreshold: cfg.backup.largeFileBytesThreshold,
     largeFilePolicy: cfg.backup.largeFilePolicy,
     existingHashToPaths: existingHashMap,
+    lastBackupBaseHash,
   });
 
   const newHash = contentHash(newContent);
