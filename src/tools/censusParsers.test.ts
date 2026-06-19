@@ -10,6 +10,7 @@ import {
   parseIpBrief,
   parseInterfacesBridges,
   parseTailscaleStatus,
+  detectTailscaleInGuests,
   parseZpoolStatusX,
   parseFailedUnits,
   parseDockerPs,
@@ -187,6 +188,28 @@ describe("parseTailscaleStatus", () => {
       self: "pve",
       peerCount: 0,
     });
+  });
+});
+
+describe("detectTailscaleInGuests (#22)", () => {
+  it("finds a tailscale docker image across guests", () => {
+    const out = detectTailscaleInGuests([
+      { vmid: 101, docker: [{ name: "web", image: "nginx:latest", status: "Up" }] },
+      { vmid: 102, docker: [{ name: "ts", image: "ghcr.io/tailscale/tailscale:v1.62", status: "Up" }] },
+    ]);
+    expect(out).toEqual({
+      self: "",
+      peerCount: 0,
+      detectedInGuests: [{ vmid: 102, container: "ts", image: "ghcr.io/tailscale/tailscale:v1.62" }],
+    });
+  });
+  it("returns null when no guest runs tailscale", () => {
+    expect(
+      detectTailscaleInGuests([{ vmid: 101, docker: [{ name: "web", image: "nginx", status: "Up" }] }])
+    ).toBeNull();
+  });
+  it("returns null for an empty services list", () => {
+    expect(detectTailscaleInGuests([])).toBeNull();
   });
 });
 

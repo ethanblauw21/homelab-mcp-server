@@ -13,6 +13,7 @@ import {
   parseIpBrief,
   parseInterfacesBridges,
   parseTailscaleStatus,
+  detectTailscaleInGuests,
   parseZpoolStatusX,
   parseFailedUnits,
   parseDockerPs,
@@ -59,6 +60,24 @@ export type DescribeHomelabInput = z.infer<typeof DescribeHomelabInputSchema>;
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * #12 — the snapshot `host` field. `cfg.ssh.host` is the source when SSH is
+ * configured (companion+), but at observe/operate the census rides the API and
+ * `SSH_HOST` is typically unset (empty). Fall back to the API base URL's
+ * hostname so the snapshot is never anonymously blank. Malformed/absent URL ⇒
+ * "" (honest, never a thrown census).
+ */
+function censusHost(cfg: Config): string {
+  if (cfg.ssh.host) return cfg.ssh.host;
+  const base = cfg.api?.baseUrl;
+  if (!base) return "";
+  try {
+    return new URL(base).hostname;
+  } catch {
+    return "";
+  }
 }
 
 /**
@@ -308,7 +327,16 @@ export async function describeHomelabHandler(
 
     if (requested.has("tailscale")) {
       const ts = await runner.soft("tailscale status --json");
-      sections.tailscale = ts ? parseTailscaleStatus(ts) : null;
+      const host = ts ? parseTailscaleStatus(ts) : null;
+      // #22 — no host daemon? scan the docker rows already gathered by the
+      // services probe for a tailscale container so the census reports
+      // tailscale-in-a-guest instead of a flat null (reads as "none anywhere").
+      // The services probe runs before this one; if it wasn't requested,
+      // `sections.services` is absent and the fallback yields null (unchanged).
+      const inGuests = Array.isArray(sections.services)
+        ? detectTailscaleInGuests(sections.services)
+        : null;
+      sections.tailscale = host ?? inGuests;
     }
   } catch (e) {
     if (e instanceof BudgetExceeded) {
@@ -325,7 +353,7 @@ export async function describeHomelabHandler(
   const raw: RawCensusSnapshot = {
     schemaVersion: CENSUS_SCHEMA_VERSION,
     ts: new Date(now()).toISOString(),
-    host: cfg.ssh.host,
+    host: censusHost(cfg),
     depth,
     sections,
     errors,
@@ -397,7 +425,10 @@ async function buildApiCensus(
     try {
       const s = await nodeOps.nodeStatus();
       const node: NodeSection = {
-        version: s.version ?? "",
+        // #12 — normalize to the bare manager version (e.g. "8.1.4") so the API
+        // path matches the SSH path (which parses `pveversion`). The API
+        // nodeStatus returns the raw "pve-manager/8.1.4" form.
+        version: s.version ? parsePveVersion(s.version) : "",
         uptime: formatUptime(s.uptimeSecs),
         cpu: s.cpuCount ?? 0,
         memBytes: s.memoryTotal ?? 0,
