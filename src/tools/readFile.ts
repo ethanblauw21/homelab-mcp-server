@@ -1,11 +1,19 @@
 import { z } from "zod";
 import type { SshTransport } from "../ssh/transport.js";
 import { validatePath } from "../guardrails/pathValidation.js";
+import { applyReadRedaction } from "./readRedaction.js";
 import type { Config } from "../config.js";
 
 export const ReadFileInputSchema = z.object({
   path: z.string().min(1).describe("Absolute path on the Proxmox host"),
   encoding: z.enum(["utf8", "base64"]).default("utf8").describe("Return encoding"),
+  redact: z
+    .boolean()
+    .optional()
+    .describe(
+      "ADR-019: opt into the log tools' secret redaction for this read (utf8 only). " +
+        "Default false = full fidelity. Best-effort, not a security control."
+    ),
   offset: z
     .number()
     .int()
@@ -26,7 +34,14 @@ export async function readFileHandler(
   input: ReadFileInput,
   transport: SshTransport,
   cfg: Config
-): Promise<{ content: string; encoding: string; bytes: number; offset: number }> {
+): Promise<{
+  content: string;
+  encoding: string;
+  bytes: number;
+  offset: number;
+  redacted?: boolean;
+  redactionCount?: number;
+}> {
   const pathResult = validatePath(input.path, {
     allowlist: cfg.guardrails.pathAllowlist,
     denylist: cfg.guardrails.pathDenylist,
@@ -58,10 +73,18 @@ export async function readFileHandler(
     buf = await transport.readFile(input.path, { start: offset, length });
   }
 
+  const red = applyReadRedaction(
+    buf.toString(input.encoding),
+    input.encoding,
+    input.redact,
+    input.redact ? cfg.census.redactionExtraKeys : []
+  );
   return {
-    content: buf.toString(input.encoding),
+    content: red.content,
     encoding: input.encoding,
     bytes: buf.length,
     offset,
+    ...(red.redacted !== undefined ? { redacted: red.redacted } : {}),
+    ...(red.redactionCount !== undefined ? { redactionCount: red.redactionCount } : {}),
   };
 }

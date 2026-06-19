@@ -4,6 +4,7 @@ import { validatePath } from "../guardrails/pathValidation.js";
 import { assertContainerRunning } from "./pctFiles.js";
 import { assertDockerName } from "./dockerHelpers.js";
 import { resolveDockerContainer, readDockerFile } from "./dockerFiles.js";
+import { applyReadRedaction } from "./readRedaction.js";
 import type { Config } from "../config.js";
 
 export const DockerReadFileInputSchema = z.object({
@@ -11,6 +12,13 @@ export const DockerReadFileInputSchema = z.object({
   container: z.string().min(1).describe("Docker container name"),
   path: z.string().min(1).describe("Absolute path of the file inside the Docker container"),
   encoding: z.enum(["utf8", "base64"]).default("utf8").describe("Return encoding"),
+  redact: z
+    .boolean()
+    .optional()
+    .describe(
+      "ADR-019: opt into the log tools' secret redaction for this read (utf8 only). " +
+        "Default false = full fidelity. Best-effort, not a security control."
+    ),
   offset: z
     .number()
     .int()
@@ -36,13 +44,19 @@ export interface DockerReadFileResult {
   container: string;
   /** True when the bind-mount fast path served the read. */
   viaBindMount: boolean;
+  /** ADR-019: present only when `redact` was requested (true ⇒ scanned, false ⇒ base64 no-op). */
+  redacted?: boolean;
+  /** ADR-019: present only when redaction actually ran; count of masked spans. */
+  redactionCount?: number;
 }
 
 /**
- * `docker_read_file` (ADR-008 §2). Deliberately **does not redact** — fidelity is
- * the point of a file read (reading a config to use its API key is the operator's
- * legitimate choice), consistent with `pct_read_file`/`read_file`. The read cap
- * bounds the returned payload (`docker cp`/`pct pull` copy the whole file first).
+ * `docker_read_file` (ADR-008 §2). Returns **fidelity by default** — reading a
+ * config to use its API key is the operator's legitimate choice, consistent with
+ * `pct_read_file`/`read_file`. ADR-019 adds an opt-in `redact` flag that routes the
+ * returned text through the same ADR-002 module the log tools use, for the
+ * structure-over-secrets read; the default (no flag) is byte-for-byte unchanged. The
+ * read cap bounds the returned payload (`docker cp`/`pct pull` copy the whole file first).
  */
 export async function dockerReadFileHandler(
   input: DockerReadFileInput,
@@ -98,13 +112,21 @@ export async function dockerReadFileHandler(
     buf = content.subarray(offset, offset + length);
   }
 
+  const red = applyReadRedaction(
+    buf.toString(input.encoding),
+    input.encoding,
+    input.redact,
+    input.redact ? cfg.census.redactionExtraKeys : []
+  );
   return {
-    content: buf.toString(input.encoding),
+    content: red.content,
     encoding: input.encoding,
     bytes: buf.length,
     offset,
     vmid: input.vmid,
     container: input.container,
     viaBindMount,
+    ...(red.redacted !== undefined ? { redacted: red.redacted } : {}),
+    ...(red.redactionCount !== undefined ? { redactionCount: red.redactionCount } : {}),
   };
 }

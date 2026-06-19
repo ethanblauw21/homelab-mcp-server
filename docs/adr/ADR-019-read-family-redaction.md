@@ -1,6 +1,6 @@
 # ADR-019: Opt-in Redaction for the File-Read Family
 
-**Status:** Proposed
+**Status:** Accepted (implemented 2026-06-19)
 **Date:** 2026-06-19
 **Deciders:** Ethan
 **Depends on:** ADR-002 (the shared redaction module — the single secret-pattern matcher), ADR-004 (the read surface: `read_file` stat-gating + the deliberate "reads return fidelity, logs always redact" doctrine this ADR amends)
