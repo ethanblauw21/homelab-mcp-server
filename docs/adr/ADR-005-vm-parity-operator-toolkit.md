@@ -4,7 +4,7 @@
 **Date:** 2026-06-09
 **Deciders:** Ethan
 **Depends on:** ADR-002 (redaction, census), ADR-003 (target descriptors, backup meta), ADR-004 (`ExecResult` shape, `computeUnifiedDiff`, size caps, confirm gate)
-**Required by:** ADR-017 (output budgeting — `query_audit` `cmd` projection + `health_check` pseudo-fs filtering)
+**Required by:** ADR-017 (output budgeting — `query_audit` `cmd` projection + `health_check` pseudo-fs filtering), ADR-020 (`tail_log`/`buildTailCommand` reuse for `service_logs`, the fixed-probe pattern + structured-audit payoff for the service/probe tools)
 
 ## Context
 

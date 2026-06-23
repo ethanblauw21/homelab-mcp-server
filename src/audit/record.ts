@@ -35,7 +35,8 @@ export type AuditTool =
   | "compose_redeploy"
   | "compute_tree"
   | "verify_integrity"
-  | "accept_truth";
+  | "accept_truth"
+  | "service_restart";
 
 export interface AuditRecord {
   id: string;

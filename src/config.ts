@@ -158,6 +158,16 @@ const ConfigSchema = z.object({
     // larger write is refused with a pointer to qm_exec instead of silently
     // truncating in the guest.
     qmWriteMaxBytes: z.number().default(60000),
+    // ADR-020 §2 — probe timeouts (tcp_ping/http_probe): default applied when the
+    // caller omits timeoutMs, and a hard ceiling so a probe can never hang the server.
+    probeDefaultTimeoutMs: z.number().default(5000),
+    probeMaxTimeoutMs: z.number().default(30000),
+    // ADR-020 §3 — search_file_regex bounds: context lines each side (default + cap)
+    // and the match cap (default + ceiling) before the overflow marker.
+    searchDefaultContext: z.number().default(2),
+    searchMaxContext: z.number().default(20),
+    searchDefaultMaxMatches: z.number().default(20),
+    searchMaxMatches: z.number().default(200),
   }),
   // ADR-005 Part 2 — health_check thresholds (config-driven; no hardcoding).
   health: z.object({
@@ -433,6 +443,24 @@ function loadConfig(): Config {
       qmWriteMaxBytes: process.env.QM_WRITE_MAX_BYTES
         ? parseInt(process.env.QM_WRITE_MAX_BYTES)
         : 60000,
+      probeDefaultTimeoutMs: process.env.PROBE_DEFAULT_TIMEOUT_MS
+        ? parseInt(process.env.PROBE_DEFAULT_TIMEOUT_MS)
+        : 5000,
+      probeMaxTimeoutMs: process.env.PROBE_MAX_TIMEOUT_MS
+        ? parseInt(process.env.PROBE_MAX_TIMEOUT_MS)
+        : 30000,
+      searchDefaultContext: process.env.SEARCH_DEFAULT_CONTEXT
+        ? parseInt(process.env.SEARCH_DEFAULT_CONTEXT)
+        : 2,
+      searchMaxContext: process.env.SEARCH_MAX_CONTEXT
+        ? parseInt(process.env.SEARCH_MAX_CONTEXT)
+        : 20,
+      searchDefaultMaxMatches: process.env.SEARCH_DEFAULT_MAX_MATCHES
+        ? parseInt(process.env.SEARCH_DEFAULT_MAX_MATCHES)
+        : 20,
+      searchMaxMatches: process.env.SEARCH_MAX_MATCHES
+        ? parseInt(process.env.SEARCH_MAX_MATCHES)
+        : 200,
     },
     health: {
       loadWarnRatio: process.env.HEALTH_LOAD_WARN_RATIO

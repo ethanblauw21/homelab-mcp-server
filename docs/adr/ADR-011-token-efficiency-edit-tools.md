@@ -4,7 +4,7 @@
 **Date:** 2026-06-16
 **Deciders:** Ethan
 **Depends on:** ADR-001 (write_file pipeline), ADR-003 (pct file I/O, backup/audit pipeline), ADR-004 (dryRun preview, read caps, path validation), ADR-005 (qm file I/O), ADR-006 (config-history capture path A), ADR-008 (docker file I/O, §3 diff-on-write), ADR-009 (hash-anchored audit records — beforeHash/afterHash)
-**Required by:** ADR-017 (output budgeting — extends the §1 token-economy doctrine from the *input/write* surface to the *output/read* surface)
+**Required by:** ADR-017 (output budgeting — extends the §1 token-economy doctrine from the *input/write* surface to the *output/read* surface), ADR-020 (`search_file_regex` — the content-addressed read analogue of the find-and-replace front door)
 
 ## Context
 
