@@ -4,7 +4,7 @@
 **Date:** 2026-06-09
 **Deciders:** Ethan
 **Depends on:** ADR-001 (SSH MCP server), ADR-003 (confirm-gate pattern), TESTING-STRATEGY-ssh-mcp-server.md
-**Required by:** ADR-016 (read caps + path validation for the `docker_read_file` named-volume fast path), ADR-019 (amends the "reads never redact" doctrine to "fidelity by default, opt-in redaction"), ADR-020 (denylist/confirm gate, `validatePath`, honest `ExecResult` exit semantics for the service/probe/search tools)
+**Required by:** ADR-016 (read caps + path validation for the `docker_read_file` named-volume fast path), ADR-019 (amends the "reads never redact" doctrine to "fidelity by default, opt-in redaction"), ADR-020 (denylist/confirm gate, `validatePath`, honest `ExecResult` exit semantics for the service/probe/search tools), ADR-021 (the denylist/confirm **tripwire doctrine** + pure-guardrail-function pattern, extended cross-call by the rollback circuit breaker)
 
 ## Context
 

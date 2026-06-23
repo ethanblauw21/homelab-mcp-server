@@ -77,6 +77,33 @@ const ConfigSchema = z.object({
   }),
   audit: z.object({
     logPath: z.string(),
+    // ADR-022 — the derived, rebuildable audit.db projection that shadows the
+    // JSONL log (the JSONL stays the system of record). When disabled, query_audit
+    // falls back to the pure JSONL scan and nothing is mirrored.
+    dbEnabled: z.boolean().default(true),
+    dbPath: z.string(),
+    // Persist the diff-on-write output (already computed, otherwise discarded) per
+    // write-family record. Redacted before storage (ADR-002) — the only artifact
+    // not already durable somewhere; full before/after is reconstructed from the
+    // backup store, never duplicated here.
+    storeDiffs: z.boolean().default(true),
+    redactDiffs: z.boolean().default(true),
+    // Cap a stored diff's redacted size; an over-cap diff is truncated with a
+    // marker rather than bloating the index (FTS still matches the head).
+    diffMaxBytes: z.number().default(64 * 1024),
+  }),
+  // ADR-022 §2/§3 — the semantic change-history feed. PULL is the doctrine-correct
+  // default (the indexer reads durable local artifacts on its own cadence, never on
+  // the write's critical path); PUSH is a best-effort emitter gated on the indexer's
+  // streamed-ingestion tool landing. Both default OFF. The loopback-only guard is the
+  // recorded precondition: the content feed indexes the UNREDACTED git mirror, so the
+  // indexer must stay same-trust-zone/local — a non-loopback target is refused.
+  feed: z.object({
+    indexerContentEnabled: z.boolean().default(false),
+    // The git mirror the content feed points at (defaults to history.configHistoryDir).
+    indexerContentPath: z.string().optional(),
+    // The push endpoint for change-events; none ⇒ no emitter. Must be loopback.
+    indexerPushEndpoint: z.string().optional(),
   }),
   census: z.object({
     censusDir: z.string(),
@@ -206,6 +233,18 @@ const ConfigSchema = z.object({
       "/etc/mtab",
       "/etc/.pwd.lock",
       "/etc/lvm/cache/*",
+      // ADR-023 §E4 — pmxcfs (/etc/pve) volatile runtime state. These regenerate
+      // every few seconds (cluster heartbeat / RRD stats / version counter), so
+      // without excluding them every integrity scan reports them as perpetual
+      // "unexplained" drift and every sweep churns a commit. They are runtime
+      // state, not config worth versioning.
+      "/etc/pve/.version",
+      "/etc/pve/.rrd",
+      "/etc/pve/.clusterlog",
+      "/etc/pve/.vmlist",
+      "/etc/pve/.members",
+      "/etc/pve/.debug",
+      "**/lrm_status",
     ]),
     // Per-file size cap for sweeps; over-cap files are SKIPPED and noted in the
     // manifest, never silently dropped.
@@ -348,6 +387,18 @@ function loadConfig(): Config {
     },
     audit: {
       logPath: process.env.AUDIT_LOG_PATH ?? path.join(LOCAL_DATA_DIR, "audit.jsonl"),
+      dbEnabled: process.env.AUDIT_DB_ENABLED ? process.env.AUDIT_DB_ENABLED !== "false" : true,
+      dbPath: process.env.AUDIT_DB_PATH ?? path.join(LOCAL_DATA_DIR, "audit.db"),
+      storeDiffs: process.env.AUDIT_STORE_DIFFS ? process.env.AUDIT_STORE_DIFFS !== "false" : true,
+      redactDiffs: process.env.AUDIT_REDACT_DIFFS ? process.env.AUDIT_REDACT_DIFFS !== "false" : true,
+      diffMaxBytes: process.env.AUDIT_DIFF_MAX_BYTES
+        ? parseInt(process.env.AUDIT_DIFF_MAX_BYTES)
+        : 64 * 1024,
+    },
+    feed: {
+      indexerContentEnabled: process.env.FEED_INDEXER_CONTENT_ENABLED === "true",
+      indexerContentPath: process.env.FEED_INDEXER_CONTENT_PATH,
+      indexerPushEndpoint: process.env.FEED_INDEXER_PUSH_ENDPOINT,
     },
     census: {
       censusDir: process.env.CENSUS_DIR ?? path.join(LOCAL_DATA_DIR, "census"),

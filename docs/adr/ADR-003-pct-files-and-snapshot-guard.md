@@ -4,6 +4,7 @@
 **Date:** 2026-06-09
 **Deciders:** Ethan
 **Depends on:** ADR-001 (SSH MCP server), ADR-002 (census + redaction), TESTING-STRATEGY-ssh-mcp-server.md
+**Required by:** ADR-021 (rollback circuit breaker — wraps the `revert_file`/`snapshot_rollback` rollback verbs this ADR introduced)
 
 ## Context
 

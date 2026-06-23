@@ -4,7 +4,7 @@
 **Date:** 2026-06-22
 **Deciders:** Ethan
 **Depends on:** ADR-001 (`execute`/`pct_exec` plumbing), ADR-004 (denylist/confirm gate, `validatePath`, honest `ExecResult` exit semantics, read caps), ADR-005 (`tail_log`/`buildTailCommand` reuse, the fixed-probe `health_check` pattern, the structured `query_audit` record as the payoff), ADR-007 (tiers + the target-kind tier rule `assertTargetTier`), ADR-011 (token economy as a design axis — for the regex read), ADR-016 (the "dedicated tool beats raw exec" doctrine + the audit-log evidence method), ADR-017 (content-addressed windowing extends the output-budgeting doctrine)
-**Required by:** — none yet —
+**Required by:** ADR-021 (realizes the deferred backlog item 8 — the rollback circuit breaker — resolving the session-state question this ADR flagged as its lone blocker)
 **Source:** `docs/tool-ideas.md` items 5–7, ranked highest-value of the live dogfooding backlog. Same evidence method as ADR-016: the audit log shows recurring free-form `systemctl`/`journalctl`, `curl`/`nc`, and `grep -C` strings funneled through `execute`/`pct_exec` for operations that are fully enumerable.
 
 ## Context

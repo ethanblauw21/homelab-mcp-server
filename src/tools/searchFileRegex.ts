@@ -108,10 +108,15 @@ export function parseGrepContext(
   return { matches, truncated };
 }
 
-/** Clamp a requested value into [1, max], defaulting when omitted. */
-function clamp(requested: number | undefined, def: number, max: number): number {
+/**
+ * Clamp a requested value into [floor, max], defaulting when omitted. `floor`
+ * defaults to 1, but `context` passes floor 0 — the schema declares `context`
+ * `minimum: 0` and `context: 0` legitimately means "just the match line, no
+ * neighbourhood" (ADR-023 §3); flooring it at 1 silently returned an extra line.
+ */
+function clamp(requested: number | undefined, def: number, max: number, floor = 1): number {
   if (requested === undefined) return Math.min(def, max);
-  return Math.max(1, Math.min(requested, max));
+  return Math.max(floor, Math.min(requested, max));
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +169,7 @@ export async function searchFileRegexHandler(
     throw new Error(`Invalid path: ${pathResult.reason}`);
   }
 
-  const context = clamp(input.context, cfg.tools.searchDefaultContext, cfg.tools.searchMaxContext);
+  const context = clamp(input.context, cfg.tools.searchDefaultContext, cfg.tools.searchMaxContext, 0);
   const maxMatches = clamp(input.maxMatches, cfg.tools.searchDefaultMaxMatches, cfg.tools.searchMaxMatches);
 
   const grep = buildGrepCommand(input.path, input.pattern, context, maxMatches);

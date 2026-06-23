@@ -66,11 +66,23 @@ export async function guestStartHandler(
   audit: AuditLog,
   cfg: Config,
   rootTier = false
-): Promise<{ vmid: number; guestType: GuestType; task: string }> {
-  const type = await resolveType(node, input.vmid);
-  const ref = await node.startGuest(input.vmid, type);
-  await record(audit, cfg, "guest_start", input.vmid, `Started ${type} ${input.vmid} via ${node.kind} (${ref.upid})`, rootTier);
-  return { vmid: input.vmid, guestType: type, task: ref.upid };
+): Promise<{ vmid: number; guestType: GuestType; task: string; alreadyRunning?: boolean }> {
+  // ADR-023 §E2 — start is idempotent. Resolve the guest (and its run-state) from
+  // the single listGuests() call; if it is already running, return a clean no-op
+  // instead of calling startGuest and surfacing the backend's raw 500 "already
+  // running" error.
+  const guests = await node.listGuests();
+  const g = guests.find((x) => x.vmid === input.vmid);
+  if (!g) {
+    throw new Error(`No guest with vmid ${input.vmid} found on this node.`);
+  }
+  if (g.status === "running") {
+    await record(audit, cfg, "guest_start", input.vmid, `guest_start no-op: ${g.type} ${input.vmid} already running`, rootTier);
+    return { vmid: input.vmid, guestType: g.type, task: "", alreadyRunning: true };
+  }
+  const ref = await node.startGuest(input.vmid, g.type);
+  await record(audit, cfg, "guest_start", input.vmid, `Started ${g.type} ${input.vmid} via ${node.kind} (${ref.upid})`, rootTier);
+  return { vmid: input.vmid, guestType: g.type, task: ref.upid, alreadyRunning: false };
 }
 
 export async function guestStopHandler(

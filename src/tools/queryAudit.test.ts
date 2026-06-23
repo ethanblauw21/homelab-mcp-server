@@ -1,10 +1,13 @@
 import { describe, it, expect } from "vitest";
+import Database from "better-sqlite3";
 import {
   filterAuditRecords,
+  fallbackTextFilter,
   summarizeAuditRecords,
   queryAuditHandler,
   projectAuditCmd,
 } from "./queryAudit.js";
+import { AuditDb } from "../audit/auditDb.js";
 import type { AuditRecord } from "../audit/record.js";
 import type { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
@@ -147,5 +150,67 @@ describe("projectAuditCmd (ADR-017 §1 cmd projection)", () => {
     const res = queryAuditHandler({ tool: "qm_exec", cmdMaxChars: 5 }, fakeAudit(SET), makeConfig());
     expect(res.records.find((r) => r.cmd?.startsWith("docke"))?.cmd).toMatch(/^docke…\(\+\d+ chars\)$/);
     expect(res.summary.total).toBe(2); // summary unaffected by projection
+  });
+});
+
+describe("fallbackTextFilter (ADR-022 JSONL substring degrade)", () => {
+  const SET: AuditRecord[] = [
+    rec({ id: "a", cmd: "docker restart nginx" }),
+    rec({ id: "b", path: "/etc/nginx/nginx.conf" }),
+    rec({ id: "c", tool: "write_file", note: "large change to firewall" }),
+  ];
+
+  it("matches across cmd, path, and note", () => {
+    expect(fallbackTextFilter(SET, "docker").map((r) => r.id)).toEqual(["a"]);
+    expect(fallbackTextFilter(SET, "nginx.conf").map((r) => r.id)).toEqual(["b"]);
+    expect(fallbackTextFilter(SET, "firewall").map((r) => r.id)).toEqual(["c"]);
+  });
+
+  it("is an identity for an empty search and case-sensitive otherwise", () => {
+    expect(fallbackTextFilter(SET, "")).toBe(SET);
+    expect(fallbackTextFilter(SET, "DOCKER")).toHaveLength(0);
+  });
+});
+
+describe("queryAuditHandler — audit.db fast path vs JSONL fallback parity", () => {
+  // The DB is a speed/recall upgrade, never a contract change: for any non-text
+  // query the two paths must return the IDENTICAL result (shape, order, summary).
+  const PARITY: AuditRecord[] = [
+    rec({ id: "a", ts: "2026-06-01T10:00:00.000Z", tool: "write_file", path: "/etc/hosts" }),
+    rec({ id: "b", ts: "2026-06-05T10:00:00.000Z", tool: "qm_exec", vmid: 100, cmd: "uptime" }),
+    rec({ id: "c", ts: "2026-06-08T10:00:00.000Z", tool: "write_file", path: "/etc/network/interfaces", isLargeChange: true }),
+    rec({ id: "d", ts: "2026-06-09T10:00:00.000Z", tool: "qm_exec", vmid: 100, cmd: "df" }),
+  ];
+
+  function seededDb(): AuditDb {
+    const db = new AuditDb(new Database(":memory:"), { storeDiffs: true, redactDiffs: true, diffMaxBytes: 65536 });
+    for (const r of PARITY) db.insert(r);
+    return db;
+  }
+
+  for (const input of [
+    {},
+    { tool: "qm_exec" },
+    { vmid: 100 },
+    { largeOnly: true },
+    { pathContains: "network" },
+    { since: "2026-06-05T00:00:00.000Z" },
+  ] as const) {
+    it(`returns identical records+summary for ${JSON.stringify(input)}`, () => {
+      const slow = queryAuditHandler(input, fakeAudit(PARITY), makeConfig());
+      const fast = queryAuditHandler(input, fakeAudit(PARITY), makeConfig(), seededDb());
+      expect(fast.records).toEqual(slow.records);
+      expect(fast.summary).toEqual(slow.summary);
+    });
+  }
+
+  it("textSearch runs FTS on the fast path and finds a cmd token", () => {
+    const res = queryAuditHandler({ textSearch: "uptime" }, fakeAudit(PARITY), makeConfig(), seededDb());
+    expect(res.records.map((r) => r.id)).toEqual(["b"]);
+  });
+
+  it("textSearch degrades to a JSONL substring scan when no DB is wired", () => {
+    const res = queryAuditHandler({ textSearch: "uptime" }, fakeAudit(PARITY), makeConfig());
+    expect(res.records.map((r) => r.id)).toEqual(["b"]);
   });
 });

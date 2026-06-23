@@ -312,7 +312,10 @@ export function buildDockerCpFromContainer(
   lxcTmp: string
 ): string {
   assertDockerName(container);
-  return `docker cp ${container}:${shSingleQuote(containerPath)} ${shSingleQuote(lxcTmp)}`;
+  // ADR-023 §4 — `-L` follows a symlinked SOURCE. Without it `docker cp` of a
+  // symlink (e.g. /etc/os-release → ../usr/lib/os-release) fails "invalid symlink"
+  // and the relay read errors out; with it the link target's bytes are copied.
+  return `docker cp -L ${container}:${shSingleQuote(containerPath)} ${shSingleQuote(lxcTmp)}`;
 }
 
 /** `docker cp <lxcTmp> <container>:<path>` — copy a file *into* the container. */

@@ -9,9 +9,11 @@ import {
   buildPctPullCommand,
   buildPctPushCommand,
   buildStatCommand,
+  buildFileExistsCommand,
   parseStatPerms,
   classifyPullError,
   assertContainerRunning,
+  containerFileExists,
   pullContainerFile,
   statContainerPerms,
   pushContainerFile,
@@ -42,6 +44,9 @@ describe("pctFiles — pure builders/parsers", () => {
     expect(buildStatCommand(101, "/etc/app.conf")).toBe(
       "pct exec 101 -- stat -c '%a %u %g' '/etc/app.conf'"
     );
+    expect(buildFileExistsCommand(101, "/etc/app.conf")).toBe(
+      "pct exec 101 -- test -e '/etc/app.conf'"
+    );
   });
 
   it("parseStatPerms parses mode/uid/gid or returns null", () => {
@@ -65,6 +70,29 @@ describe("pctFiles — I/O helpers (FakeTransport)", () => {
 
     t.setExecResult("pct status 102", { stdout: "status: stopped", stderr: "", exitCode: 0 });
     await expect(assertContainerRunning(t, 102, 5000)).rejects.toThrow(/not running.*stopped/i);
+  });
+
+  it("containerFileExists maps test -e exit code to a boolean", async () => {
+    const t = new FakeTransport();
+    t.setExecResult("pct exec 101 -- test -e '/etc/app.conf'", { stdout: "", stderr: "", exitCode: 0 });
+    t.setExecResult("pct exec 101 -- test -e '/etc/missing'", { stdout: "", stderr: "", exitCode: 1 });
+    expect(await containerFileExists(t, 101, "/etc/app.conf", 5000)).toBe(true);
+    expect(await containerFileExists(t, 101, "/etc/missing", 5000)).toBe(false);
+  });
+
+  it("pullContainerFile returns null on an absent file even when pct pull exits 0 (ADR-023 §1)", async () => {
+    // The dogfood regression: on some Proxmox builds `pct pull` of a missing source
+    // exits 0 and leaves the pre-created mktemp EMPTY. Existence must be decided by
+    // `test -e`, not by reading that empty temp — otherwise a missing file is misread
+    // as an existing 0-byte file (breaking new-file detection + the backup base).
+    const t = new FakeTransport();
+    t.setExecResult("pct exec 101 -- test -e '/etc/missing'", { stdout: "", stderr: "", exitCode: 1 });
+    // Even with a (buggy) exit-0 pull and an empty temp staged, content must be null:
+    t.setExecResult("mktemp -p '/tmp'", { stdout: "/tmp/tmp.EMPTY", stderr: "", exitCode: 0 });
+    t.setExecResult("pct pull 101 '/etc/missing' '/tmp/tmp.EMPTY'", { stdout: "", stderr: "", exitCode: 0 });
+    t.setFile("/tmp/tmp.EMPTY", "");
+    const { content } = await pullContainerFile(t, 101, "/etc/missing", "/tmp", 5000);
+    expect(content).toBeNull();
   });
 
   it("pullContainerFile threads the mktemp path, reads bytes, cleans up", async () => {
