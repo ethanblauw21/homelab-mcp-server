@@ -5,9 +5,13 @@ live node (`proxlab` / `10.0.0.10`). Each entry: the friction that motivated it,
 a sketch of the tool, and why it isn't just a flag on an existing tool. Not ADRs
 yet — raw candidates to triage.
 
-> **Status.** Items 1–4 below **shipped** (ADR-016 `docker_inspect`/`docker_stats`/
-> `compose_discover`; ADR-017 `describe_guest`) — kept here for the friction
-> record. Items 5–10 are the live backlog, ranked by proposed benefit.
+> **Status.** Items 1–7 below **shipped** — items 1–4 via ADR-016 (`docker_inspect`/
+> `docker_stats`/`compose_discover`) + ADR-017 (`describe_guest`); items 5–7 via
+> **ADR-020** (`service_status`/`service_logs`/`service_restart`, `tcp_ping`/
+> `http_probe`, `search_file_regex`) — all kept here for the friction record.
+> Items 8–10 remain the live backlog, each carrying an unresolved architectural
+> question (session state / the write-path invariant / external subsystems) that
+> kept it out of ADR-020.
 
 ---
 
@@ -73,7 +77,7 @@ reuses the census parsers. Read-only.
 
 ---
 
-## 5. `service_restart` / `service_status` / `service_logs` — systemd front door  ★ highest-value (new batch)
+## 5. `service_restart` / `service_status` / `service_logs` — systemd front door  ★ highest-value (new batch) → ADR-020 §1 ✅ SHIPPED
 
 **Friction.** systemd operations today go through raw `execute` (host) / `pct_exec`
 (LXC): the model writes `systemctl restart nginx`, `systemctl is-active`,
@@ -98,7 +102,7 @@ move that justified the whole `docker_*`/`guest_*` family; systemd is the obviou
 remaining gap. Tier: host units ⇒ root (like `execute`), LXC units ⇒ companion
 (like `pct_exec`); follow target kind à la `diff_config`/`revert_file`.
 
-## 6. `http_probe` / `tcp_ping` — assert a service actually answers
+## 6. `http_probe` / `tcp_ping` — assert a service actually answers → ADR-020 §2 ✅ SHIPPED
 
 **Friction.** After a `compose_redeploy` or `guest_restart` the model has no
 structured way to confirm the thing came back — it hand-writes `curl -sS -o
@@ -120,7 +124,7 @@ operator-directed at one endpoint. Read-only, not audited (like the other
 read tools). Honest limit: a host-side probe and an in-guest probe see different
 network namespaces — surface which one ran in the result.
 
-## 7. `search_file_regex` — the regex "balloon" scanner
+## 7. `search_file_regex` — the regex "balloon" scanner → ADR-020 §3 ✅ SHIPPED
 
 **Friction.** Reading a config to find one stanza means either `read_file` (whole
 file, or a guessed `offset`/`maxBytes` window) or dropping to `execute grep`.

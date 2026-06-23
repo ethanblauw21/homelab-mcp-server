@@ -38,6 +38,9 @@ describe("tool → tier registration", () => {
         "qm_agent_ping",
         "qm_list",
         "query_audit",
+        // ADR-020 §2 — host-side probes need no credentials, so they floor at observe.
+        "tcp_ping",
+        "http_probe",
       ].sort()
     );
   });
@@ -68,6 +71,12 @@ describe("tool → tier registration", () => {
     expect(toolsForTier("observe")).not.toContain("docker_inspect");
     expect(toolsForTier("operate")).not.toContain("compose_preflight");
     expect(toolsForTier("observe")).not.toContain("compose_preflight");
+    // ADR-020 §1/§3 — systemd front door + regex read floor at companion (an LXC
+    // target via pct exec); a host target additionally requires root at runtime.
+    expect(companion).toContain("service_status");
+    expect(companion).toContain("service_logs");
+    expect(companion).toContain("service_restart");
+    expect(companion).toContain("search_file_regex");
     // ADR-011 — guest edit tools share their write surface's companion floor.
     expect(companion).toContain("pct_edit_file");
     expect(companion).toContain("qm_edit_file");
