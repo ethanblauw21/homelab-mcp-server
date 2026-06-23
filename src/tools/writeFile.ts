@@ -218,7 +218,11 @@ export async function writeResolvedHost(
     );
   }
 
-  await audit.append(record);
+  // ADR-022 — hand the diff-on-write output (already computed above) to the
+  // audit.db projection via the extras side-channel. It is redacted + stored
+  // only in the derived index; the JSONL record is untouched. Binary writes have
+  // diff === null and contribute no diff column.
+  await audit.append(record, { diff: diff ? diff.diff : null });
 
   return {
     backupPath: backupResult.backupPath ?? backupResult.existingPath ?? null,
