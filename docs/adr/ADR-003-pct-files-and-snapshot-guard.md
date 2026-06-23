@@ -1,6 +1,6 @@
 # ADR-003: Container File Safety (`pct_read_file`/`pct_write_file`) + Snapshot Guard
 
-**Status:** Proposed
+**Status:** Accepted — implemented 2026-06-10
 **Date:** 2026-06-09
 **Deciders:** Ethan
 **Depends on:** ADR-001 (SSH MCP server), ADR-002 (census + redaction), TESTING-STRATEGY-ssh-mcp-server.md

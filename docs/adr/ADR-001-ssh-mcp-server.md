@@ -1,6 +1,6 @@
 # ADR-001: Custom Node/TypeScript SSH MCP Server for Homelab Access
 
-**Status:** Proposed
+**Status:** Accepted — implemented 2026-06-09 (foundational server; root-by-default partially superseded by ADR-007 permission tiers)
 **Date:** 2026-06-09
 **Deciders:** Ethan
 

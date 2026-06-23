@@ -1,6 +1,6 @@
 # ADR-004: Transport & Guardrail Hardening
 
-**Status:** Proposed
+**Status:** Accepted — implemented 2026-06-10
 **Date:** 2026-06-09
 **Deciders:** Ethan
 **Depends on:** ADR-001 (SSH MCP server), ADR-003 (confirm-gate pattern), TESTING-STRATEGY-ssh-mcp-server.md

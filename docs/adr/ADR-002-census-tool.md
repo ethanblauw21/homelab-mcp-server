@@ -1,6 +1,6 @@
 # ADR-002: Homelab Census Tool (`describe_homelab`) + Shared Redaction Module
 
-**Status:** Proposed
+**Status:** Accepted — implemented 2026-06-10
 **Date:** 2026-06-09
 **Deciders:** Ethan
 **Depends on:** ADR-001 (SSH MCP server), TESTING-STRATEGY-ssh-mcp-server.md

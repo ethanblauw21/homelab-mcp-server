@@ -1,6 +1,6 @@
 # ADR-006: Git-Backed Config History (Mirror Repo + Sweeps)
 
-**Status:** Proposed
+**Status:** Accepted — implemented 2026-06-10
 **Date:** 2026-06-10
 **Deciders:** Ethan
 **Depends on:** ADR-001 (backup/audit pipeline), ADR-002 (census drift — conceptual counterpart), ADR-003 (target descriptors, pct pull, running-guest precondition per amendment A3.1), ADR-007 (tiers — this feature is companion+)
