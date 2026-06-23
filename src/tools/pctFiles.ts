@@ -69,6 +69,15 @@ export function buildStatCommand(vmid: number, remotePath: string): string {
 }
 
 /**
+ * Existence probe for a container path (ADR-023 §1). `test -e` exits 0 iff the
+ * path exists — the authoritative new-vs-existing signal, used instead of relying
+ * on `pct pull`'s exit code (see pullContainerFile).
+ */
+export function buildFileExistsCommand(vmid: number, remotePath: string): string {
+  return `pct exec ${vmid} -- test -e ${shQuote(remotePath)}`;
+}
+
+/**
  * Parse `stat -c '%a %u %g'` output, e.g. "644 0 0". Returns null if it does not
  * match (caller falls back to new-file defaults rather than guessing).
  */
@@ -146,10 +155,31 @@ export interface PullResult {
   content: Buffer | null;
 }
 
+/** `test -e` existence probe; true iff the path exists inside the guest. */
+export async function containerFileExists(
+  transport: SshTransport,
+  vmid: number,
+  remotePath: string,
+  timeoutMs: number
+): Promise<boolean> {
+  const res = await transport.exec(buildFileExistsCommand(vmid, remotePath), timeoutMs);
+  return res.exitCode === 0;
+}
+
 /**
- * Pull a container file: mktemp on the node → `pct pull` → SFTP-read the temp →
- * remove the temp (always, even on failure). Returns `{ content: null }` only
- * when the guest is confirmed running and the pull fails file-not-found.
+ * Pull a container file: confirm existence → mktemp on the node → `pct pull` →
+ * SFTP-read the temp → remove the temp (always, even on failure). Returns
+ * `{ content: null }` when the file does not exist inside the guest.
+ *
+ * ADR-023 §1 — existence is decided by an explicit `test -e`, NOT by `pct pull`'s
+ * exit code. On some Proxmox builds `pct pull` of a missing source exits 0 and
+ * leaves the pre-created mktemp empty; reading that temp yielded an empty Buffer
+ * that was misread as an existing 0-byte file. That single defect corrupted
+ * new-file detection (`newFile:false`), the backup base (an empty backup ⇒ a
+ * later revert *empties* instead of deletes), large-change flagging, and the
+ * edit precondition ("oldString not found" on a missing file). The explicit probe
+ * also distinguishes "missing" from the legitimate "exists but 0 bytes", which an
+ * emptiness check alone cannot.
  */
 export async function pullContainerFile(
   transport: SshTransport,
@@ -158,10 +188,15 @@ export async function pullContainerFile(
   tempDir: string,
   timeoutMs: number
 ): Promise<PullResult> {
+  if (!(await containerFileExists(transport, vmid, remotePath, timeoutMs))) {
+    return { content: null };
+  }
   const tmp = await createNodeTemp(transport, tempDir, timeoutMs);
   try {
     const res = await transport.exec(buildPctPullCommand(vmid, remotePath, tmp), timeoutMs);
     if (res.exitCode !== 0) {
+      // Backstop: a race (file removed between the probe and the pull) still maps
+      // a file-not-found pull to the new-file signal rather than a hard error.
       if (classifyPullError(res.stderr) === "not-found") return { content: null };
       throw new Error(
         `pct pull failed for ${vmid}:${remotePath} (exit ${res.exitCode}): ${res.stderr.trim()}`

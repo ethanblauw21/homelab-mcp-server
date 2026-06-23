@@ -241,7 +241,9 @@ export async function httpProbeHandler(
 }
 
 function httpRequest(url: string, timeoutMs: number): Promise<CurlProbeOutput> {
-  return new Promise((resolve, reject) => {
+  // Always resolves — a connection-class failure becomes a status-0 result rather
+  // than a rejection (ADR-023 §2), so there is no reject path.
+  return new Promise((resolve) => {
     const start = Date.now();
     const isHttps = url.startsWith("https:");
     const lib = isHttps ? https : http;
@@ -264,6 +266,15 @@ function httpRequest(url: string, timeoutMs: number): Promise<CurlProbeOutput> {
     req.setTimeout(timeoutMs, () => {
       req.destroy(new Error(`request timed out after ${timeoutMs}ms`));
     });
-    req.on("error", (err) => reject(err));
+    // ADR-023 §2 — http_probe is a reachability/status check. A connection-class
+    // failure (refused/unresolved/timed-out/host-unreachable) is an honest "no",
+    // not an exception: resolve to status 0 / ok=false exactly like tcp_ping does
+    // for a closed port, instead of throwing. Throwing here previously escaped the
+    // handler and got decorated by the SSH-transport error mapper into a bogus
+    // "SSH connection refused … npm run doctor" message — this probe never touches
+    // SSH. Resolving keeps the failure off that path entirely.
+    req.on("error", () => {
+      resolve({ status: 0, bodyBytes: 0, latencyMs: Date.now() - start });
+    });
   });
 }

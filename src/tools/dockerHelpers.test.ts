@@ -302,7 +302,7 @@ describe("buildDockerLogsCommand", () => {
 describe("docker cp builders (slow-path relay)", () => {
   it("builds cp out of the container with name unquoted before the colon", () => {
     expect(buildDockerCpFromContainer("web", "/etc/conf", "/tmp/abc")).toBe(
-      "docker cp web:'/etc/conf' '/tmp/abc'"
+      "docker cp -L web:'/etc/conf' '/tmp/abc'"
     );
   });
 

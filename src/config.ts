@@ -233,6 +233,18 @@ const ConfigSchema = z.object({
       "/etc/mtab",
       "/etc/.pwd.lock",
       "/etc/lvm/cache/*",
+      // ADR-023 §E4 — pmxcfs (/etc/pve) volatile runtime state. These regenerate
+      // every few seconds (cluster heartbeat / RRD stats / version counter), so
+      // without excluding them every integrity scan reports them as perpetual
+      // "unexplained" drift and every sweep churns a commit. They are runtime
+      // state, not config worth versioning.
+      "/etc/pve/.version",
+      "/etc/pve/.rrd",
+      "/etc/pve/.clusterlog",
+      "/etc/pve/.vmlist",
+      "/etc/pve/.members",
+      "/etc/pve/.debug",
+      "**/lrm_status",
     ]),
     // Per-file size cap for sweeps; over-cap files are SKIPPED and noted in the
     // manifest, never silently dropped.

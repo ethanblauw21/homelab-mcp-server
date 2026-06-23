@@ -213,7 +213,12 @@ const tokenName = `mcp-${tier}`;
 const tokenId   = `${pveUser}!${tokenName}`;
 const apiBase   = `https://${nodeHost}:${apiPort}/api2/json`;
 const roleName  = "MCPOperate";
-const rolePrivs = "VM.Audit VM.PowerMgmt VM.Snapshot VM.Snapshot.Rollback VM.Config.Options Sys.Audit Datastore.Audit";
+// ADR-023 §6: VM.Backup + Datastore.AllocateSpace are required for guest_backup
+// (vzdump) to allocate and write an archive. Without them the token 403s on
+// /storage/<name> (Datastore.AllocateSpace) and the vzdump fallback — the ONLY
+// rollback path for snapshot-incapable guests (GPU passthrough / bind mounts /
+// dir storage) — is non-functional at companion. Re-run setup to update the role.
+const rolePrivs = "VM.Audit VM.PowerMgmt VM.Snapshot VM.Snapshot.Rollback VM.Config.Options VM.Backup Sys.Audit Datastore.Audit Datastore.AllocateSpace";
 
 // ---------------------------------------------------------------------------
 // Build provisioning blob

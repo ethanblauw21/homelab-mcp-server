@@ -59,11 +59,19 @@ describe("guest_start", () => {
   it("resolves the guest type and starts it, auditing the backend kind", async () => {
     const node = new FakeNode(guests);
     const out = await guestStartHandler({ vmid: 101 }, node, audit, cfg);
-    expect(out).toEqual({ vmid: 101, guestType: "lxc", task: "UPID:start" });
+    expect(out).toEqual({ vmid: 101, guestType: "lxc", task: "UPID:start", alreadyRunning: false });
     expect(node.calls).toEqual(["start:lxc:101"]);
     expect(records[0]!.tool).toBe("guest_start");
     expect(records[0]!.note).toContain("via api");
     expect(records[0]!.isLargeChange).toBeFalsy();
+  });
+
+  it("is idempotent: an already-running guest is a clean no-op, no startGuest call (ADR-023 §E2)", async () => {
+    const node = new FakeNode(guests);
+    const out = await guestStartHandler({ vmid: 100 }, node, audit, cfg); // 100 is already running
+    expect(out).toEqual({ vmid: 100, guestType: "qemu", task: "", alreadyRunning: true });
+    expect(node.calls).toEqual([]); // startGuest never called → no raw 500
+    expect(records[0]!.note).toContain("already running");
   });
 
   it("errors on an unknown vmid", async () => {
