@@ -49,6 +49,7 @@ import { HealthCheckInputSchema, healthCheckHandler, type HealthCheckResult } fr
 import { SnapshotStore } from "./ui/snapshotStore.js";
 import { TailLogInputSchema, tailLogHandler } from "./tools/tailLog.js";
 import { QueryAuditInputSchema, queryAuditHandler } from "./tools/queryAudit.js";
+import { AuditDb, openAuditDb } from "./audit/auditDb.js";
 import { DiffConfigInputSchema, diffConfigHandler } from "./tools/diffConfig.js";
 import { ConfigHistory } from "./history/configHistory.js";
 import { ConfigSweepInputSchema, configSweepHandler } from "./tools/configSweep.js";
@@ -112,6 +113,19 @@ if (config.tier.rootEnabled) {
 
 const sshTransport = new Ssh2Transport(config.ssh);
 const audit = new AuditLog(config.audit.logPath);
+// ADR-022 — the derived audit.db projection. Mirror each append into it (best-
+// effort, fail-soft — see AuditLog.append), giving query_audit an indexed + FTS
+// fast path. The JSONL stays the system of record; on first run we backfill the
+// index from existing history so prior records are immediately searchable.
+let auditDb: AuditDb | undefined;
+if (config.audit.dbEnabled) {
+  auditDb = openAuditDb(config);
+  audit.setProjector(auditDb);
+  if (auditDb.count() === 0) {
+    const existing = audit.readAll();
+    if (existing.length > 0) auditDb.rebuildFrom(existing);
+  }
+}
 const backupStore = new BackupStore(config.backup);
 const censusStore = new CensusStore(config.census.censusDir, config.census.snapshotRetentionCap);
 // ADR-006 — config-history mirror repo. Initialized below (detects git; stays
@@ -775,7 +789,7 @@ register(
   },
   async (input) => {
     try {
-      const result = queryAuditHandler(input, audit, config);
+      const result = queryAuditHandler(input, audit, config, auditDb);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }
@@ -1022,6 +1036,7 @@ await server.connect(stdioTransport);
 
 process.on("SIGINT", async () => {
   integrityStore?.close();
+  auditDb?.close();
   await sshTransport.close();
   process.exit(0);
 });

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { AuditLog } from "../audit/log.js";
 import type { AuditRecord, AuditTool } from "../audit/record.js";
+import type { AuditDb } from "../audit/auditDb.js";
 import type { Config } from "../config.js";
 
 export const QueryAuditInputSchema = z.object({
@@ -17,6 +18,15 @@ export const QueryAuditInputSchema = z.object({
   hashScopeContains: z.string().optional().describe("Substring match on the record hashScope"),
   unknownScopeOnly: z.boolean().optional().describe('Only records with hashScope "unknown" (exec-family)'),
   hashEquals: z.string().optional().describe("Exact match on the record's beforeHash or afterHash"),
+  // ADR-022 — free-text search. With the audit.db projection present this runs the
+  // FTS5 index over cmd + redacted diff + path + note (the diff that diff-on-write
+  // computed and used to discard). Without the DB it degrades to a plain substring
+  // scan over cmd/path/note (no diff text in the JSONL fallback). Combines with the
+  // structured filters above (AND).
+  textSearch: z
+    .string()
+    .optional()
+    .describe("Full-text search over cmd/diff/path/note (FTS5 when audit.db is present)"),
   limit: z.number().int().positive().optional().describe("Max records returned (default 50, capped)"),
   // ADR-017 §1 — opt-in `cmd` projection. The exec-family records carry the full
   // command string; for a wide query that is the bulk of the payload. `cmdMaxChars`
@@ -120,18 +130,44 @@ export function projectAuditCmd(
 }
 
 /**
+ * Plain-substring fallback for `textSearch` when the audit.db FTS index is absent
+ * (ADR-022). Case-sensitive over the in-record text the JSONL carries — cmd, path,
+ * note (the diff lives only in the projection, so it cannot be searched here). This
+ * is the degraded-but-functional contract: the fast path is strictly richer.
+ */
+export function fallbackTextFilter(records: AuditRecord[], text: string): AuditRecord[] {
+  if (text === "") return records;
+  return records.filter(
+    (r) =>
+      (r.cmd ?? "").includes(text) ||
+      (r.path ?? "").includes(text) ||
+      (r.note ?? "").includes(text)
+  );
+}
+
+/**
  * `query_audit` — the audit log's first read consumer beyond revert (ADR-005
- * §Part 2). Entirely local: pure filter + summary over `readAll()`. Records are
- * newest-first and bounded by `limit`; the summary describes the FULL filtered
- * set, not just the returned page. Read-only, not audited.
+ * §Part 2), upgraded in place (ADR-022 §1). FAST PATH: when the `audit.db`
+ * projection is present, structured filters resolve as indexed lookups and
+ * `textSearch` runs the FTS5 index. FALLBACK: when it is absent/disabled, the pure
+ * `filterAuditRecords` JSONL scan answers exactly as before (with a substring
+ * `textSearch`). Both paths feed the SAME summary/paging/projection below, so the
+ * result shape is identical — the DB is a speed/recall upgrade, never a contract
+ * change. Read-only, not audited.
  */
 export function queryAuditHandler(
   input: QueryAuditInput,
   audit: AuditLog,
-  cfg: Config
+  cfg: Config,
+  auditDb?: AuditDb
 ): QueryAuditResult {
-  const all = audit.readAll();
-  const filtered = filterAuditRecords(all, input);
+  let filtered: AuditRecord[];
+  if (auditDb) {
+    filtered = auditDb.queryRecords(input, input.textSearch);
+  } else {
+    filtered = filterAuditRecords(audit.readAll(), input);
+    if (input.textSearch !== undefined) filtered = fallbackTextFilter(filtered, input.textSearch);
+  }
   const summary = summarizeAuditRecords(filtered);
 
   const limit = Math.min(
