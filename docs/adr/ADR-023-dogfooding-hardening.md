@@ -1,6 +1,6 @@
 # ADR-023: Dogfooding Hardening — Bug Fixes & Consistency Pass from a Live-Node Stress Test
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-06-23
 **Deciders:** Ethan
 **Depends on:** ADR-004 (transport/guardrail/exit semantics), ADR-005 (`tail_log`/probes patterns), ADR-007 (tiers + MCPOperate role), ADR-008 (`guest_backup` vzdump fallback), ADR-009 (integrity watched set), ADR-011 (edit-tools over write-tools), ADR-020 (probes/regex/systemd front door)
@@ -87,6 +87,29 @@ The dogfooding brief asked for redundancy in the tool count. The surface is most
 A lighter view-overlap also exists in the docker-roster trio (`describe_guest[docker]` ⊂ `docker_ps` ⊂ `compose_discover`) — three structurings of the running-container set — but each answers a distinct operator question (inventory / ops / deploy-target), so no merge is proposed there.
 
 **Recommendation:** (a) — keep `service_logs` but annotate it as a tier-policy alias; the tier asymmetry is load-bearing and a flag would bury it. Revisit if the tool count becomes a maintenance burden.
+
+## Implementation status (2026-06-23)
+
+Shipped in this branch and verified; full unit suite green (1265 tests / 97 files), build + lint clean.
+
+| ID | Change | State | Verification |
+|---|---|---|---|
+| **B1** | `pullContainerFile` decides existence with an explicit `test -e`, not `pct pull`'s unreliable exit code; missing → `null` | **Shipped + tested** | Live: `pct_read_file(100, /nonexistent)` → "File not found inside container 100" (was empty). Regression tests in `pctFiles.test.ts`. |
+| **B2** | `http_probe` connection-class failure resolves to `{status:0, ok:false}` instead of throwing an SSH-misattributed error | **Shipped** | Live: `http_probe(:9999)` → `{status:0, ok:false, from:"host"}` (was an SSH error throw). |
+| **B3** | `search_file_regex` `clamp` floors `context` at 0 so `context:0` is honored | **Shipped + tested** | Live: `search_file_regex(..., context:0)` → `after:[]` (was 1 line). |
+| **B4** | `docker_read_file` relay uses `docker cp -L` to follow symlinks | **Shipped + tested** | Live: `docker_read_file(101, qbittorrent, /etc/os-release)` → reads bytes (was "invalid symlink"). |
+| **B6** | `setup.mjs` grants the `MCPOperate` role `VM.Backup` + `Datastore.AllocateSpace` for vzdump | **Shipped + re-provisioned + verified live** | After re-running setup with `-RotateToken`, `guest_backup(100, snapshot)` succeeded (archive `mcp-20260623-123157`, task UPID returned) — **no 403**. The snapshot-incapable guest now has a working rollback path. |
+| **E2** | `guest_start` on an already-running guest is idempotent (`{alreadyRunning:true}`, no `startGuest` call) | **Shipped + tested** | Unit test pins the no-op; avoids the raw API 500. |
+| **E4** | pmxcfs volatile runtime files (`.rrd`/`.version`/`lrm_status`/…) added to `excludePatterns` | **Shipped** | Removes perpetual benign `unexplained` integrity drift. |
+
+### Deferred to a follow-up (NOT implemented here)
+
+These were left uncoded **deliberately** — each needs a live guest-cycle re-test or is a larger surface change, and shipping them blind would risk the production LXCs:
+
+- **B5 — `snapshot_rollback` false restart-failure (DEFERRED).** The SSH-routed post-rollback restart reports `failed to restart … (exit null)` even though the guest *does* come back (confirmed during dogfooding: `pct_list` running, DNS up, service active). The fix (Decision 5 — verify run-state by polling `status` instead of trusting the start command's `exitCode`) touches the stop→rollback→restart orchestration and **cannot be validated without a live rollback cycle on a production guest**, so it is held until a maintenance window or a disposable test guest exists. Until then the false-failure message is cosmetic — rollback itself works.
+- **E1** uniform "guest not found" across `snapshot_list`/`docker_*`/`compose_*` (shared precheck).
+- **E3 / E5 / E6 / E7** — empty-`sections` semantics, a `guest_backup_delete` verb, `compose_preflight` own-port noise, and `describe_homelab` `compareToPrevious`-with-`sections` drift.
+- **Decision 9 (redundancy)** — recommendation (a): keep `service_logs` as an annotated tier-policy alias; no removal.
 
 ## Consequences
 
