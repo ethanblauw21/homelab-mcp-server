@@ -9,13 +9,16 @@ yet — raw candidates to triage.
 > `docker_stats`/`compose_discover`) + ADR-017 (`describe_guest`); items 5–7 via
 > **ADR-020** (`service_status`/`service_logs`/`service_restart`, `tcp_ping`/
 > `http_probe`, `search_file_regex`) — all kept here for the friction record.
-> Items 8–10 remain the live backlog, each carrying an unresolved architectural
-> question (session state / the write-path invariant / external subsystems) that
-> kept it out of ADR-020.
+> Item 8 (rollback circuit breaker) is now **specced as ADR-021** — its lone
+> blocker (the "what is a session" question) resolved by the observation that a
+> stdio MCP server *is* one process = one session. Items **9–10 remain the live
+> backlog** as genuine large lifts: 9 needs an embedding dependency and conflicts
+> with ADR-006's "git never on the write's critical path" invariant; 10 depends
+> on two indexer subsystems that do not exist in this repo. Both stay ranked here.
 
 ---
 
-## 1. `docker_inspect` — structured container introspection  ★ highest-value
+## 1. `docker_inspect` — structured container introspection  ★ highest-value → ADR-016 ✅ SHIPPED
 
 **Friction.** The audit log is the smoking gun: **227 of 257 records are
 `pct_exec` running hand-rolled `docker inspect … --format '{{…}}'` / `docker
@@ -38,7 +41,7 @@ Charset-validate the container name; reuse `dockerHelpers.ts` parsers.
 **Why not a flag.** `docker_ps` is a fleet-level list; this is a single-container
 deep view with a different parse shape and a redaction policy env vars demand.
 
-## 2. `docker_stats` — point-in-time resource snapshot
+## 2. `docker_stats` — point-in-time resource snapshot → ADR-016 ✅ SHIPPED
 
 **Friction.** Same audit pattern: `docker stats --no-stream --format … | sort |
 tail` to find the memory hogs. Hand-rolled, unstructured.
@@ -48,7 +51,7 @@ tail` to find the memory hogs. Hand-rolled, unstructured.
 by mem desc. Pairs with `health_check` for a guest-level resource view. Could
 also fold into `docker_ps` as an opt-in `stats: true` — decide at ADR time.
 
-## 3. `compose_discover` — read-only compose project map
+## 3. `compose_discover` — read-only compose project map → ADR-016 ✅ SHIPPED
 
 **Friction.** Repeated `cd /var/lib/docker/volumes/portainer_data/_data/compose/1
 && grep -iE … docker-compose.yml` to find image tags / a service's block. The
@@ -63,7 +66,7 @@ image, ports}]}]`. Turns the "where is the compose file and what's in it" dance
 into one structured call, and feeds the `composePath` that `compose_redeploy` /
 `compose_preflight` require. Read-only, companion.
 
-## 4. `describe_guest(vmid)` — single-guest focused census
+## 4. `describe_guest(vmid)` — single-guest focused census → ADR-017 ✅ SHIPPED
 
 **Friction.** `describe_homelab depth:full` re-runs every probe across the whole
 node (all guests, all sections) even when the operator is working one container.
@@ -145,7 +148,7 @@ first, then return just the neighborhood. It's the read-side analogue of
 `edit_file`'s find-and-replace front door (ADR-011), and the surgical-read tool
 ADR-017's budgeting doctrine implies but doesn't yet provide.
 
-## 8. rollback circuit breaker — the "panicked agent" guard
+## 8. rollback circuit breaker — the "panicked agent" guard → ADR-021 ✅ SPECCED
 
 **Friction.** An agent that hits an error, blindly `revert_file`/`snapshot_rollback`s,
 re-runs the same faulty command, and rolls back again burns tokens in a loop and
@@ -158,11 +161,15 @@ instead of executing, until explicitly reset. Lives at the guardrail layer,
 audited as a refusal.
 
 **Why not a flag.** It's a *cross-call* safety policy, not a parameter on any one
-tool — closest kin is the ADR-004 denylist/confirm tripwires. **Open question:**
+tool — closest kin is the ADR-004 denylist/confirm tripwires. ~~**Open question:**
 the stdio server keeps little per-session state today; "session" and "reset"
-need defining (in-memory counter for the process lifetime? persisted?). Narrower
-than 5–7 — one specific failure mode — but cheap and squarely in the
-guardrail-doctrine wheelhouse.
+need defining~~ **Resolved in ADR-021:** a stdio MCP server is one client over
+one long-lived process, so **session = process lifetime** — an in-memory
+per-target counter is exactly per-session, and a restart is the natural reset.
+The breaker ships as a *guardrail* (per-target sliding window, audited refusal,
+loud `overrideCircuitBreaker` escape hatch), not a tool — no new
+`TOOL_MIN_TIER` row. Narrower than 5–7 — one specific failure mode — but cheap
+and squarely in the guardrail-doctrine wheelhouse.
 
 ## 9. `query_semantic_history` — the semantic time machine
 
@@ -209,7 +216,8 @@ into many `pct_exec` SSH round-trips**. Tools 1–3 each collapse a recurring ba
 loop into one structured, quoting-safe, token-cheap call — that's the throughline.
 The new batch extends it on two axes: **5–6** give *structured outcomes* (clean
 audit rows, pass/fail probes) where today only free-form `execute` exists, and
-**7** extends the token-economy doctrine to the read side. **8–10** are
-higher-ambition / higher-cost and each carry an unresolved architectural
-question (session state, the write-path invariant, external subsystems)
-flagged inline.
+**7** extends the token-economy doctrine to the read side. **8** (now ADR-021)
+is the cross-call guardrail — its session-state question resolved (process =
+session). **9–10** remain higher-ambition / higher-cost large lifts, each
+carrying an unresolved architectural question (the ADR-006 write-path invariant,
+external indexer subsystems) flagged inline.
