@@ -75,6 +75,21 @@ import {
 import { ComposeRedeployInputSchema, composeRedeployHandler } from "./tools/composeRedeploy.js";
 import { ComposePreflightInputSchema, composePreflightHandler } from "./tools/composePreflightHandler.js";
 import {
+  ServiceStatusInputSchema,
+  serviceStatusHandler,
+  ServiceLogsInputSchema,
+  serviceLogsHandler,
+  ServiceRestartInputSchema,
+  serviceRestartHandler,
+} from "./tools/serviceTools.js";
+import {
+  TcpPingInputSchema,
+  tcpPingHandler,
+  HttpProbeInputSchema,
+  httpProbeHandler,
+} from "./tools/probes.js";
+import { SearchFileRegexInputSchema, searchFileRegexHandler } from "./tools/searchFileRegex.js";
+import {
   ComputeTreeInputSchema,
   computeTreeHandler,
   VerifyIntegrityInputSchema,
@@ -921,6 +936,114 @@ register(
   async (input) => {
     try {
       const result = await composePreflightHandler(input, sshTransport, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+// ADR-020 §1 — systemd front door (service_status/_logs/_restart). Floor is
+// companion (an LXC unit via pct exec); a HOST unit additionally requires root,
+// asserted at runtime in the handlers via assertTargetTier. The payoff is the
+// clean, parse-free audit row (service_restart) a free-form execute can't give.
+register(
+  "service_status",
+  {
+    description:
+      "Parsed systemd unit status {active, sub, enabled, since, mainPid} via systemctl show. Host unit " +
+      "(root tier) or an LXC unit (vmid, companion). Read-only, not audited.",
+    inputSchema: ServiceStatusInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await serviceStatusHandler(input, sshTransport, config, activeTier);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "service_logs",
+  {
+    description:
+      "Bounded, ALWAYS-redacted journal tail for a systemd unit (tail_log with a unit-only contract). Host " +
+      "unit (root tier) or an LXC unit (vmid, companion). since accepts ISO or '<n> (min|hour|day) ago'.",
+    inputSchema: ServiceLogsInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await serviceLogsHandler(input, sshTransport, config, activeTier);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "service_restart",
+  {
+    description:
+      "Restart a systemd unit (systemctl restart). Confirm-gated (interrupts the running service); host unit " +
+      "(root tier) or an LXC unit (vmid, companion). Audited with a structured {tool, unit, vmid} record.",
+    inputSchema: ServiceRestartInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await serviceRestartHandler(input, sshTransport, audit, config, activeTier);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+// ADR-020 §2 — reachability probes. Host-side by default (Node net/http, zero
+// credentials, no node round-trip) ⇒ observe; http_probe's fromVmid runs inside
+// an LXC via pct exec and asserts companion at runtime. Read-only, not audited.
+register(
+  "tcp_ping",
+  {
+    description:
+      "One TCP connect from the Windows host to host:port → {reachable, latencyMs}. No payload sent, zero " +
+      "credentials. The reachability check that pairs with a lifecycle/deploy verb. Read-only, not audited.",
+    inputSchema: TcpPingInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await tcpPingHandler(input, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "http_probe",
+  {
+    description:
+      "Probe an http(s) URL → {status, ok, latencyMs, bodyBytes, from}. expectStatus makes ok an assertion. " +
+      "Default probes from the Windows host (observe); fromVmid runs curl INSIDE an LXC (companion) to reach " +
+      "container-network services. NOT a TLS-trust check (self-signed certs are accepted). Read-only, not audited.",
+    inputSchema: HttpProbeInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await httpProbeHandler(input, sshTransport, config, activeTier);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+// ADR-020 §3 — content-addressed regex read (grep -C balloon). Floor companion
+// (LXC/Docker path); a HOST path requires root, asserted via assertTargetTier.
+register(
+  "search_file_regex",
+  {
+    description:
+      "Search a file for an extended regex and return each match plus N context lines each side (grep -C " +
+      "balloon): [{lineNo, matchLine, before, after}], capped with a truncated marker. Content-addressed " +
+      "windowing — find first, return only the neighborhood (vs read_file's blind byte window). Host path " +
+      "(root), LXC path (vmid, companion), or Docker path (vmid+container, companion). Read-only, not audited.",
+    inputSchema: SearchFileRegexInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await searchFileRegexHandler(input, sshTransport, config, activeTier);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }

@@ -132,6 +132,23 @@ export const TOOL_MIN_TIER: Record<string, Tier> = {
   qm_edit_file: "companion",
   docker_edit_file: "companion",
 
+  // ADR-020 §1 — systemd front door. Floor is companion (an LXC unit via pct exec);
+  // a HOST unit additionally requires root via assertTargetTier (the whole trio,
+  // including read-only status/logs, follows the target kind — one tier story).
+  service_status: "companion",
+  service_logs: "companion",
+  service_restart: "companion",
+
+  // ADR-020 §2 — reachability probes. Host-side by default (Node net/http, zero
+  // credentials), so observe. http_probe's fromVmid runs inside an LXC via pct
+  // exec and asserts companion at runtime; tcp_ping is host-only.
+  tcp_ping: "observe",
+  http_probe: "observe",
+
+  // ADR-020 §3 — content-addressed regex read. Floor companion (LXC/Docker path
+  // via pct/docker exec); a HOST path requires root via assertTargetTier.
+  search_file_regex: "companion",
+
   // root — everything on the host (flag-gated; MCP-enforced).
   execute: "root",
   read_file: "root",
