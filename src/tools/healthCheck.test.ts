@@ -159,7 +159,7 @@ describe("healthCheckHandler", () => {
 });
 
 describe("healthCheckHandler — API tier path (ADR-007 §6, observe)", () => {
-  it("serves node/storage/updates via NodeOps and marks exec-bound sections unavailable", async () => {
+  it("serves node/storage via NodeOps; updates joins exec-bound sections as unavailable", async () => {
     // A throwing SSH transport proves the API path never touches SSH below companion.
     const res = await healthCheckHandler({}, new FakeTransport(), makeConfig(), fakeNode(), "observe");
 
@@ -167,14 +167,33 @@ describe("healthCheckHandler — API tier path (ADR-007 §6, observe)", () => {
     expect(res.status).toBe("crit");
     expect(res.findings.find((f) => f.check === "memory")?.status).toBe("crit");
     expect(res.findings.find((f) => f.check === "store:local")).toBeDefined();
-    expect(res.findings.find((f) => f.check === "updates")?.finding).toContain("2 pending");
+    // `updates` is NOT served via the API (apt/update needs Sys.Modify) — no finding.
+    expect(res.findings.find((f) => f.check === "updates")).toBeUndefined();
 
-    // exec-bound sections → structured status, not error
+    // updates + exec-bound sections → structured unavailable status, not error
     expect(res.unavailable).toEqual([
+      { section: "updates", unavailableAtTier: "companion" },
       { section: "guests", unavailableAtTier: "companion" },
       { section: "units", unavailableAtTier: "companion" },
     ]);
     expect(res.errors).toEqual([]);
+  });
+
+  it("does not call the Sys.Modify-gated apt/update API below companion (live 403 regression)", async () => {
+    // Live finding (proxlab): GET .../apt/update 403s for tier tokens (lacks Sys.Modify).
+    // The fix must not even attempt it — no recurring section error.
+    let aptCalled = false;
+    const node = fakeNode({
+      async aptUpdates(): Promise<AptUpdateInfo[]> {
+        aptCalled = true;
+        throw new Error("API permission denied (403) — Permission check failed (/nodes/x, Sys.Modify)");
+      },
+    });
+    const res = await healthCheckHandler({ sections: ["updates"] }, new FakeTransport(), makeConfig(), node, "operate");
+
+    expect(aptCalled).toBe(false);
+    expect(res.errors).toEqual([]);
+    expect(res.unavailable).toEqual([{ section: "updates", unavailableAtTier: "companion" }]);
   });
 
   it("isolates an API section failure (403) as a recorded error", async () => {
