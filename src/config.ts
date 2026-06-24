@@ -207,6 +207,16 @@ const ConfigSchema = z.object({
       "/sys",
       "/dev",
     ]),
+    // ADR-021 — rollback circuit breaker. Cross-call thrash-loop guard on the
+    // rollback family (revert_file/snapshot_rollback/guest_backup_restore), keyed
+    // per target, sliding window. enabled=false is a kill switch (pure no-op).
+    rollbackBreaker: z
+      .object({
+        enabled: z.boolean().default(true),
+        limit: z.number().int().positive().default(3),
+        windowMs: z.number().int().positive().default(600_000),
+      })
+      .default({}),
   }),
   // ADR-006 — git-backed config history (mirror repo + sweeps).
   history: z.object({
@@ -505,6 +515,18 @@ function loadConfig(): Config {
       pathDenylist: process.env.PATH_DENYLIST
         ? process.env.PATH_DENYLIST.split(",")
         : undefined,
+      // ADR-021 — undefined inner fields fall through to the schema defaults.
+      rollbackBreaker: {
+        enabled: process.env.ROLLBACK_BREAKER_ENABLED
+          ? process.env.ROLLBACK_BREAKER_ENABLED === "true"
+          : undefined,
+        limit: process.env.ROLLBACK_BREAKER_LIMIT
+          ? parseInt(process.env.ROLLBACK_BREAKER_LIMIT, 10)
+          : undefined,
+        windowMs: process.env.ROLLBACK_BREAKER_WINDOW_MS
+          ? parseInt(process.env.ROLLBACK_BREAKER_WINDOW_MS, 10)
+          : undefined,
+      },
     },
     history: {
       configHistoryDir:

@@ -23,6 +23,7 @@ import type { NodeOps, GuestType } from "../node/nodeOps.js";
 import type { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
 import { buildAuditRecord } from "../audit/record.js";
+import { RollbackBreaker, rollbackTargetKey, breakerRefusal } from "../guardrails/rollbackBreaker.js";
 import { generateBackupNote, isMcpArchive, planArchiveEviction, type ArchiveInfo } from "./backups.js";
 
 async function resolveType(node: NodeOps, vmid: number): Promise<GuestType> {
@@ -110,6 +111,12 @@ export const GuestBackupRestoreInputSchema = z.object({
     .boolean()
     .default(false)
     .describe("If the guest is running, stop it, restore, then restart it. If false, a running guest is refused."),
+  overrideCircuitBreaker: z
+    .boolean()
+    .optional()
+    .describe(
+      "ADR-021: bypass the rollback circuit breaker for this one call (a deliberate, audited act, distinct from confirm)."
+    ),
 });
 
 export type GuestBackupRestoreInput = z.infer<typeof GuestBackupRestoreInputSchema>;
@@ -118,7 +125,8 @@ export async function guestBackupRestoreHandler(
   input: GuestBackupRestoreInput,
   node: NodeOps,
   audit: AuditLog,
-  cfg: Config
+  cfg: Config,
+  breaker?: RollbackBreaker
 ): Promise<{ vmid: number; guestType: GuestType; archive: string; restarted: boolean }> {
   if (!input.confirm) {
     throw new Error(
@@ -126,6 +134,29 @@ export async function guestBackupRestoreHandler(
         "(disk, config) with the archive's contents — everything since the archive is lost. Re-issue with confirm: true."
     );
   }
+
+  // ADR-021 — rollback circuit breaker, keyed on the guest. The heaviest rollback
+  // verb, so a loop here is the costliest; refuse (audited) past the window limit
+  // unless the caller deliberately overrides.
+  const breakerKey = rollbackTargetKey({ kind: "guest", vmid: input.vmid });
+  if (breaker && !input.overrideCircuitBreaker) {
+    const verdict = breaker.check(breakerKey, Date.now());
+    if (verdict.tripped) {
+      const { message, circuitBreaker } = breakerRefusal(breakerKey, verdict);
+      await audit.append(
+        buildAuditRecord({
+          tool: "guest_backup_restore",
+          host: cfg.ssh.host,
+          vmid: input.vmid,
+          refused: true,
+          circuitBreaker,
+          note: message,
+        })
+      );
+      throw new Error(message);
+    }
+  }
+
   const storage = cfg.backup.nodeBackupStorage;
   const type = await resolveType(node, input.vmid);
 
@@ -168,6 +199,7 @@ export async function guestBackupRestoreHandler(
       host: cfg.ssh.host,
       vmid: input.vmid,
       isLargeChange: true,
+      ...(input.overrideCircuitBreaker && { circuitBreakerOverridden: true }),
       note:
         `Restored ${type} ${input.vmid} from ${input.archive} via ${node.kind}; ` +
         `prior run-state: ${wasRunning ? "running (restarted)" : "stopped"}.`,

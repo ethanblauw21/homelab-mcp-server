@@ -1,6 +1,6 @@
 # ADR-021: The Rollback Circuit Breaker — a Cross-Call Guardrail Against Thrash Loops
 
-**Status:** Proposed
+**Status:** Accepted (implemented 2026-06-23)
 **Date:** 2026-06-22
 **Deciders:** Ethan
 **Depends on:** ADR-003 (the rollback verbs `revert_file`/`snapshot_rollback`; backup/target-descriptor model), ADR-004 (the denylist/confirm **tripwire doctrine** + the pure-guardrail-function pattern this matches), ADR-008 (`guest_backup_restore` — the third rollback verb), ADR-015 (auditStats silent-failure signals — the refusal row becomes one), ADR-020 (which deferred this exact item, naming the session-state open question)
@@ -89,3 +89,7 @@ On a trip the handler **refuses before executing** and **writes an audit record 
 - **`audit/record.ts`** — extend the record/`AuditTool` shape to carry the refusal (`refused: true`, `circuitBreaker {…}`) and the override flag. This is the only schema touch; the metrics layer (ADR-015 `auditStats`) can then count breaker trips as a silent-failure/refusal signal.
 - **`config.ts`** — add `guardrails.rollbackBreaker { enabled, limit, windowMs }` with env overrides (`ROLLBACK_BREAKER_ENABLED`/`_LIMIT`/`_WINDOW_MS`), matching the existing `tools.*`/`guardrails.*` pattern.
 - **Docs:** on implementation, note the breaker in CLAUDE.md (the "Transport & guardrail trust model" / guardrails section, not the tool table — it is not a tool) and tick `tool-ideas.md` item 8 with the ADR-021 forward pointer (mirroring the item 1–7 → ADR-016/017/020 convention).
+
+## As-built (2026-06-23)
+
+Implemented exactly as specified above; no design deltas. Files: new `guardrails/rollbackBreaker.ts` (pure `evaluateRollbackBreaker`/`rollbackTargetKey`/`breakerRefusal` + the stateful `RollbackBreaker` shell with an injected `now`) and `guardrails/rollbackBreaker.test.ts` (14 cases over the pure core + shell); `audit/record.ts` extended with `refused`/`circuitBreaker`/`circuitBreakerOverridden`; `config.ts` `guardrails.rollbackBreaker` + the three env overrides; one `RollbackBreaker` singleton in `index.ts` injected into all three handlers; the breaker check + refusal-audit + override-flag wired into `revertFile.ts`, `snapshotTools.ts`, `backupTools.ts`. Handler-level integration coverage lives in `revertFile.test.ts` (refusal row, override bypass, distinct-target independence). Two implementation choices worth recording: (1) the breaker param is **optional** on each handler (`breaker?`), matching the existing `history?` precedent — `index.ts` always injects it, but a handler unit test may omit it; absent ⇒ the check is skipped (no silent enforcement gap, since the live wiring always passes it). (2) An **overridden** call deliberately does **not** record a timestamp (the override skips `check` entirely), so a subsequent non-override call sees the still-hot window and re-trips — each override is its own loud, audited decision rather than a quiet reset of the counter. Full unit suite green (1284 tests).

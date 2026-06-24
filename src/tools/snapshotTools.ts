@@ -3,6 +3,7 @@ import type { SshTransport } from "../ssh/transport.js";
 import type { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
 import { buildAuditRecord } from "../audit/record.js";
+import { RollbackBreaker, rollbackTargetKey, breakerRefusal } from "../guardrails/rollbackBreaker.js";
 import { parsePctList } from "./pctHelpers.js";
 import {
   type GuestType,
@@ -172,6 +173,12 @@ export const SnapshotRollbackInputSchema = z.object({
     .boolean()
     .default(false)
     .describe("If the guest is running, stop it, roll back, then restart it. If false, a running guest is refused."),
+  overrideCircuitBreaker: z
+    .boolean()
+    .optional()
+    .describe(
+      "ADR-021: bypass the rollback circuit breaker for this one call (a deliberate, audited act, distinct from confirm)."
+    ),
 });
 
 export type SnapshotRollbackInput = z.infer<typeof SnapshotRollbackInputSchema>;
@@ -180,7 +187,8 @@ export async function snapshotRollbackHandler(
   input: SnapshotRollbackInput,
   transport: SshTransport,
   audit: AuditLog,
-  cfg: Config
+  cfg: Config,
+  breaker?: RollbackBreaker
 ): Promise<{ name: string; guestType: GuestType; restarted: boolean }> {
   if (!input.confirm) {
     throw new Error(
@@ -193,6 +201,27 @@ export async function snapshotRollbackHandler(
       `Refusing to roll back to "${input.name}": only server-managed (mcp-*) snapshots may be rolled back. ` +
         "Roll back to a user snapshot manually via the Proxmox UI."
     );
+  }
+
+  // ADR-021 — rollback circuit breaker, keyed on the guest. Refuse (audited) a
+  // thrash loop of rollbacks against one guest unless deliberately overridden.
+  const breakerKey = rollbackTargetKey({ kind: "guest", vmid: input.vmid });
+  if (breaker && !input.overrideCircuitBreaker) {
+    const verdict = breaker.check(breakerKey, Date.now());
+    if (verdict.tripped) {
+      const { message, circuitBreaker } = breakerRefusal(breakerKey, verdict);
+      await audit.append(
+        buildAuditRecord({
+          tool: "snapshot_rollback",
+          host: cfg.ssh.host,
+          vmid: input.vmid,
+          refused: true,
+          circuitBreaker,
+          note: message,
+        })
+      );
+      throw new Error(message);
+    }
   }
 
   const timeoutMs = cfg.ssh.commandTimeoutMs;
@@ -238,6 +267,7 @@ export async function snapshotRollbackHandler(
     host: cfg.ssh.host,
     vmid: input.vmid,
     isLargeChange: true,
+    ...(input.overrideCircuitBreaker && { circuitBreakerOverridden: true }),
     note:
       `Rolled back ${type} ${input.vmid} to snapshot ${input.name}; ` +
       `prior run-state: ${wasRunning ? "running (restarted)" : state || "stopped"}.` +

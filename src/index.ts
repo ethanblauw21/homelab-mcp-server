@@ -13,6 +13,7 @@ import { ListDirectoryInputSchema, listDirectoryHandler } from "./tools/listDire
 import { PctExecInputSchema, pctExecHandler } from "./tools/pctExec.js";
 import { PctListInputSchema, pctListHandler } from "./tools/pctList.js";
 import { RevertFileInputSchema, revertFileHandler } from "./tools/revertFile.js";
+import { RollbackBreaker } from "./guardrails/rollbackBreaker.js";
 import { ListBackupsInputSchema, listBackupsHandler } from "./tools/listBackups.js";
 import { DescribeHomelabInputSchema, describeHomelabHandler } from "./tools/describeHomelab.js";
 import { DescribeGuestInputSchema, describeGuestHandler } from "./tools/describeGuest.js";
@@ -142,6 +143,10 @@ if (config.audit.dbEnabled) {
   }
 }
 const backupStore = new BackupStore(config.backup);
+// ADR-021 — one process-lifetime rollback circuit breaker, injected into the three
+// rollback handlers. Session == process for a stdio MCP server, so the in-memory
+// per-target counters reset on restart (the strongest breaker reset).
+const rollbackBreaker = new RollbackBreaker(config.guardrails.rollbackBreaker);
 const censusStore = new CensusStore(config.census.censusDir, config.census.snapshotRetentionCap);
 // ADR-006 — config-history mirror repo. Initialized below (detects git; stays
 // disabled and no-ops if git is absent). Mutation commits are best-effort; the
@@ -308,7 +313,7 @@ register(
   },
   async (input) => {
     try {
-      const result = await revertFileHandler(input, sshTransport, audit, backupStore, config, configHistory);
+      const result = await revertFileHandler(input, sshTransport, audit, backupStore, config, configHistory, rollbackBreaker);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }
@@ -472,7 +477,7 @@ register(
   },
   async (input) => {
     try {
-      const result = await snapshotRollbackHandler(input, sshTransport, audit, config);
+      const result = await snapshotRollbackHandler(input, sshTransport, audit, config, rollbackBreaker);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }
@@ -910,7 +915,7 @@ register(
   },
   async (input) => {
     try {
-      const result = await guestBackupRestoreHandler(input, nodeOps, audit, config);
+      const result = await guestBackupRestoreHandler(input, nodeOps, audit, config, rollbackBreaker);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }

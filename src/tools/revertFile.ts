@@ -22,6 +22,7 @@ import {
 import type { DockerInspect } from "./dockerHelpers.js";
 import type { ConfigHistory } from "../history/configHistory.js";
 import { contentLeafHash } from "../integrity/leafHash.js";
+import { RollbackBreaker, rollbackTargetKey, breakerRefusal } from "../guardrails/rollbackBreaker.js";
 
 export const RevertFileInputSchema = z.object({
   backupPath: z.string().min(1).describe(
@@ -34,6 +35,12 @@ export const RevertFileInputSchema = z.object({
     .describe(
       "Optional. If supplied, must match the path recorded in the backup metadata; otherwise the target is resolved from the backup itself."
     ),
+  overrideCircuitBreaker: z
+    .boolean()
+    .optional()
+    .describe(
+      "ADR-021: bypass the rollback circuit breaker for this one call (a deliberate, audited act, distinct from confirm). Use only when a tripped breaker is a false positive — e.g. a human-directed iterative revert."
+    ),
 });
 
 export type RevertFileInput = z.infer<typeof RevertFileInputSchema>;
@@ -44,7 +51,8 @@ export async function revertFileHandler(
   audit: AuditLog,
   backupStore: BackupStore,
   cfg: Config,
-  history?: ConfigHistory
+  history?: ConfigHistory,
+  breaker?: RollbackBreaker
 ): Promise<{ auditId: string; restoredFrom: string; bytes: number; vmid?: number }> {
   // Resolve where this backup belongs (host SFTP vs. container push) from the
   // meta descriptor — the caller need only pass backupPath. When no meta exists
@@ -73,6 +81,29 @@ export async function revertFileHandler(
   });
   if (!pathResult.valid) {
     throw new Error(`Invalid path: ${pathResult.reason}`);
+  }
+
+  // ADR-021 — rollback circuit breaker. Refuse (and audit the refusal) before any
+  // heavy I/O if this target has been reverted too many times in the window, unless
+  // the caller deliberately overrides. Keyed on the resolved backup target.
+  const breakerKey = rollbackTargetKey(target);
+  if (breaker && !input.overrideCircuitBreaker) {
+    const verdict = breaker.check(breakerKey, Date.now());
+    if (verdict.tripped) {
+      const { message, circuitBreaker } = breakerRefusal(breakerKey, verdict);
+      await audit.append(
+        buildAuditRecord({
+          tool: "revert_file",
+          host: cfg.ssh.host,
+          vmid: target.kind !== "host" ? target.vmid : undefined,
+          path: target.remotePath,
+          refused: true,
+          circuitBreaker,
+          note: message,
+        })
+      );
+      throw new Error(message);
+    }
   }
 
   const timeoutMs = cfg.ssh.commandTimeoutMs;
@@ -215,6 +246,8 @@ export async function revertFileHandler(
     beforeHash: currentContent ? contentLeafHash(currentContent) : undefined,
     afterHash: contentLeafHash(restored),
     hashScope: target.remotePath,
+    // ADR-021 — flag a revert that bypassed a tripped breaker, kept distinct from confirm.
+    ...(input.overrideCircuitBreaker && { circuitBreakerOverridden: true }),
     note: `Reverted from backup: ${input.backupPath}`,
   });
 

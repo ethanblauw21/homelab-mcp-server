@@ -6,6 +6,7 @@ import { buildPctExecCommand } from "./pctHelpers.js";
 import { buildPctStatusCommand, buildPctPullCommand, buildStatCommand } from "./pctFiles.js";
 import { buildDockerInspectCommand } from "./dockerHelpers.js";
 import { FakeTransport } from "../ssh/fakeTransport.js";
+import { RollbackBreaker } from "../guardrails/rollbackBreaker.js";
 import { BackupStore } from "../backup/store.js";
 import { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
@@ -295,5 +296,73 @@ describe("revertFileHandler — meta-routed targets", () => {
     expect(rec?.container).toBe("web");
     expect(rec?.containerId).toBe("cid-web");
     expect(rec?.prevSha256).toBeTruthy(); // current "NEW" hashed before restore
+  });
+});
+
+describe("revertFileHandler — rollback circuit breaker (ADR-021)", () => {
+  let tmpDir: string;
+  let transport: FakeTransport;
+  let cfg: Config;
+  let backupStore: BackupStore;
+  let audit: AuditLog;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "revert-breaker-"));
+    transport = new FakeTransport();
+    cfg = makeConfig(tmpDir);
+    backupStore = new BackupStore(cfg.backup);
+    audit = new AuditLog(cfg.audit.logPath);
+  });
+
+  async function revertOnce(breaker: RollbackBreaker, overrideCircuitBreaker?: boolean) {
+    const backupPath = makeGzBackup(cfg.backup.baseDir, "restored content");
+    transport.setFile("/tmp/test.txt", "current content");
+    return revertFileHandler(
+      { path: "/tmp/test.txt", backupPath, overrideCircuitBreaker },
+      transport, audit, backupStore, cfg, undefined, breaker
+    );
+  }
+
+  it("refuses the Nth revert of one target and audits a refused row", async () => {
+    const breaker = new RollbackBreaker({ enabled: true, limit: 3, windowMs: 600_000 });
+    await revertOnce(breaker); // 1
+    await revertOnce(breaker); // 2
+    await expect(revertOnce(breaker)).rejects.toThrow(/circuit breaker tripped/i); // 3 ⇒ refuse
+
+    const records = audit.readAll();
+    const refusal = records.find((r) => r.refused);
+    expect(refusal).toMatchObject({
+      tool: "revert_file",
+      refused: true,
+      path: "/tmp/test.txt",
+      circuitBreaker: { recentCount: 3, limit: 3, windowMs: 600_000 },
+    });
+    // The two successful reverts produced normal (non-refused) rows.
+    expect(records.filter((r) => r.tool === "revert_file" && !r.refused)).toHaveLength(2);
+  });
+
+  it("override bypasses a tripped breaker and flags the success row", async () => {
+    const breaker = new RollbackBreaker({ enabled: true, limit: 3, windowMs: 600_000 });
+    await revertOnce(breaker); // 1
+    await revertOnce(breaker); // 2
+    await expect(revertOnce(breaker)).rejects.toThrow(/circuit breaker/i); // 3 ⇒ refuse
+
+    const result = await revertOnce(breaker, true); // override ⇒ proceeds
+    expect(result.bytes).toBeGreaterThan(0);
+    const overridden = audit.readAll().find((r) => r.circuitBreakerOverridden);
+    expect(overridden).toMatchObject({ tool: "revert_file", circuitBreakerOverridden: true });
+    expect(overridden?.refused).toBeUndefined();
+  });
+
+  it("does not trip across distinct targets", async () => {
+    const breaker = new RollbackBreaker({ enabled: true, limit: 2, windowMs: 600_000 });
+    const back = makeGzBackup(cfg.backup.baseDir, "x");
+    transport.setFile("/tmp/a.txt", "cur");
+    transport.setFile("/tmp/b.txt", "cur");
+    await revertFileHandler({ path: "/tmp/a.txt", backupPath: back }, transport, audit, backupStore, cfg, undefined, breaker);
+    // A second revert of a DIFFERENT path must not trip B's (independent) counter.
+    await expect(
+      revertFileHandler({ path: "/tmp/b.txt", backupPath: back }, transport, audit, backupStore, cfg, undefined, breaker)
+    ).resolves.toBeTruthy();
   });
 });
