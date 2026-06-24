@@ -68,6 +68,38 @@ async function guestState(
   return parseGuestStatus(res.stdout);
 }
 
+/** Real-clock sleep; injected as a no-op in unit tests so polls don't actually wait. */
+export type Sleep = (ms: number) => Promise<void>;
+const defaultSleep: Sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * ADR-023 B5 — poll `status` until the guest is running or the bounded deadline,
+ * returning the last observed state. Used after a post-rollback restart instead of
+ * trusting the start command's exit code: an SSH-routed `pct/qm start` can return
+ * `exitCode: null` (the wait times out) even though the guest comes up cleanly, and
+ * the old code mis-reported that as a restart failure. Run-state is the ground truth.
+ * The first probe happens immediately (a fast restart returns with zero sleeps);
+ * `waited` accrues by `pollIntervalMs` so no wall-clock dependency is needed.
+ */
+async function waitForGuestRunning(
+  transport: SshTransport,
+  type: GuestType,
+  vmid: number,
+  timeoutMs: number,
+  pollIntervalMs: number,
+  maxWaitMs: number,
+  sleep: Sleep
+): Promise<string> {
+  let state = await guestState(transport, type, vmid, timeoutMs);
+  let waited = 0;
+  while (state !== "running" && waited < maxWaitMs) {
+    await sleep(pollIntervalMs);
+    waited += pollIntervalMs;
+    state = await guestState(transport, type, vmid, timeoutMs);
+  }
+  return state;
+}
+
 // ---------------------------------------------------------------------------
 // snapshot_create
 // ---------------------------------------------------------------------------
@@ -188,7 +220,8 @@ export async function snapshotRollbackHandler(
   transport: SshTransport,
   audit: AuditLog,
   cfg: Config,
-  breaker?: RollbackBreaker
+  breaker?: RollbackBreaker,
+  sleep: Sleep = defaultSleep
 ): Promise<{ name: string; guestType: GuestType; restarted: boolean }> {
   if (!input.confirm) {
     throw new Error(
@@ -249,10 +282,26 @@ export async function snapshotRollbackHandler(
   }
 
   if (wasRunning) {
-    const startRes = await transport.exec(buildGuestStartCommand(type, input.vmid), timeoutMs);
-    if (startRes.exitCode !== 0) {
+    // ADR-023 B5 — issue the start, then VERIFY by polling run-state rather than
+    // trusting startRes.exitCode. An SSH-routed start frequently returns
+    // exitCode:null (the node-side wait times out) while the guest comes up fine;
+    // the old code reported that as a false "failed to restart". Only the guest's
+    // own status is ground truth — fail only if it is genuinely still not running.
+    await transport.exec(buildGuestStartCommand(type, input.vmid), timeoutMs);
+    const finalState = await waitForGuestRunning(
+      transport,
+      type,
+      input.vmid,
+      timeoutMs,
+      cfg.snapshot.restartPollIntervalMs ?? 2_000,
+      cfg.snapshot.restartTimeoutMs ?? 60_000,
+      sleep
+    );
+    if (finalState !== "running") {
       throw new Error(
-        `Rolled back, but failed to restart guest ${input.vmid} (exit ${startRes.exitCode}): ${startRes.stderr.trim()}`
+        `Rolled back ${type} ${input.vmid}, but it did not return to running within ` +
+          `${cfg.snapshot.restartTimeoutMs ?? 60_000}ms (current state: ${finalState || "unknown"}). ` +
+          "The rollback itself succeeded; start the guest manually or investigate."
       );
     }
   }
