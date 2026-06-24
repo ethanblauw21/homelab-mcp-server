@@ -1,7 +1,7 @@
 # ADR-022: The Audit-DB Projection and the Semantic Change-History Feed
 
-**Status:** Proposed
-**Date:** 2026-06-22
+**Status:** Accepted
+**Date:** 2026-06-22 (accepted 2026-06-24)
 **Deciders:** Ethan
 **Depends on:** ADR-004 (the JSONL audit log + atomic `O_APPEND` durability, the ADR-002 redaction module, and the diff-on-write `computeUnifiedDiff` whose output is currently *discarded*), ADR-006 (the git mirror as the pull-feed content corpus + the load-bearing "git is never on the write's critical path" invariant this feed must not break), ADR-009 (the `better-sqlite3`/WAL precedent, the "pure core, thin I/O shell" split, and the hash-anchored audit fields `beforeHash`/`afterHash`/`hashScope` this projection indexes), ADR-010 (the "no standing network-reachable surface fronting the server" property — the reason the feed is *pull*, not push-from-this-server), ADR-015 (the "derive from the artifacts, don't add a sensor" doctrine + the pure `filterAuditRecords` core reused here as the fallback path), ADR-017 (`query_audit` output budgeting / `cmd` projection — the surface being upgraded), ADR-019 (redaction is best-effort, "not a security control" — the caveat now guarding a *feed/exfil* boundary, not just at-rest)
 **Required by:** rust-file-system-indexer#ADR-001 (the push/streamed-ingestion ingress that consumes this change-history feed — the first concrete consumer of the `index_records` push path)
@@ -86,3 +86,21 @@ This is acceptable because the Rust indexer is **fully local** (ONNX + on-disk L
 - **Rebuild command.** A maintenance path replays JSONL into `audit.db` (and recomputes redacted diffs from the backup store where present) — the same routine that runs on a schema-version bump.
 - **Config (`audit.*` / `feed.*` in `config.ts`).** `dbPath` (default beside `audit.jsonl`), redaction on/off for stored diffs (default on), diff size cap; feed: `indexerContentEnabled` (pull, default off), `indexerPushEndpoint` (default none), and the **loopback-only guard** on any push/content target. Env mirrors per the existing convention.
 - **Bidirectional reliance markers (per ADR-000).** On accept, add `Required by: ADR-022 (…)` to ADR-004/006/009/010/015/017/019, and amend ADR-020's §"Scope boundaries" backlog items 9–10 in place with `— Realized by ADR-022.`; tick the matching `docs/tool-ideas.md` ranks. The `Depends on:`/`Required by:` pair is one fact written twice — fix both in the same commit.
+
+## Operationalizing the pull feed (runbook)
+
+The PULL content feed needs **no code on this server** — the external rust file-system indexer reads the git mirror directly, on its own cadence, never on a write's critical path. To turn it on:
+
+1. Set `FEED_INDEXER_CONTENT_ENABLED=true` (env) / `feed.indexerContentEnabled` (config). At startup the server logs the mirror path to index and the on-host constraint. Optionally set `FEED_INDEXER_CONTENT_PATH` to override the default (`history.configHistoryDir`).
+2. Point `file_indexer index <mirror-path>` at that directory. The indexer is already git-aware, so config files at every revision are chunked + embedded.
+3. **Keep the indexer same-trust-zone / on-host.** The mirror holds **unredacted** secrets (ADR-006 byte-faithful restore), so its embedded copy inherits the "private, never-sync-to-cloud" constraint. If a push endpoint is configured (`FEED_INDEXER_PUSH_ENDPOINT`), the server **fail-closes at startup on a non-loopback target** (`assertFeedTarget`).
+
+The PUSH change-event feed (streamed `{uri, content, mime, meta}` per redacted diff) remains **deferred / external-blocked**: it is gated on the indexer's streamed-ingestion tool, which does not exist yet. The in-repo seam is complete — `buildChangeEvent` (`src/feed/changeEvent.ts`, the ADR's exact contract incl. the `change://<vmid>/<path>@<ts>` URI + `source:"homelab-change"` discriminator, redacting the diff at the boundary) plus the `assertFeedTarget` loopback guard the emitter must call. Only the fire-and-forget HTTP socket is left, and it cannot be integration-tested until the consumer lands.
+
+## Implementation status
+
+- **§1 `audit.db` projection — SHIPPED + LIVE** (commit `80cc1d6`, enabled by default). Structured indexed columns + FTS5 external-content table over `cmd + diff + path + note`; `query_audit` fast path (indexed + FTS `textSearch`) with the pure `filterAuditRecords` JSONL fallback; backfill-if-empty + close on SIGINT wired in `index.ts`.
+- **§1 diff capture — COMPLETED** (this branch). The diff-on-write output now reaches the projector for **all** write-family tools — `write_file`/`edit_file` (original), plus `pct_write_file`/`qm_write_file`/`docker_write_file` and `revert_file` (`revert_file` diffs current→restored). Each handler passes `audit.append(record, { diff })`; binary writes pass `diff: null`. Projector-wiring tests in each handler suite.
+- **§2 pull content feed — OPERATIONAL** (this branch). `feed.indexerContentEnabled` now surfaces the mirror path + fail-closes a non-loopback push endpoint at startup (see runbook above).
+- **§2 push change-event feed — pure contract SHIPPED, socket DEFERRED** (this branch). `buildChangeEvent` + tests land; the HTTP emitter is external-blocked.
+- **§3 redaction boundary — ENFORCED.** Stored diffs are redacted in the projection; change-events redact the diff in `buildChangeEvent`; the loopback guard (`feedGuard`) refuses an off-host target.

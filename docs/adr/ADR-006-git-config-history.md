@@ -4,7 +4,7 @@
 **Date:** 2026-06-10
 **Deciders:** Ethan
 **Depends on:** ADR-001 (backup/audit pipeline), ADR-002 (census drift — conceptual counterpart), ADR-003 (target descriptors, pct pull, running-guest precondition per amendment A3.1), ADR-007 (tiers — this feature is companion+)
-**Required by:** ADR-018 (reuses `config_sweep`'s single `find -printf` batched enumeration for the forest's L1 mtime pass)
+**Required by:** ADR-018 (reuses `config_sweep`'s single `find -printf` batched enumeration for the forest's L1 mtime pass), ADR-022 (the git mirror is the semantic feed's pull corpus, and the load-bearing "git is never on the write's critical path" invariant is the exact constraint the pull-first feed preserves)
 
 ## Context
 

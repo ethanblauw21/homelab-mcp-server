@@ -52,6 +52,7 @@ import { SnapshotStore } from "./ui/snapshotStore.js";
 import { TailLogInputSchema, tailLogHandler } from "./tools/tailLog.js";
 import { QueryAuditInputSchema, queryAuditHandler } from "./tools/queryAudit.js";
 import { AuditDb, openAuditDb } from "./audit/auditDb.js";
+import { assertFeedTarget } from "./feed/feedGuard.js";
 import { DiffConfigInputSchema, diffConfigHandler } from "./tools/diffConfig.js";
 import { ConfigHistory } from "./history/configHistory.js";
 import { ConfigSweepInputSchema, configSweepHandler } from "./tools/configSweep.js";
@@ -1142,6 +1143,27 @@ if (isToolEnabled("verify_integrity", activeTier)) {
 // On absence the subsystem stays disabled and config_sweep is NOT registered, so
 // the model never sees a tool it cannot run. Mutation commits remain best-effort.
 await configHistory.init();
+
+// ADR-022 §2 — semantic change-history feed (pull-first). PULL needs no code on
+// this side: the external rust file-system indexer reads the git mirror on its own
+// cadence (never on the write's critical path). When enabled we surface the mirror
+// path to point it at, and fail-closed (`assertFeedTarget`) on a non-loopback push
+// endpoint — the content feed carries UNREDACTED config and the change-event feed
+// best-effort-redacted diffs, so both must stay on-host / same trust zone (§3). The
+// PUSH emitter itself is deferred/external-blocked (the indexer's streamed-ingestion
+// tool does not exist yet); `buildChangeEvent` + `assertFeedTarget` (src/feed/) are
+// the ready seam it will use when it lands.
+if (config.feed.indexerContentEnabled) {
+  const contentPath = config.feed.indexerContentPath ?? config.history.configHistoryDir;
+  if (config.feed.indexerPushEndpoint) {
+    assertFeedTarget(config.feed.indexerPushEndpoint); // refuse a non-loopback target at startup
+  }
+  process.stderr.write(
+    `[feed] ADR-022 pull content feed ENABLED — point the rust file-system indexer at the ` +
+      `config-history mirror: ${contentPath} (must stay on-host / same trust zone — it holds ` +
+      `UNREDACTED config; ADR-022 §3). The push change-event emitter is deferred (external).\n`
+  );
+}
 
 if (configHistory.enabled) {
   register(

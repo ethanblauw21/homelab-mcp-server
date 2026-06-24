@@ -4,7 +4,7 @@
 **Date:** 2026-06-19
 **Deciders:** Ethan
 **Depends on:** ADR-002 (the shared redaction module — the single secret-pattern matcher), ADR-004 (the read surface: `read_file` stat-gating + the deliberate "reads return fidelity, logs always redact" doctrine this ADR amends)
-**Required by:** — none yet —
+**Required by:** ADR-022 (the "redaction is best-effort, not a security control" caveat now guards a *feed/exfil* boundary — FTS makes a redaction miss in a stored diff *searchable* at rest, a strictly larger exposure the ADR pins)
 **Source:** Dogfooding run 2026-06-19 — `docker_read_file` on a qBittorrent config returned the `WebUI\Password_PBKDF2` hash verbatim into the model's context. Correct by current design; worth a lever.
 
 ## Context

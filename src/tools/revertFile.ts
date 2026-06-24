@@ -3,6 +3,8 @@ import type { SshTransport } from "../ssh/transport.js";
 import { validatePath } from "../guardrails/pathValidation.js";
 import { targetFromInput, targetKeyString, type BackupStore, type BackupTarget } from "../backup/store.js";
 import { buildAuditRecord, sha256 } from "../audit/record.js";
+import { isTextContent } from "../backup/policy.js";
+import { computeUnifiedDiff } from "../util/diff.js";
 import type { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
 import {
@@ -307,7 +309,20 @@ export async function revertFileHandler(
     );
   }
 
-  await audit.append(record);
+  // ADR-022 — a revert is a write, so it gets a diff blob too. Diff current→restored
+  // (the change this revert applies), text-gated, handed to the audit.db projection
+  // via the extras side-channel. Binary/absent content ⇒ diff null.
+  const revertDiffable =
+    isTextContent(restored) && (currentContent === undefined || isTextContent(currentContent));
+  const revertDiff = revertDiffable
+    ? computeUnifiedDiff(
+        currentContent ? currentContent.toString("utf8") : "",
+        restored.toString("utf8"),
+        cfg.tools.dryRunDiffMaxLines
+      )
+    : null;
+
+  await audit.append(record, { diff: revertDiff ? revertDiff.diff : null });
 
   return {
     auditId: record.id,

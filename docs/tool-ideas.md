@@ -11,10 +11,13 @@ yet — raw candidates to triage.
 > `http_probe`, `search_file_regex`) — all kept here for the friction record.
 > Item 8 (rollback circuit breaker) is now **specced as ADR-021** — its lone
 > blocker (the "what is a session" question) resolved by the observation that a
-> stdio MCP server *is* one process = one session. Items **9–10 remain the live
-> backlog** as genuine large lifts: 9 needs an embedding dependency and conflicts
-> with ADR-006's "git never on the write's critical path" invariant; 10 depends
-> on two indexer subsystems that do not exist in this repo. Both stay ranked here.
+> stdio MCP server *is* one process = one session. Items **9–10 are now realized
+> by ADR-022** — the audit.db projection + the pull-first semantic-history feed.
+> The two original blockers evaporated: the external indexers now exist as
+> separate processes, and a *pull/derive* design keeps the embedding step fully
+> off ADR-006's write critical path. The §1 audit.db + diff capture shipped; the
+> §2 pull feed is operational and the push emitter's pure contract is in place
+> (only the external HTTP socket is deferred). Both kept here for the friction record.
 
 ---
 
@@ -171,7 +174,7 @@ loud `overrideCircuitBreaker` escape hatch), not a tool — no new
 `TOOL_MIN_TIER` row. Narrower than 5–7 — one specific failure mode — but cheap
 and squarely in the guardrail-doctrine wheelhouse.
 
-## 9. `query_semantic_history` — the semantic time machine
+## 9. `query_semantic_history` — the semantic time machine → ADR-022 ✅ REALIZED (audit.db + pull feed; push socket deferred)
 
 **Friction.** The ADR-006 git mirror remembers everything but is only searchable
 by exact text / path / `git log`. "When did we last change the Docker security
@@ -192,7 +195,7 @@ async/out-of-band (a separate indexer pass over `git log`, like `config_sweep`
 is to mutations). Also adds an embedding dependency + a "who calls the LLM"
 question the server has so far avoided. Worth it, but heavier than 5–8.
 
-## 10. `index_path` — the indexer router
+## 10. `index_path` — the indexer router → ADR-022 ✅ REALIZED (feed targets the external indexers; no in-repo indexer)
 
 **What it does.** A unified `index_path(path)` that routes a file to a Python
 codebase indexer (AST/semantic chunking for `.py`/`.yml`/`.tf`) or a Rust

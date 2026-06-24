@@ -4,7 +4,7 @@
 **Date:** 2026-06-19
 **Deciders:** Ethan
 **Depends on:** ADR-002 (`describe_homelab` shape, `VOLATILE_FIELDS`, census parsers), ADR-005 (`query_audit`/`summarizeAuditRecords`, `health_check` fixed-probe evaluators), ADR-011 (token economy as an explicit design axis — the lever taxonomy and roadmap)
-**Required by:** ADR-020 (`search_file_regex` — content-addressed windowing extends the output-budgeting doctrine to the case the blind byte window cannot serve)
+**Required by:** ADR-020 (`search_file_regex` — content-addressed windowing extends the output-budgeting doctrine to the case the blind byte window cannot serve), ADR-022 (`query_audit`'s `cmd` projection / output budgeting is the surface `audit.db` upgrades in place — SQLite fast path, no new tool)
 **Realizes deferral:** ADR-011 §1 "future tools measured against [token economy]" — extends the doctrine from the *write* surface (edit tools) to the *read* surface (output shaping)
 **Source:** Dogfooding run 2026-06-19 — `query_audit limit:15` cost ~6 KB almost entirely from verbatim `cmd` strings; `health_check`'s storage section was ~50% pseudo-/tmpfs noise; `describe_homelab full` shipped ~3.5 KB even when one guest was the subject.
 

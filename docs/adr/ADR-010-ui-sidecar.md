@@ -5,6 +5,7 @@
 **Deciders:** Ethan
 **Amends:** ADR-001's "only alive while a Claude client runs" property (reframed — §1; old property becomes a special case, not a contradiction).
 **Depends on:** ADR-002 (census artifacts), ADR-005 (audit log, health), ADR-006 (config-history git), ADR-007 (tiers, registration-filtering), ADR-009 (Merkle drift report, `accept_truth`)
+**Required by:** ADR-022 (the "no standing network-reachable surface fronting the server" property is why the semantic feed is **pull**, not push-from-this-server; the `healthSink`/`driftSink` sink-wiring pattern is mirrored by the `audit.db` projector sink)
 
 ## Context
 

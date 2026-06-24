@@ -253,7 +253,10 @@ export async function writeResolvedPct(
     );
   }
 
-  await audit.append(record);
+  // ADR-022 — hand the diff-on-write output (already computed above) to the
+  // audit.db projection via the extras side-channel. Redacted + stored only in
+  // the derived index; the JSONL record is untouched. Binary ⇒ diff === null.
+  await audit.append(record, { diff: diff ? diff.diff : null });
 
   return {
     backupPath: backupResult.backupPath ?? backupResult.existingPath ?? null,
