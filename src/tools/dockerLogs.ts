@@ -9,7 +9,17 @@ import type { Config } from "../config.js";
 export const DockerLogsInputSchema = z.object({
   vmid: z.number().int().positive().describe("LXC container ID hosting the Docker daemon"),
   container: z.string().min(1).describe("Docker container name"),
-  tail: z.number().int().positive().optional().describe("Number of trailing log lines (clamped to the cap)"),
+  // ADR-023 #3 — named `lines` to match the sibling `tail_log` (and this tool's own
+  // `lines` output field); `tail` is kept as a back-compat alias. The model that
+  // learned `lines` from `tail_log` now works here too instead of being silently
+  // dropped (and, with the registration-boundary strict mode, a third name errors).
+  lines: z.number().int().positive().optional().describe("Number of trailing log lines (clamped to the cap)"),
+  tail: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Deprecated alias for `lines` (kept for back-compat; `lines` wins if both are given)"),
   since: z
     .string()
     .optional()
@@ -40,7 +50,7 @@ export async function dockerLogsHandler(
 ): Promise<DockerLogsResult> {
   assertDockerName(input.container);
 
-  const lines = clampLines(input.tail, cfg.tools.tailLinesCap);
+  const lines = clampLines(input.lines ?? input.tail, cfg.tools.tailLinesCap);
   if (input.since !== undefined && input.since !== "" && !validateSince(input.since)) {
     throw new Error(
       `Invalid \`since\`: ${JSON.stringify(input.since)}. Use an ISO timestamp or "<n> min|hour|day ago".`

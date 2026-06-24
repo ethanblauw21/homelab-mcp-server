@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { SshTransport } from "../ssh/transport.js";
-import type { BackupStore, BackupTarget, BackupVersionInfo } from "../backup/store.js";
+import { targetFromInput, type BackupStore, type BackupTarget, type BackupVersionInfo } from "../backup/store.js";
 import type { Config } from "../config.js";
 import { sha256 } from "../audit/record.js";
 import { computeUnifiedDiff } from "../util/diff.js";
@@ -24,7 +24,15 @@ export const DiffConfigInputSchema = z
       .int()
       .positive()
       .optional()
-      .describe("Container VMID when the target is an LXC file (used only with `path`)."),
+      .describe("Container VMID when the target is an LXC (or Docker) file (used only with `path`)."),
+    container: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Docker container name when the target is a Docker file. Requires `vmid` (the LXC host). " +
+          "Used only with `path`."
+      ),
   })
   .describe("Preview the diff between a backup and the file's current content. Read-only, not audited.");
 
@@ -85,15 +93,10 @@ export async function diffConfigHandler(
       if (input.path === undefined) {
         throw new Error("Backup metadata not found and no `path` supplied; cannot resolve the target.");
       }
-      target = input.vmid !== undefined
-        ? { kind: "pct", vmid: input.vmid, remotePath: input.path }
-        : { kind: "host", remotePath: input.path };
+      target = targetFromInput(input.path, input.vmid, input.container);
     }
   } else {
-    target =
-      input.vmid !== undefined
-        ? { kind: "pct", vmid: input.vmid, remotePath: input.path! }
-        : { kind: "host", remotePath: input.path! };
+    target = targetFromInput(input.path!, input.vmid, input.container);
   }
 
   // Choose the backup version: the named one, or the newest for the target.

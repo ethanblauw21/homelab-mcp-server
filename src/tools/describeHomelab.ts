@@ -53,8 +53,9 @@ export const DescribeHomelabInputSchema = z.object({
     .enum(["summary", "status", "full"])
     .default("summary")
     .describe(
-      "summary (default): identity + status; status: + snapshotCapable, no config/docker roster; " +
-        "full: includes redacted per-guest config + service docker roster"
+      "Monotonic detail ladder. summary (default): identity + run-state + docker roster; " +
+        "status: + snapshotCapable (still includes the docker roster, drops only the bulky per-guest config); " +
+        "full: + redacted per-guest config"
     ),
   saveSnapshot: z.boolean().default(true).describe("Persist the snapshot locally (default true)"),
   compareToPrevious: z
@@ -392,9 +393,11 @@ export async function describeHomelabHandler(
         svc.push({
           vmid: r.vmid,
           failedUnits: failedOut ? parseFailedUnits(failedOut) : [],
-          // ADR-017 §3 — the docker image roster is the heavy part of a service
-          // entry; `status` depth drops it. `summary`/`full` keep today's behaviour.
-          docker: depth === "status" ? [] : await getContainerDocker(r.vmid),
+          // ADR-023 #1 — the docker roster is included at ALL depths so the depth
+          // ladder is monotonic (summary ⊆ status ⊆ full). `status` stays leaner
+          // than `full` by dropping only the bulky per-guest *config* blob (handled
+          // above), not the roster — it is the "roster without config" tier.
+          docker: await getContainerDocker(r.vmid),
         });
       }
       sections.services = svc;

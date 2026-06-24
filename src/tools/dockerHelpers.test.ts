@@ -262,10 +262,22 @@ describe("buildDockerExecCommand", () => {
     );
   });
 
-  it("composes the in-container timeout wrapper", () => {
-    expect(buildDockerExecCommand("web", "sleep 1", { timeoutSecs: 10 })).toBe(
-      "docker exec 'web' timeout --signal=TERM --kill-after=5 10 sh -c 'sleep 1'"
-    );
+  it("composes a best-effort in-container timeout that falls back when timeout is absent (ADR-023 #4)", () => {
+    // Minimal images (distroless/scratch) lack coreutils `timeout`; the wrapper
+    // probes for it and degrades to a bare shell rather than failing exit 127.
+    const cmd = buildDockerExecCommand("web", "sleep 1", { timeoutSecs: 10 });
+    expect(cmd).toMatch(/^docker exec 'web' sh -c '/);
+    expect(cmd).toContain("command -v timeout");
+    expect(cmd).toContain("exec timeout --signal=TERM --kill-after=5 10 sh -c");
+    expect(cmd).toContain("else exec sh -c");
+    // The probe protects against the 127 — the bare `timeout …` prefix is gone.
+    expect(cmd).not.toMatch(/^docker exec 'web' timeout/);
+  });
+
+  it("uses the timeout fallback with a bash shell override too", () => {
+    const cmd = buildDockerExecCommand("web", "sleep 1", { timeoutSecs: 5, shell: "bash" });
+    expect(cmd).toContain("exec timeout --signal=TERM --kill-after=5 5 bash -c");
+    expect(cmd).toContain("else exec bash -c");
   });
 
   it("escapes single quotes in the inner command", () => {

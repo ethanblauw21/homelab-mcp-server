@@ -162,6 +162,81 @@ describe("revertFileHandler", () => {
     ).rejects.toThrow(/invalid path/i);
   });
 
+  // --- ADR-023 #6: latest-resolution when backupPath is omitted ---
+
+  it("reverts the NEWEST revertible backup for a host path when backupPath is omitted", async () => {
+    transport.setFile("/tmp/test.txt", "current\n");
+    let seenTarget: unknown;
+    const store = {
+      readBackupTarget: () => {
+        throw new Error("readBackupTarget must not be called on the latest-resolution path");
+      },
+      listBackupsForPath: (target: unknown) => {
+        seenTarget = target;
+        // newest-first; the newest is metadata-only so the newest REVERTIBLE wins.
+        return [
+          { backupPath: "/b/newest.meta", timestamp: "n", kind: "metadata-only", sizeBytes: 0, revertible: false },
+          { backupPath: "/b/revertible.gz", timestamp: "r", kind: "gzip-full", sizeBytes: 9, revertible: true },
+          { backupPath: "/b/older.gz", timestamp: "o", kind: "gzip-full", sizeBytes: 9, revertible: true },
+        ];
+      },
+      restore: async (bp: string) => {
+        expect(bp).toBe("/b/revertible.gz");
+        return Buffer.from("reverted\n");
+      },
+    } as unknown as BackupStore;
+
+    const res = await revertFileHandler({ path: "/tmp/test.txt" }, transport, audit, store, cfg);
+    expect(seenTarget).toEqual({ kind: "host", remotePath: "/tmp/test.txt" });
+    expect(res.restoredFrom).toBe("/b/revertible.gz");
+    expect((await transport.readFile("/tmp/test.txt")).toString()).toBe("reverted\n");
+    expect(audit.readAll()[0].note).toContain("/b/revertible.gz");
+  });
+
+  it("resolves a docker target from path+vmid+container for latest-resolution", async () => {
+    let seenTarget: unknown;
+    const store = {
+      readBackupTarget: () => {
+        throw new Error("unused");
+      },
+      listBackupsForPath: (target: unknown) => {
+        seenTarget = target;
+        return [];
+      },
+      restore: async () => Buffer.from(""),
+    } as unknown as BackupStore;
+
+    await expect(
+      revertFileHandler({ path: "/config/app.conf", vmid: 101, container: "web" }, transport, audit, store, cfg)
+    ).rejects.toThrow(/No backups found/);
+    expect(seenTarget).toEqual({ kind: "docker", vmid: 101, container: "web", remotePath: "/config/app.conf" });
+  });
+
+  it("throws when neither backupPath nor path is supplied", async () => {
+    await expect(revertFileHandler({}, transport, audit, backupStore, cfg)).rejects.toThrow(/either `backupPath`, or `path`/i);
+  });
+
+  it("throws when no revertible version exists for the target (only metadata-only)", async () => {
+    const store = {
+      readBackupTarget: () => {
+        throw new Error("unused");
+      },
+      listBackupsForPath: () => [
+        { backupPath: "/b/a.meta", timestamp: "a", kind: "metadata-only", sizeBytes: 0, revertible: false },
+      ],
+      restore: async () => null,
+    } as unknown as BackupStore;
+    await expect(
+      revertFileHandler({ path: "/tmp/test.txt" }, transport, audit, store, cfg)
+    ).rejects.toThrow(/No revertible.*backup found/i);
+  });
+
+  it("refuses a docker `container` without a `vmid` (shared resolver)", async () => {
+    await expect(
+      revertFileHandler({ path: "/config/app.conf", container: "web" }, transport, audit, backupStore, cfg)
+    ).rejects.toThrow(/container.*requires.*vmid/i);
+  });
+
   it("rejects a denylist path", async () => {
     const cfgWithDenylist: Config = {
       ...cfg,

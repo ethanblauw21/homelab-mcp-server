@@ -267,6 +267,23 @@ export class ApiBackend implements NodeOps {
     }));
   }
 
+  // ADR-023 #9 — poll a task's terminal status. `createBackup` (and the other
+  // lifecycle calls) return a UPID before the task finishes; without this a vzdump
+  // that fails async (e.g. the target storage lacks `backup` content) would read
+  // as success. The UPID contains colons, so it is URL-encoded for the path.
+  async taskStatus(upid: string): Promise<{ status: string; exitstatus?: string }> {
+    const data = (await this.unwrap(
+      "GET",
+      `${this.base()}/tasks/${encodeURIComponent(upid)}/status`,
+      `task status ${upid}`
+    )) as Record<string, unknown> | null;
+    const exit = data?.["exitstatus"];
+    return {
+      status: String(data?.["status"] ?? "unknown"),
+      exitstatus: typeof exit === "string" ? exit : undefined,
+    };
+  }
+
   async listBackupArchives(storage: string, vmid?: number): Promise<BackupArchive[]> {
     const data = await this.unwrap(
       "GET",

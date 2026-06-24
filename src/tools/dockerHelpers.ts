@@ -1,4 +1,4 @@
-import { shSingleQuote, buildTimeoutWrapper, type WrapperShell } from "../ssh/command.js";
+import { shSingleQuote, type WrapperShell } from "../ssh/command.js";
 import { redactRecord } from "../guardrails/redaction.js";
 
 /**
@@ -256,11 +256,31 @@ export interface DockerExecOptions {
 }
 
 /**
+ * In-container timeout is BEST-EFFORT (ADR-023 dogfooding #4). Minimal images
+ * (distroless / scratch / busybox-without-coreutils — e.g. portainer) lack the
+ * `timeout` binary, where the old unconditional `timeout … sh -c …` hard-failed
+ * with `exit 127: exec: "timeout": not found`. Probe for `timeout` at run time and
+ * fall back to a bare shell when it is absent: the host-side `pct exec` wrapper
+ * (`buildPctExecCommand(..., { timeoutSecs })`) already bounds how long the SERVER
+ * waits, so dropping the in-guest layer loses only reliable in-guest termination,
+ * never the timeout itself. `exec` replaces the shell so the if/else cannot fall
+ * through (avoids the `&&`/`||` short-circuit trap).
+ */
+function buildInContainerTimeout(command: string, secs: number, shell: WrapperShell): string {
+  const c = shSingleQuote(command);
+  return (
+    `if command -v timeout >/dev/null 2>&1; then ` +
+    `exec timeout --signal=TERM --kill-after=5 ${secs} ${shell} -c ${c}; ` +
+    `else exec ${shell} -c ${c}; fi`
+  );
+}
+
+/**
  * Build the inner `docker exec <container> sh -c '<escaped>'` command. The handler
  * wraps the whole string with `buildPctExecCommand(vmid, <this>, { timeoutSecs })`
- * so the node-side `timeout` bounds the wait; `timeoutSecs` here adds an
- * in-container `timeout` for reliable in-guest termination (the three-layer
- * compose the ADR's quoting note warns about).
+ * so the node-side `timeout` bounds the wait; `timeoutSecs` here adds a
+ * best-effort in-container `timeout` for reliable in-guest termination (see
+ * `buildInContainerTimeout` — it degrades gracefully on images that lack it).
  */
 export function buildDockerExecCommand(
   container: string,
@@ -271,7 +291,7 @@ export function buildDockerExecCommand(
   const shell = opts.shell ?? "sh";
   const inner =
     opts.timeoutSecs !== undefined
-      ? buildTimeoutWrapper(command, opts.timeoutSecs, { shell })
+      ? `${shell} -c ${shSingleQuote(buildInContainerTimeout(command, opts.timeoutSecs, shell))}`
       : `${shell} -c ${shSingleQuote(command)}`;
   return `docker exec ${shSingleQuote(container)} ${inner}`;
 }

@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import { Ssh2Transport } from "./ssh/ssh2Client.js";
 import { AuditLog } from "./audit/log.js";
 import { BackupStore } from "./backup/store.js";
+import { strictifyInputSchema } from "./util/strictSchema.js";
 
 import { ExecuteInputSchema, executeHandler } from "./tools/execute.js";
 import { ReadFileInputSchema, readFileHandler } from "./tools/readFile.js";
@@ -199,6 +200,10 @@ function errResult(err: unknown) {
  */
 const register = ((name: string, def: unknown, cb: unknown) => {
   if (!isToolEnabled(name, activeTier)) return undefined;
+  // ADR-023 #3/#7 — stricten every tool's input schema at the registration boundary
+  // so an unknown/hallucinated param errors loudly instead of being silently stripped.
+  const d = def as { inputSchema?: unknown };
+  if (d && d.inputSchema !== undefined) d.inputSchema = strictifyInputSchema(d.inputSchema);
   return (server.registerTool as (n: string, d: unknown, c: unknown) => unknown)(name, def, cb);
 }) as typeof server.registerTool;
 

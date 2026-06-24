@@ -141,6 +141,51 @@ describe("diffConfigHandler", () => {
     expect(res.diff).toContain("- b=2");
   });
 
+  it("resolves a Docker target from path+vmid+container (ADR-023 #5 — no backupPath)", async () => {
+    // The #5 bug: `container` was stripped, so this resolved as a bare host path and
+    // returned "No backups found". It must now build a { kind:"docker" } target.
+    const BIND = JSON.stringify([{ Type: "bind", Source: "/srv/config", Destination: "/config", RW: true }]);
+    const t = new FakeTransport();
+    t.setExecResult(buildPctStatusCommand(101), { stdout: "status: running\n", stderr: "", exitCode: 0 });
+    t.setExecResult(buildPctExecCommand(101, buildDockerInspectCommand("web")), { stdout: `cid-web ${BIND}`, stderr: "", exitCode: 0 });
+    t.setExecResult("mktemp -p '/tmp'", { stdout: "/tmp/node1", stderr: "", exitCode: 0 });
+    t.setExecResult(buildPctPullCommand(101, "/srv/config/app.conf", "/tmp/node1"), { stdout: "", stderr: "", exitCode: 0 });
+    t.setFile("/tmp/node1", "a=1\nb=2\n");
+
+    let seenTarget: BackupTarget | undefined;
+    const store = {
+      readBackupTarget: () => {
+        throw new Error("no meta");
+      },
+      listBackupsForPath: (target: BackupTarget): BackupVersionInfo[] => {
+        seenTarget = target;
+        return [{ backupPath: "/b/d.gz", timestamp: "d", kind: "gzip-full", sizeBytes: 10, revertible: true }];
+      },
+      restore: async () => Buffer.from("a=1\n"),
+    } as unknown as BackupStore;
+
+    const res = await diffConfigHandler(
+      { path: "/config/app.conf", vmid: 101, container: "web" },
+      t,
+      store,
+      makeConfig()
+    );
+
+    expect(seenTarget).toEqual({ kind: "docker", vmid: 101, container: "web", remotePath: "/config/app.conf" });
+    expect(res.target.kind).toBe("docker");
+    expect(res.revertible).toBe(true);
+    expect(res.removedLines).toBe(1); // current has the extra "b=2" line
+    expect(res.diff).toContain("- b=2");
+  });
+
+  it("refuses a Docker `container` without a `vmid`", async () => {
+    const t = new FakeTransport();
+    const store = fakeStore({ versions: [] });
+    await expect(
+      diffConfigHandler({ path: "/config/app.conf", container: "web" }, t, store, makeConfig())
+    ).rejects.toThrow(/container.*requires.*vmid/i);
+  });
+
   // ADR-014 §1 — a delta backup whose recorded base no longer matches the live file
   // (an out-of-band edit broke the chain) is reported as a structured non-revertible
   // response with a reason, instead of surfacing restore()'s raw "changed since" throw.

@@ -69,12 +69,39 @@ class FakeNode implements NodeOps {
   }
 }
 
+/**
+ * ADR-023 #9 — a FakeNode that ALSO implements the optional `taskStatus` poll, so
+ * the API path's vzdump-completion check is exercised. `seq` is returned one entry
+ * per poll (the last entry repeats). Its presence is what makes `guestBackupHandler`
+ * poll at all (base FakeNode omits it → poll skipped, the SSH-like synchronous case).
+ */
+class FakeNodeWithTask extends FakeNode {
+  pollCount = 0;
+  private seq: Array<{ status: string; exitstatus?: string }>;
+  constructor(
+    guests: Guest[],
+    archives: BackupArchive[],
+    seq: Array<{ status: string; exitstatus?: string }>
+  ) {
+    super(guests, archives);
+    this.seq = seq;
+  }
+  async taskStatus(): Promise<{ status: string; exitstatus?: string }> {
+    const i = Math.min(this.pollCount, this.seq.length - 1);
+    this.pollCount++;
+    return this.seq[i]!;
+  }
+}
+
 let records: AuditRecord[];
 const audit = { append: async (r: AuditRecord) => void records.push(r) } as unknown as import("../audit/log.js").AuditLog;
 const cfg = {
   ssh: { host: "node.lan" },
-  backup: { nodeBackupStorage: "local", guestArchivePerGuestCap: 1 },
+  backup: { nodeBackupStorage: "local", guestArchivePerGuestCap: 1, taskPollIntervalMs: 10, taskTimeoutMs: 1000 },
 } as unknown as import("../config.js").Config;
+
+/** No-op sleep so the task poll loop terminates instantly under test. */
+const noSleep = async (): Promise<void> => {};
 
 const NOW = new Date(Date.UTC(2026, 5, 14, 15, 30, 5));
 
@@ -152,6 +179,62 @@ describe("guest_backup", () => {
     await expect(guestBackupHandler({ vmid: 999, mode: "snapshot", confirm: true }, node, audit, cfg, NOW)).rejects.toThrow(
       /No guest with vmid 999/
     );
+  });
+
+  // --- ADR-023 #9: per-call storage override + vzdump task-completion polling ---
+
+  it("honors a per-call storage override (the fix for the `local` wrong-content-type footgun)", async () => {
+    const node = new FakeNode(guests, []);
+    const out = await guestBackupHandler(
+      { vmid: 101, mode: "snapshot", storage: "media-backup", confirm: true },
+      node,
+      audit,
+      cfg,
+      NOW
+    );
+    expect(out.storage).toBe("media-backup");
+    expect(node.createOpts).toMatchObject({ storage: "media-backup" });
+  });
+
+  it("refuses a storage name with illegal characters before doing any work", async () => {
+    const node = new FakeNode(guests, []);
+    await expect(
+      guestBackupHandler({ vmid: 101, mode: "snapshot", storage: "bad name", confirm: true }, node, audit, cfg, NOW)
+    ).rejects.toThrow();
+    expect(node.calls).toEqual([]);
+    expect(records).toEqual([]);
+  });
+
+  it("polls the vzdump task and reports verified success on the API path (ADR-023 #9)", async () => {
+    const node = new FakeNodeWithTask(guests, [], [{ status: "running" }, { status: "stopped", exitstatus: "OK" }]);
+    const out = await guestBackupHandler({ vmid: 101, mode: "snapshot", confirm: true }, node, audit, cfg, NOW, noSleep);
+    expect(out.taskStatus).toBe("OK");
+    expect(node.pollCount).toBe(2); // ran (running) → polled again (stopped OK)
+    expect(records[0]!.tool).toBe("guest_backup");
+    expect(records[0]!.isLargeChange).toBe(true);
+  });
+
+  it("surfaces an async vzdump failure LOUDLY instead of reporting false success (ADR-023 #9 headline)", async () => {
+    // The exact live failure: `local` lacks the `backup` content type.
+    const node = new FakeNodeWithTask(guests, [], [
+      { status: "stopped", exitstatus: "could not get storage information for 'local': wrong content type" },
+    ]);
+    await expect(
+      guestBackupHandler({ vmid: 101, mode: "snapshot", confirm: true }, node, audit, cfg, NOW, noSleep)
+    ).rejects.toThrow(/failed: could not get storage information.*wrong content type/);
+    // The create was issued, but the outcome is recorded as a FAILURE, not a large-change success.
+    expect(node.calls.some((c) => c.startsWith("create:"))).toBe(true);
+    expect(records).toHaveLength(1);
+    expect(records[0]!.tool).toBe("guest_backup");
+    expect(records[0]!.isLargeChange).toBe(false);
+    expect(records[0]!.note).toMatch(/FAILED/);
+  });
+
+  it("reports a timeout when the task never reaches a terminal state", async () => {
+    const node = new FakeNodeWithTask(guests, [], [{ status: "running" }]); // never stops
+    await expect(
+      guestBackupHandler({ vmid: 101, mode: "snapshot", confirm: true }, node, audit, cfg, NOW, noSleep)
+    ).rejects.toThrow(/failed: still running after/);
   });
 });
 

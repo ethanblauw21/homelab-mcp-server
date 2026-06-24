@@ -130,6 +130,61 @@ Two observations folded into already-deferred items (not separately fixed here):
 - **E1 confirmed to span `qm_*`.** `qm_agent_ping`/`qm_exec`/`qm_read_file`/`qm_write_file` on a non-VM or absent vmid leak the raw `Configuration file 'nodes/<node>/qemu-server/<vmid>.conf' does not exist` instead of a uniform "VM `<vmid>` not found." Same E1 root cause; the shared guest-existence precheck (Decision 7) should cover the `qm_*` family when implemented.
 - **Denylist newline-normalization false-positive (tripwire limit).** A multi-line `execute` whose `rm` targeted `/var/lib/vz/...` and which *separately* read `/etc/pve/storage.cfg` was refused by the protected-set guard: whitespace normalization collapsed the two unrelated commands onto one line, so `rm … /etc/pve` matched across them. This is the documented "tripwire, not a sandbox" behavior (ADR-004) failing **safe** (a false deny, never a false allow), so it is recorded, not fixed — splitting the commands is the workaround.
 
+## Second dogfooding pass (2026-06-24) — four more findings (G1–G4)
+
+A second full live run against `proxlab` (companion token + an in-session root window), now with B6's `Datastore.AllocateSpace` grant in place, surfaced four more issues. G2 is the same defect as **B5** (already shipped here) — the live run only re-exhibited it because the running `dist/` had been rebuilt from `master`, which predates this branch's B5 fix; no code change was needed, only a rebuild/merge. G1, G3, G4 are new.
+
+### Decision 10 — `guest_backup` must not report an async vzdump failure as success (G1, headline)
+
+**The bug.** Two compounding defects beyond B6's RBAC fix:
+1. **Silent async failure.** The API path (`ApiBackend.createBackup`) returns the vzdump **UPID immediately**; `unwrap()` only checks the task *creation* HTTP 200, never the task's eventual `exitstatus`. A vzdump that fails **after** submission was reported as **success** (UPID + `evicted:[]`). Live, the task's real `exitstatus` was `could not get storage information for 'local': can't use storage 'local' for backups - wrong content type` — yet the tool returned success.
+2. **Wrong-content-type footgun.** `cfg.backup.nodeBackupStorage` defaults to `"local"`, which on a default PVE install carries `import,vztmpl,iso` — **not** `backup`. There was no per-call `storage` override. (The SSH path is unaffected: `SshBackend.exec` throws on a non-zero exit, so a failed `vzdump` is already loud there.)
+
+**Fix.**
+- Add optional `taskStatus(upid)` to `NodeOps` (`ApiBackend` implements it via `GET /nodes/<node>/tasks/<upid>/status`; the SSH backend may omit it — it is already synchronous-loud). `guestBackupHandler` now **polls the task to completion** on the API path (bounded by new `backup.taskPollIntervalMs`/`taskTimeoutMs` config + `BACKUP_TASK_*` env, injectable sleep) and **throws + audits a failure** (`isLargeChange:false`, note `…FAILED:<exitstatus>`) instead of returning false success.
+- Add an optional **`storage`** param to `guest_backup` (charset-validated via `assertStorageName`) that overrides `NODE_BACKUP_STORAGE`; the failure message names the `backup`-content-type requirement. **Operator remediation** for this node: `NODE_BACKUP_STORAGE=media-backup` (the dir store that carries `backup,images,rootdir`).
+
+### Decision 11 — `snapshot_rollback` false restart-failure was already fixed (G2 = B5)
+
+No change. The live re-occurrence was the stale `dist/` (built from `master`); the branch source already polls run-state per B5 and its unit tests pin both the false-failure and genuine-failure cases. Rebuild/merge deploys it.
+
+### Decision 12 — `docker_exec` must not 127 on minimal images (G3)
+
+**The bug.** `buildDockerExecCommand` unconditionally wrapped the inner command with coreutils `timeout` **inside the container**, so distroless/scratch images (e.g. portainer) that lack the `timeout` binary failed `exit 127: exec: "timeout": not found`. Full distros (jellyfin/uptime-kuma) worked. The host-side `pct exec` `timeout` already bounds how long the server waits, so the in-container layer is redundant for the *wait*, only adding reliable in-guest *termination*.
+
+**Fix.** The in-container timeout is now **best-effort**: the wrapper probes `command -v timeout` at run time and falls back to a bare shell when it is absent (`if command -v timeout …; then exec timeout … ${shell} -c '<cmd>'; else exec ${shell} -c '<cmd>'; fi` — `exec` avoids the `&&`/`||` short-circuit trap). Reliable in-guest termination is kept where `timeout` exists; the host wrapper still bounds the wait everywhere.
+
+### Decision 13 — `diff_config` must accept Docker targets (G4)
+
+**The bug.** `diff_config` only built `host` or `{kind:"pct",vmid}` targets — a passed `container` was stripped (zod `.strip()`), so a Docker file resolved as a bare host path and returned "No backups found", even though `list_backups` **and** `revert_file` (via blob meta) handle Docker. `readCurrentForTarget` already supported `kind:"docker"`; the gap was purely in the handler's target resolution. (This also reconciles the CLAUDE.md claim that "`list_backups`/`diff_config` accept a `container` param," which was previously true only of `list_backups`.)
+
+**Fix.** Add a `container` field to the schema and a shared `targetFromInput(path, vmid, container)` resolver (docker > pct > host; `container` requires `vmid`), used by both the `backupPath`-fallback and `path`-only branches.
+
+| ID | Change | State | Verification |
+|---|---|---|---|
+| **G1** | `guest_backup` polls the vzdump task (`NodeOps.taskStatus`) on the API path and throws+audits a real failure; adds a `storage` override + `backup.task*` config | **Shipped + tested** | Unit tests pin verified-success, the live `wrong content type` async failure → loud throw + `isLargeChange:false` audit, the timeout path, the `storage` override, and an illegal-storage refusal. `apiBackend.test.ts` pins the url-encoded task-status GET. |
+| **G2** | (= B5) no code change; stale `dist` re-exhibited it | **Already shipped** | B5 source + unit tests; rebuild/merge deploys. |
+| **G3** | `docker_exec` in-container timeout is best-effort (`command -v timeout` fallback) | **Shipped + tested** | `dockerHelpers.test.ts` pins the probe/fallback shape for `sh` and `bash`; the bare-`timeout` 127 path is gone. |
+| **G4** | `diff_config` resolves Docker targets from `path+vmid+container` | **Shipped + tested** | `diffConfig.test.ts` pins the docker target resolution (asserts `seenTarget` + a real diff) and the `container`-without-`vmid` refusal. |
+
+### Decision 14 — Consistency backlog (G5–G7)
+
+The remaining "consider/confirm" rough edges from the dogfooding notes, resolved.
+
+**G5 (#3/#7) — unknown params are silently stripped (systemic, false success).** Zod's default object behavior is `.strip()`: a hallucinated/mis-remembered param name is **dropped with no error** and the handler runs with a default, reporting success. Hit twice live — `docker_logs` `lines:8` (the model used the sibling `tail_log`'s param name and this tool's own *output* field name) was dropped → clamped to the 100-line cap → dumped a huge log; `snapshot_create` `name`/`description` were dropped → auto-named "no-description" snapshot.
+- **Fix (central):** `strictifyInputSchema` (`util/strictSchema.ts`, pure) applies `.strict()` to every tool's `inputSchema` at the `register` boundary in `index.ts`, so an unknown top-level key becomes a loud MCP `Input validation error`. Verified safe against the SDK contract: `@modelcontextprotocol/sdk` (`zod-compat.js`) passes a ZodObject through to `safeParseAsync` **unchanged**, so the strict setting takes effect. Non-object schemas (unions/effects/raw shapes) and `.passthrough()` objects are returned untouched, so it is safe to apply blanket-style. Handlers are unit-tested directly (bypassing SDK validation), so no existing test regresses.
+- **Fix (root cause of #3):** `docker_logs` now names its line-count param **`lines`** (matching the sibling `tail_log` and its own `lines` output field), with `tail` kept as a back-compat alias (`lines` wins if both are given) — the cross-tool naming inconsistency that triggered the silent strip is gone, and strict catches any third name.
+
+**G6 (#6) — `revert_file` latest-resolution.** `revert_file` required an explicit `backupPath`, while `diff_config`/`list_backups` auto-resolve the latest for a target — an asymmetry for the common "undo my last change to this file" case. **Fix (opt-in, non-breaking):** when `backupPath` is omitted, `revert_file` resolves the **newest revertible** backup for the target named by `path` (+`vmid`/`container`), via the now-shared `targetFromInput` (`backup/store.ts`, also used by `diff_config`). The explicit-`backupPath` form is unchanged; the rollback circuit breaker still applies.
+
+**G7 (#1) — `describe_homelab` depth monotonicity.** `depth` was non-monotonic: `summary` and `full` included the `services[].docker` roster but `status` (between them) dropped it — a mid-depth that lost data a lower depth showed. **Decision:** keep the roster at **all** depths (`summary ⊆ status ⊆ full`); `status` stays leaner than `full` by dropping only the bulky per-guest **config** blob, making it the "roster without config" tier. (Chosen over the alternative of dropping the roster from `summary` too — keeping the roster everywhere preserves the most-useful at-a-glance default and adds a config-free roster tier.)
+
+| ID | Change | State | Verification |
+|---|---|---|---|
+| **G5** | central `.strict()` on tool input schemas (`strictifyInputSchema`); `docker_logs` param renamed `tail`→`lines` (alias kept) | **Shipped + tested** | `strictSchema.test.ts` pins reject-unknown / keep-declared / passthrough / non-object passthrough; `dockerLogs.test.ts` covers the `lines`/`tail` alias. SDK contract read to confirm strict survives normalization. |
+| **G6** | `revert_file` resolves the newest revertible backup when `backupPath` is omitted (shared `targetFromInput`) | **Shipped + tested** | `revertFile.test.ts` pins host latest-resolution (newest-revertible wins over a newer metadata-only), docker target resolution, the no-target and no-revertible-version refusals, and `container`-without-`vmid`. |
+| **G7** | `describe_homelab` keeps the docker roster at every depth (monotonic ladder) | **Shipped + tested** | `describeHomelab.test.ts` status-depth case now asserts the roster is present + config blob withheld. |
+
 ## Consequences
 
 - Six bug fixes (B1–B6) restore parity between the `pct`/`docker`/host families and remove two false-failure reports (`http_probe`, `snapshot_rollback`) that would mislead an operator. B6 restores the only rollback path for the snapshot-incapable guest — the highest-value fix.
