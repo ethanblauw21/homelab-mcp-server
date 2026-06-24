@@ -103,6 +103,17 @@ function toInt(s: string | undefined): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+/**
+ * Parse a *decimal* numeric column without the decimal-point stripping `toInt`
+ * does. `qm list` formats BOOTDISK(GB) as a float ("3.00", "8.50"), so `toInt`
+ * would turn "3.00" into 300 (ADR-023 F1, caught in live qm dogfooding). Keeps
+ * the fractional value; only digits, dot and minus survive.
+ */
+function toNum(s: string | undefined): number {
+  const n = parseFloat((s ?? "").replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
 function nonEmptyLines(output: string): string[] {
   return output
     .split("\n")
@@ -247,7 +258,7 @@ export function parseQmList(output: string): QmRow[] {
       status: parts[2] ?? "",
     };
     if (parts[3] !== undefined) row.memMB = toInt(parts[3]);
-    if (parts[4] !== undefined) row.bootDiskGB = toInt(parts[4]);
+    if (parts[4] !== undefined) row.bootDiskGB = toNum(parts[4]); // float column (e.g. "3.00")
     if (parts[5] !== undefined && parts[5] !== "-") row.pid = toInt(parts[5]);
     rows.push(row);
   }
