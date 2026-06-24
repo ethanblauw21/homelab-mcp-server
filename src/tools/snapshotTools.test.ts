@@ -6,6 +6,7 @@ import {
   snapshotDeleteHandler,
 } from "./snapshotTools.js";
 import { FakeTransport } from "../ssh/fakeTransport.js";
+import type { ExecResult, SshTransport } from "../ssh/transport.js";
 import { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
 import fs from "fs";
@@ -200,6 +201,58 @@ describe("snapshotRollbackHandler", () => {
 
     await snapshotRollbackHandler({ vmid: 200, name: "mcp-x", confirm: true, stopIfRunning: false }, t, audit, cfg);
     expect(audit.readAll()[0].note).toMatch(/disk-only/i);
+  });
+
+  it("succeeds when the start command returns exitCode:null but the guest is running (ADR-023 B5)", async () => {
+    // The B5 bug: an SSH-routed `pct start` returns exitCode null (wait timed out)
+    // while the guest DID come up. The old code threw a false "failed to restart".
+    const t = new FakeTransport();
+    t.setExecResult("pct list", { stdout: PCT_LIST_101, stderr: "", exitCode: 0 });
+    t.setExecResult("pct status 101", { stdout: "status: running", stderr: "", exitCode: 0 });
+    t.setExecResult("pct stop 101", { stdout: "", stderr: "", exitCode: 0 });
+    t.setExecResult("pct rollback 101 mcp-x", { stdout: "", stderr: "", exitCode: 0 });
+    t.setExecResult("pct start 101", { stdout: "", stderr: "", exitCode: null }); // wait timed out
+
+    const res = await snapshotRollbackHandler(
+      { vmid: 101, name: "mcp-x", confirm: true, stopIfRunning: true },
+      t, audit, cfg
+    );
+    expect(res).toMatchObject({ restarted: true });
+    expect(audit.readAll()[0].note).toMatch(/running \(restarted\)/i);
+  });
+
+  it("reports a restart failure only when run-state stays non-running past the deadline (ADR-023 B5)", async () => {
+    // pre-check sees running (⇒ wasRunning) but every post-start poll sees stopped.
+    let statusCalls = 0;
+    const fixed = new Map<string, ExecResult>([
+      ["pct list", { stdout: PCT_LIST_101, stderr: "", exitCode: 0 }],
+      ["pct stop 101", { stdout: "", stderr: "", exitCode: 0 }],
+      ["pct rollback 101 mcp-x", { stdout: "", stderr: "", exitCode: 0 }],
+      ["pct start 101", { stdout: "", stderr: "", exitCode: null }],
+    ]);
+    const t = {
+      exec: async (command: string): Promise<ExecResult> => {
+        if (command === "pct status 101") {
+          const state = statusCalls === 0 ? "running" : "stopped"; // first = precheck
+          statusCalls++;
+          return { stdout: `status: ${state}`, stderr: "", exitCode: 0 };
+        }
+        return fixed.get(command) ?? { stdout: "", stderr: "", exitCode: 0 };
+      },
+    } as unknown as SshTransport;
+
+    // Tight poll bounds + a no-op sleep so the loop terminates instantly.
+    const fastCfg = makeConfig(tmpDir, { restartTimeoutMs: 10, restartPollIntervalMs: 5 });
+    const noSleep = async () => {};
+    await expect(
+      snapshotRollbackHandler(
+        { vmid: 101, name: "mcp-x", confirm: true, stopIfRunning: true },
+        t, audit, fastCfg, undefined, noSleep
+      )
+    ).rejects.toThrow(/did not return to running/i);
+    // The rollback ran (it's the restart verification that failed) — and the guest
+    // status was polled more than once before giving up.
+    expect(statusCalls).toBeGreaterThan(1);
   });
 });
 

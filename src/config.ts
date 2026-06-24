@@ -140,6 +140,12 @@ const ConfigSchema = z.object({
     // A3.2 — include RAM state in VM snapshots (qm --vmstate). Default false:
     // rollback is disk-only (guest resumes as if from power loss).
     vmstate: z.boolean().default(false),
+    // ADR-023 B5 — after a post-rollback restart, snapshot_rollback verifies the
+    // guest is actually running by POLLING run-state instead of trusting the start
+    // command's exit code (an SSH-routed `pct/qm start` can return exitCode null on
+    // a slow wait even though the guest came up). These bound that poll.
+    restartPollIntervalMs: z.number().default(2_000),
+    restartTimeoutMs: z.number().default(60_000),
   }),
   // ADR-004 — tool-layer caps.
   tools: z.object({
@@ -447,6 +453,13 @@ function loadConfig(): Config {
         ? parseInt(process.env.SNAPSHOT_PER_GUEST_CAP)
         : 3,
       vmstate: process.env.SNAPSHOT_VMSTATE === "true",
+      // ADR-023 B5 — undefined falls through to the schema defaults.
+      restartPollIntervalMs: process.env.SNAPSHOT_RESTART_POLL_INTERVAL_MS
+        ? parseInt(process.env.SNAPSHOT_RESTART_POLL_INTERVAL_MS)
+        : undefined,
+      restartTimeoutMs: process.env.SNAPSHOT_RESTART_TIMEOUT_MS
+        ? parseInt(process.env.SNAPSHOT_RESTART_TIMEOUT_MS)
+        : undefined,
     },
     tools: {
       readFileMaxBytes: process.env.READ_FILE_MAX_BYTES
