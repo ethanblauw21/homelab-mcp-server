@@ -111,6 +111,24 @@ These were left uncoded **deliberately** — each needs a live guest-cycle re-te
 - **E3 / E5 / E6 / E7** — empty-`sections` semantics, a `guest_backup_delete` verb, `compose_preflight` own-port noise, and `describe_homelab` `compareToPrevious`-with-`sections` drift.
 - **Decision 9 (redundancy)** — recommendation (a): keep `service_logs` as an annotated tier-policy alias; no removal.
 
+## qm_* live verification addendum (2026-06-23)
+
+The original run could not exercise `qm_*` beyond refusal paths (no VM existed). That **coverage gap is now closed**: a temporary root window provisioned a throwaway Debian 12 cloud VM (vmid 9000, `qemu-guest-agent` via a cloud-init snippet), the full `qm_*` family was dogfooded ~5×+ each with a mutation mindset, and the VM + all host changes were torn down (window closed back to companion). The family is **healthy** — every guardrail held and the honest-exit/parity behaviors the `pct`/`docker` siblings have are present here too:
+
+- `qm_read_file`: missing file → clean "File not found inside VM" (**no B1 analog** — the agent file-read path correctly distinguishes absent from empty); windowed read, base64, directory→error, past-EOF→empty, and `redact:true` (password/api_token → `[REDACTED]`, true pre-redaction `bytes`) all correct.
+- `qm_write_file`/`qm_edit_file`: `dryRun` new-file detection (`isNewFile:true`), real write + backup/audit, overwrite-of-existing, write→read roundtrip fidelity, and every edit guardrail (unique match, ambiguous-without-`replaceAll` refusal, no-op refusal, missing-file refusal, `replaceAll`) all correct.
+- `qm_exec`: DENY (`rm -rf /`), CONFIRM-gate refusal (`reboot`), honest `exitCode` propagation (`exit 7`), stderr capture all correct.
+
+Two **real bugs** surfaced and are fixed in this branch (tests pin both):
+
+- **F1 — `qm_list`/census `bootDiskGB` inflated ~100×.** The shared `parseQmList` (`censusParsers.ts`) ran the `BOOTDISK(GB)` column — which `qm list` always formats as a float (`3.00`, `8.50`) — through the integer parser `toInt`, whose `replace(/[^\d-]/g,"")` **strips the decimal point**, so `3.00 → "300" → 300`. Affected `qm_list` **and** `describe_homelab`/`describe_guest` (same parser). Fix: a decimal-preserving `toNum` for that one float column. The pre-existing parser test used `32.00`/`64.00` inputs but **never asserted `bootDiskGB`**, which is why it slipped — the regression test now asserts the value.
+- **F2 — `qm_exec` timeout surfaced a cryptic `exit 124` instead of the documented `timedOut:true`/`exitCode:null`/guest-pid.** The handler passed the *same* `timeoutMs` as both the agent `--timeout` (seconds) **and** the SSH transport's node-side `timeout` wrapper, so the wrapper killed `qm guest exec` at the same instant the agent timeout would have returned its honest `exited:false` blob. The documented honest-timeout path was effectively unreachable. Fix: give the transport wrapper `commandTimeoutGraceMs` of headroom over the agent `--timeout`, so the agent returns first and `parseAgentExec` reports the real timeout semantics.
+
+Two observations folded into already-deferred items (not separately fixed here):
+
+- **E1 confirmed to span `qm_*`.** `qm_agent_ping`/`qm_exec`/`qm_read_file`/`qm_write_file` on a non-VM or absent vmid leak the raw `Configuration file 'nodes/<node>/qemu-server/<vmid>.conf' does not exist` instead of a uniform "VM `<vmid>` not found." Same E1 root cause; the shared guest-existence precheck (Decision 7) should cover the `qm_*` family when implemented.
+- **Denylist newline-normalization false-positive (tripwire limit).** A multi-line `execute` whose `rm` targeted `/var/lib/vz/...` and which *separately* read `/etc/pve/storage.cfg` was refused by the protected-set guard: whitespace normalization collapsed the two unrelated commands onto one line, so `rm … /etc/pve` matched across them. This is the documented "tripwire, not a sandbox" behavior (ADR-004) failing **safe** (a false deny, never a false allow), so it is recorded, not fixed — splitting the commands is the workaround.
+
 ## Consequences
 
 - Six bug fixes (B1–B6) restore parity between the `pct`/`docker`/host families and remove two false-failure reports (`http_probe`, `snapshot_rollback`) that would mislead an operator. B6 restores the only rollback path for the snapshot-incapable guest — the highest-value fix.
@@ -121,4 +139,4 @@ These were left uncoded **deliberately** — each needs a live guest-cycle re-te
 ## Honest non-goals
 
 - This ADR does not re-litigate the deliberate tier asymmetries (`tail_log` companion host-read vs the root-gated rest) — those are documented design (ADR-005/007), and the dogfooding confirmed they behave as specified.
-- The `qm_*` family could not be exercised beyond its refusal paths (no VM exists on the node); its mutation surface is unverified live and is called out as a coverage gap, not a finding.
+- ~~The `qm_*` family could not be exercised beyond its refusal paths (no VM exists on the node); its mutation surface is unverified live and is called out as a coverage gap, not a finding.~~ **Resolved 2026-06-23** — see the "qm_* live verification addendum" above: the family was dogfooded live against a throwaway VM, found healthy, and two bugs (F1/F2) were fixed.

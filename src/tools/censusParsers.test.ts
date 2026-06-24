@@ -85,6 +85,19 @@ describe("parseQmList", () => {
     expect(rows[1]).toMatchObject({ vmid: 101, name: "winserver", status: "stopped" });
     expect(rows[1]!.pid).toBeUndefined();
   });
+  it("parses the BOOTDISK(GB) float column verbatim, not decimal-stripped (ADR-023 F1)", () => {
+    // qm list always formats boot disk as a float; toInt would turn "3.00" into 300.
+    const out = [
+      "      VMID NAME                 STATUS     MEM(MB)    BOOTDISK(GB) PID",
+      "      9000 qm-dogfood           running    1024              3.00 2600407",
+      "       100 truenas              running    8192             32.00 1234",
+      "       102 fractional           running    2048              8.50 -",
+    ].join("\n");
+    const rows = parseQmList(out);
+    expect(rows[0]!.bootDiskGB).toBe(3); // was 300 before the fix
+    expect(rows[1]!.bootDiskGB).toBe(32); // was 3200
+    expect(rows[2]!.bootDiskGB).toBe(8.5); // fractional GB preserved
+  });
   it("returns [] for an empty list", () => {
     expect(parseQmList("VMID NAME STATUS")).toEqual([]);
   });

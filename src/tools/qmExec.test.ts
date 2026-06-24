@@ -3,6 +3,7 @@ import { qmExecHandler } from "./qmExec.js";
 import { qmListHandler } from "./qmList.js";
 import { qmAgentPingHandler } from "./qmAgentPing.js";
 import { FakeTransport } from "../ssh/fakeTransport.js";
+import type { ExecResult } from "../ssh/transport.js";
 import { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
 import fs from "fs";
@@ -11,7 +12,7 @@ import path from "path";
 
 function makeConfig(tmpDir: string): Config {
   return {
-    ssh: { host: "h", port: 22, username: "root", privateKeyPath: "", keepaliveInterval: 0, reconnectDelay: 0, commandTimeoutMs: 5000, skipHostVerification: true },
+    ssh: { host: "h", port: 22, username: "root", privateKeyPath: "", keepaliveInterval: 0, reconnectDelay: 0, commandTimeoutMs: 5000, commandTimeoutGraceMs: 10000, skipHostVerification: true },
     backup: { baseDir: path.join(tmpDir, "backups"), largeFileBytesThreshold: 1024 * 1024, largeFilePolicy: "diff", perFileVersionCap: 10, globalSizeCapBytes: 100 * 1024 * 1024, diskPressureFailSafe: "warn" },
     audit: { logPath: path.join(tmpDir, "audit.jsonl") },
     container: { newFileMode: "0644", newFileUid: 0, newFileGid: 0, nodeTempDir: "/tmp" },
@@ -128,5 +129,30 @@ describe("qmExecHandler", () => {
     expect(res.exitCode).toBeNull();
     const note = audit.readAll()[0]!.note ?? "";
     expect(note).toMatch(/5151/);
+  });
+
+  it("gives the SSH wrapper grace over the agent --timeout so the agent times out first (ADR-023 F2)", async () => {
+    // Without headroom the node-side `timeout` wrapper kills `qm guest exec` at the
+    // same instant the agent --timeout fires (exit 124), losing the honest blob.
+    const calls: Array<{ command: string; timeoutMs?: number }> = [];
+    const results = new Map<string, ExecResult>([
+      ["qm agent 100 ping", AGENT_OK],
+      [
+        "qm guest exec 100 --timeout 5 -- sh -c 'uptime'",
+        { stdout: JSON.stringify({ exited: 1, exitcode: 0, "out-data": "ok" }), stderr: "", exitCode: 0 },
+      ],
+    ]);
+    const recording = {
+      exec: async (command: string, timeoutMs?: number): Promise<ExecResult> => {
+        calls.push({ command, timeoutMs });
+        return results.get(command) ?? { stdout: "", stderr: "", exitCode: 0 };
+      },
+    } as unknown as import("../ssh/transport.js").SshTransport;
+    await qmExecHandler({ vmid: 100, command: "uptime" }, recording, audit, cfg);
+    const guestExec = calls.find((c) => c.command.startsWith("qm guest exec"))!;
+    // agent --timeout derives from commandTimeoutMs (5000ms ⇒ 5s); the transport
+    // timeout must exceed it by the grace (10000ms) ⇒ 15000ms.
+    expect(guestExec.timeoutMs).toBe(5000 + 10000);
+    expect(guestExec.timeoutMs).toBeGreaterThan(5000);
   });
 });

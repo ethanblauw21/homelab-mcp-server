@@ -64,7 +64,12 @@ export async function qmExecHandler(
   const heavy = detectHeavyCommand(input.command);
   const timeoutSecs = timeoutMsToSecs(timeoutMs);
   const fullCommand = buildQmGuestExecCommand(input.vmid, input.command, { timeoutSecs });
-  const raw = await transport.exec(fullCommand, timeoutMs);
+  // ADR-023 F2 — the agent's own `--timeout` (timeoutSecs) must fire BEFORE the
+  // node-side `timeout` wrapper, or the wrapper kills `qm guest exec` at the same
+  // instant (exit 124) and we lose the agent's honest exited:false blob (timedOut
+  // /pid). Give the transport wrapper grace headroom so the agent returns first
+  // and parseAgentExec can report the documented timeout semantics.
+  const raw = await transport.exec(fullCommand, timeoutMs + cfg.ssh.commandTimeoutGraceMs);
   if (raw.exitCode !== 0 && raw.stdout.trim() === "") {
     // `qm guest exec` itself failed (not the in-guest command) — surface it.
     throw new Error(
