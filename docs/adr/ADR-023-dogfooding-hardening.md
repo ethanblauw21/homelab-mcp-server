@@ -167,6 +167,24 @@ No change. The live re-occurrence was the stale `dist/` (built from `master`); t
 | **G3** | `docker_exec` in-container timeout is best-effort (`command -v timeout` fallback) | **Shipped + tested** | `dockerHelpers.test.ts` pins the probe/fallback shape for `sh` and `bash`; the bare-`timeout` 127 path is gone. |
 | **G4** | `diff_config` resolves Docker targets from `path+vmid+container` | **Shipped + tested** | `diffConfig.test.ts` pins the docker target resolution (asserts `seenTarget` + a real diff) and the `container`-without-`vmid` refusal. |
 
+### Decision 14 — Consistency backlog (G5–G7)
+
+The remaining "consider/confirm" rough edges from the dogfooding notes, resolved.
+
+**G5 (#3/#7) — unknown params are silently stripped (systemic, false success).** Zod's default object behavior is `.strip()`: a hallucinated/mis-remembered param name is **dropped with no error** and the handler runs with a default, reporting success. Hit twice live — `docker_logs` `lines:8` (the model used the sibling `tail_log`'s param name and this tool's own *output* field name) was dropped → clamped to the 100-line cap → dumped a huge log; `snapshot_create` `name`/`description` were dropped → auto-named "no-description" snapshot.
+- **Fix (central):** `strictifyInputSchema` (`util/strictSchema.ts`, pure) applies `.strict()` to every tool's `inputSchema` at the `register` boundary in `index.ts`, so an unknown top-level key becomes a loud MCP `Input validation error`. Verified safe against the SDK contract: `@modelcontextprotocol/sdk` (`zod-compat.js`) passes a ZodObject through to `safeParseAsync` **unchanged**, so the strict setting takes effect. Non-object schemas (unions/effects/raw shapes) and `.passthrough()` objects are returned untouched, so it is safe to apply blanket-style. Handlers are unit-tested directly (bypassing SDK validation), so no existing test regresses.
+- **Fix (root cause of #3):** `docker_logs` now names its line-count param **`lines`** (matching the sibling `tail_log` and its own `lines` output field), with `tail` kept as a back-compat alias (`lines` wins if both are given) — the cross-tool naming inconsistency that triggered the silent strip is gone, and strict catches any third name.
+
+**G6 (#6) — `revert_file` latest-resolution.** `revert_file` required an explicit `backupPath`, while `diff_config`/`list_backups` auto-resolve the latest for a target — an asymmetry for the common "undo my last change to this file" case. **Fix (opt-in, non-breaking):** when `backupPath` is omitted, `revert_file` resolves the **newest revertible** backup for the target named by `path` (+`vmid`/`container`), via the now-shared `targetFromInput` (`backup/store.ts`, also used by `diff_config`). The explicit-`backupPath` form is unchanged; the rollback circuit breaker still applies.
+
+**G7 (#1) — `describe_homelab` depth monotonicity.** `depth` was non-monotonic: `summary` and `full` included the `services[].docker` roster but `status` (between them) dropped it — a mid-depth that lost data a lower depth showed. **Decision:** keep the roster at **all** depths (`summary ⊆ status ⊆ full`); `status` stays leaner than `full` by dropping only the bulky per-guest **config** blob, making it the "roster without config" tier. (Chosen over the alternative of dropping the roster from `summary` too — keeping the roster everywhere preserves the most-useful at-a-glance default and adds a config-free roster tier.)
+
+| ID | Change | State | Verification |
+|---|---|---|---|
+| **G5** | central `.strict()` on tool input schemas (`strictifyInputSchema`); `docker_logs` param renamed `tail`→`lines` (alias kept) | **Shipped + tested** | `strictSchema.test.ts` pins reject-unknown / keep-declared / passthrough / non-object passthrough; `dockerLogs.test.ts` covers the `lines`/`tail` alias. SDK contract read to confirm strict survives normalization. |
+| **G6** | `revert_file` resolves the newest revertible backup when `backupPath` is omitted (shared `targetFromInput`) | **Shipped + tested** | `revertFile.test.ts` pins host latest-resolution (newest-revertible wins over a newer metadata-only), docker target resolution, the no-target and no-revertible-version refusals, and `container`-without-`vmid`. |
+| **G7** | `describe_homelab` keeps the docker roster at every depth (monotonic ladder) | **Shipped + tested** | `describeHomelab.test.ts` status-depth case now asserts the roster is present + config blob withheld. |
+
 ## Consequences
 
 - Six bug fixes (B1–B6) restore parity between the `pct`/`docker`/host families and remove two false-failure reports (`http_probe`, `snapshot_rollback`) that would mislead an operator. B6 restores the only rollback path for the snapshot-incapable guest — the highest-value fix.

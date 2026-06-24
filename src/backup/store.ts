@@ -34,6 +34,25 @@ export function targetKeyString(t: BackupTarget): string {
   return t.remotePath;
 }
 
+/**
+ * Build a BackupTarget from the loose `path`/`vmid`/`container` inputs that the
+ * read/diff/revert tools accept (docker > pct > host). `container` requires `vmid`
+ * (a Docker target is addressed by the LXC host vmid plus the container name). Pure;
+ * shared by `diff_config` and `revert_file` so their target resolution can't drift.
+ * Note: `qm` targets cannot be addressed this way (they carry no descriptor-stable
+ * path) — pass a `backupPath` for those.
+ */
+export function targetFromInput(remotePath: string, vmid?: number, container?: string): BackupTarget {
+  if (container !== undefined) {
+    if (vmid === undefined) {
+      throw new Error("`container` requires `vmid` (a Docker target is addressed by vmid + container).");
+    }
+    return { kind: "docker", vmid, container, remotePath };
+  }
+  if (vmid !== undefined) return { kind: "pct", vmid, remotePath };
+  return { kind: "host", remotePath };
+}
+
 export interface BackupResult {
   backupPath: string | null;   // null for dedup (points to existing) or metadata-only
   existingPath?: string;       // set for dedup

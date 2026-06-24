@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { SshTransport } from "../ssh/transport.js";
-import type { BackupStore, BackupTarget, BackupVersionInfo } from "../backup/store.js";
+import { targetFromInput, type BackupStore, type BackupTarget, type BackupVersionInfo } from "../backup/store.js";
 import type { Config } from "../config.js";
 import { sha256 } from "../audit/record.js";
 import { computeUnifiedDiff } from "../util/diff.js";
@@ -54,23 +54,6 @@ export interface DiffConfigResult {
   currentSha256?: string;
   backupSha256?: string;
   note?: string;
-}
-
-/**
- * Build a BackupTarget from the loose `path`/`vmid`/`container` inputs (ADR-023 #5):
- * docker (vmid + container) > pct (vmid) > host. `container` requires `vmid` — a
- * Docker target is addressed by the LXC host vmid plus the container name, exactly
- * as `list_backups`/`revert_file` already do.
- */
-function targetFromInput(remotePath: string, vmid?: number, container?: string): BackupTarget {
-  if (container !== undefined) {
-    if (vmid === undefined) {
-      throw new Error("`container` requires `vmid` (a Docker target is addressed by vmid + container).");
-    }
-    return { kind: "docker", vmid, container, remotePath };
-  }
-  if (vmid !== undefined) return { kind: "pct", vmid, remotePath };
-  return { kind: "host", remotePath };
 }
 
 /** path.resolve-style comparison without importing path: normalize separators + case-fold drive. */

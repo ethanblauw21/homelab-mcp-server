@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { SshTransport } from "../ssh/transport.js";
 import { validatePath } from "../guardrails/pathValidation.js";
-import type { BackupStore, BackupTarget } from "../backup/store.js";
+import { targetFromInput, targetKeyString, type BackupStore, type BackupTarget } from "../backup/store.js";
 import { buildAuditRecord, sha256 } from "../audit/record.js";
 import type { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
@@ -25,16 +25,33 @@ import { contentLeafHash } from "../integrity/leafHash.js";
 import { RollbackBreaker, rollbackTargetKey, breakerRefusal } from "../guardrails/rollbackBreaker.js";
 
 export const RevertFileInputSchema = z.object({
-  backupPath: z.string().min(1).describe(
-    "Local path to the backup blob (the backupPath returned by a prior write_file/pct_write_file call)"
-  ),
+  backupPath: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Local path to a specific backup blob (the backupPath a prior write_file/pct_write_file returned). " +
+        "Omit to revert the LATEST revertible backup for `path` (ADR-023 #6) — `path` is then required."
+    ),
   path: z
     .string()
     .min(1)
     .optional()
     .describe(
-      "Optional. If supplied, must match the path recorded in the backup metadata; otherwise the target is resolved from the backup itself."
+      "Target file path. Required when `backupPath` is omitted (resolves the newest revertible backup). " +
+        "When `backupPath` IS supplied it is optional but, if given, must match the backup's recorded path."
     ),
+  vmid: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Container/guest VMID when reverting an LXC (or Docker) file by `path` (used only without `backupPath`)."),
+  container: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Docker container name when reverting a Docker file by `path`. Requires `vmid` (used only without `backupPath`)."),
   overrideCircuitBreaker: z
     .boolean()
     .optional()
@@ -54,25 +71,51 @@ export async function revertFileHandler(
   history?: ConfigHistory,
   breaker?: RollbackBreaker
 ): Promise<{ auditId: string; restoredFrom: string; bytes: number; vmid?: number }> {
-  // Resolve where this backup belongs (host SFTP vs. container push) from the
-  // meta descriptor — the caller need only pass backupPath. When no meta exists
-  // (legacy/bare blobs), fall back to a host target using the supplied path.
+  // ADR-023 #6 — latest-resolution. With no `backupPath`, resolve the NEWEST
+  // revertible backup for the target named by `path` (+vmid/container), mirroring
+  // diff_config/list_backups (which already auto-resolve latest). The explicit
+  // `backupPath` form is unchanged; this only adds a convenience for the common
+  // "undo my last change to this file" case.
+  let backupPath = input.backupPath;
   let target: BackupTarget;
-  try {
-    target = backupStore.readBackupTarget(input.backupPath);
-  } catch {
+  if (backupPath === undefined) {
     if (!input.path) {
       throw new Error(
-        "Backup metadata not found and no path supplied; cannot determine the restore target"
+        "Provide either `backupPath`, or `path` (+vmid/container) to revert the latest backup for that file."
       );
     }
-    target = { kind: "host", remotePath: input.path };
-  }
+    target = targetFromInput(input.path, input.vmid, input.container);
+    const versions = backupStore.listBackupsForPath(target);
+    const chosen = versions.find((v) => v.revertible);
+    if (chosen === undefined) {
+      const where = targetKeyString(target);
+      throw new Error(
+        versions.length === 0
+          ? `No backups found for ${where}.`
+          : `No revertible (content-bearing) backup found for ${where} — the versions are metadata-only.`
+      );
+    }
+    backupPath = chosen.backupPath;
+  } else {
+    // Resolve where this backup belongs (host SFTP vs. container push) from the
+    // meta descriptor — the caller need only pass backupPath. When no meta exists
+    // (legacy/bare blobs), fall back to a host target using the supplied path.
+    try {
+      target = backupStore.readBackupTarget(backupPath);
+    } catch {
+      if (!input.path) {
+        throw new Error(
+          "Backup metadata not found and no path supplied; cannot determine the restore target"
+        );
+      }
+      target = { kind: "host", remotePath: input.path };
+    }
 
-  if (input.path !== undefined && input.path !== target.remotePath) {
-    throw new Error(
-      `Path mismatch: supplied "${input.path}" does not match backup target "${target.remotePath}"`
-    );
+    if (input.path !== undefined && input.path !== target.remotePath) {
+      throw new Error(
+        `Path mismatch: supplied "${input.path}" does not match backup target "${target.remotePath}"`
+      );
+    }
   }
 
   const pathResult = validatePath(target.remotePath, {
@@ -174,7 +217,7 @@ export async function revertFileHandler(
     }
   }
 
-  const restored = await backupStore.restore(input.backupPath, currentContent);
+  const restored = await backupStore.restore(backupPath, currentContent);
   if (restored === null) {
     throw new Error("Backup is metadata-only — no content stored, cannot revert");
   }
@@ -248,7 +291,7 @@ export async function revertFileHandler(
     hashScope: target.remotePath,
     // ADR-021 — flag a revert that bypassed a tripped breaker, kept distinct from confirm.
     ...(input.overrideCircuitBreaker && { circuitBreakerOverridden: true }),
-    note: `Reverted from backup: ${input.backupPath}`,
+    note: `Reverted from backup: ${backupPath}`,
   });
 
   // ADR-006 capture path A: a revert is a write, so it gets a history step too
@@ -268,7 +311,7 @@ export async function revertFileHandler(
 
   return {
     auditId: record.id,
-    restoredFrom: input.backupPath,
+    restoredFrom: backupPath,
     bytes: restored.length,
     vmid,
   };
