@@ -227,11 +227,17 @@ export async function healthCheckHandler(
 /**
  * ADR-007 §6 — API-backed health check (observe/operate tiers).
  *
- * `node` (load/memory), `storage` (PVE stores), and `updates` (apt simulate) are
- * served through NodeOps. The exec-bound sections — `units` (host `systemctl
- * --failed`) and `guests` onboot-stopped detection (needs `/etc/pve/*.conf`) —
- * report `{ unavailableAtTier: "companion" }`. ZFS and per-filesystem `df` usage
- * have no token-grade API and are simply omitted (not errors).
+ * `node` (load/memory) and `storage` (PVE stores) are served through NodeOps.
+ * The remaining sections report `{ unavailableAtTier: "companion" }`:
+ *   - `units` (host `systemctl --failed`) and `guests` onboot-stopped detection
+ *     (needs `/etc/pve/*.conf`) are exec-bound; and
+ *   - `updates`, because the Proxmox `GET .../apt/update` endpoint requires
+ *     `Sys.Modify` (the read refreshes the apt cache) — a privilege the tier
+ *     tokens deliberately lack, so it ALWAYS 403s below companion. Attempting it
+ *     produced a recurring section error on every call (confirmed live against
+ *     proxlab); companion reads pending updates via SSH (`apt-get -s`) instead.
+ * ZFS and per-filesystem `df` usage have no token-grade API and are simply
+ * omitted (not errors).
  */
 async function apiHealthCheck(
   requested: Set<HealthSection>,
@@ -286,17 +292,11 @@ async function apiHealthCheck(
     }
   }
 
-  if (requested.has("updates")) {
-    try {
-      // A5.1: aptUpdates simulates (`apt-get -s`); never `apt update`.
-      const count = (await nodeOps.aptUpdates()).length;
-      add("updates", evaluatePendingUpdates(count, cfg.health.pendingUpdatesWarnCount));
-    } catch (e) {
-      errors.push({ section: "updates", error: errMsg(e) });
-    }
-  }
-
-  // Exec-bound: onboot config (/etc/pve/*.conf) and host failed units.
+  // Sections not readable with a tier token are reported as unavailable rather
+  // than left to fail. `updates`: GET .../apt/update needs Sys.Modify (always
+  // 403s here); companion reads it via SSH `apt-get -s`. `units`/`guests` are
+  // exec-bound: host `systemctl --failed` and onboot config (/etc/pve/*.conf).
+  if (requested.has("updates")) unavailable.push({ section: "updates", unavailableAtTier: "companion" });
   if (requested.has("guests")) unavailable.push({ section: "guests", unavailableAtTier: "companion" });
   if (requested.has("units")) unavailable.push({ section: "units", unavailableAtTier: "companion" });
 
