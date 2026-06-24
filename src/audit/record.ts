@@ -88,6 +88,15 @@ export interface AuditRecord {
   beforeHash?: string;
   afterHash?: string;
   hashScope?: string;
+  // ADR-021 — rollback circuit breaker. `refused: true` + `circuitBreaker` mark a
+  // tripped-breaker REFUSAL row (the first audited refusal — denylist/confirm
+  // refusals throw before append): an automated caller looped on a rollback
+  // target. `circuitBreakerOverridden: true` marks a success that bypassed a
+  // tripped breaker via overrideCircuitBreaker — a deliberate, flagged act kept
+  // distinct from `confirm`. Both feed ADR-015 auditStats as silent-failure signals.
+  refused?: boolean;
+  circuitBreaker?: { recentCount: number; limit: number; windowMs: number };
+  circuitBreakerOverridden?: boolean;
   note?: string;
 }
 

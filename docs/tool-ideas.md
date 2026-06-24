@@ -148,7 +148,7 @@ first, then return just the neighborhood. It's the read-side analogue of
 `edit_file`'s find-and-replace front door (ADR-011), and the surgical-read tool
 ADR-017's budgeting doctrine implies but doesn't yet provide.
 
-## 8. rollback circuit breaker — the "panicked agent" guard → ADR-021 ✅ SPECCED
+## 8. rollback circuit breaker — the "panicked agent" guard → ADR-021 ✅ IMPLEMENTED (2026-06-23)
 
 **Friction.** An agent that hits an error, blindly `revert_file`/`snapshot_rollback`s,
 re-runs the same faulty command, and rolls back again burns tokens in a loop and
