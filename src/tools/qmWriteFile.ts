@@ -129,6 +129,19 @@ export async function writeResolvedQm(
     cfg.backup.largeFileBytesThreshold
   );
 
+  // ADR-008 §3 diff-on-write, computed once for BOTH the dryRun preview and the
+  // real-write path (ADR-022 hands it to the audit.db projection). New file ⇒
+  // diff vs empty; binary content ⇒ diff null.
+  const diffable =
+    isTextContent(newContent) && (isNewFile || (prevContent !== null && isTextContent(prevContent)));
+  const diff = diffable
+    ? computeUnifiedDiff(
+        prevContent ? prevContent.toString("utf8") : "",
+        newContent.toString("utf8"),
+        cfg.tools.dryRunDiffMaxLines
+      )
+    : null;
+
   // dryRun: full pipeline READ-ONLY, no side effects (write/backup/audit).
   if (args.dryRun) {
     const existingHashMap = backupStore.buildExistingHashMap(cfg.backup.baseDir);
@@ -142,16 +155,6 @@ export async function writeResolvedQm(
       existingHashToPaths: existingHashMap,
       chainBaseHash,
     });
-
-    const diffable =
-      isTextContent(newContent) && (isNewFile || (prevContent !== null && isTextContent(prevContent)));
-    const diff = diffable
-      ? computeUnifiedDiff(
-          prevContent ? prevContent.toString("utf8") : "",
-          newContent.toString("utf8"),
-          cfg.tools.dryRunDiffMaxLines
-        )
-      : null;
 
     return {
       dryRun: true,
@@ -218,7 +221,10 @@ export async function writeResolvedQm(
     note: largeChange.isLarge ? largeChange.reason : undefined,
   });
 
-  await audit.append(record);
+  // ADR-022 — hand the diff-on-write output to the audit.db projection via the
+  // extras side-channel (qm content is a fingerprint, not a forest leaf, but the
+  // diff is still searchable in query_audit). Binary ⇒ diff === null.
+  await audit.append(record, { diff: diff ? diff.diff : null });
 
   return {
     backupPath: backupResult.backupPath ?? backupResult.existingPath ?? null,

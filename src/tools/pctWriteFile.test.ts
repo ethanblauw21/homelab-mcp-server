@@ -156,4 +156,48 @@ describe("pctWriteFileHandler", () => {
     expect(res.diff).toContain("+ hello");
     expect(audit.readAll()).toHaveLength(0);
   });
+
+  // ADR-022 gap 1 — the diff-on-write output reaches the audit.db projector via
+  // the extras side-channel (previously only write_file/edit_file did this).
+  it("forwards the unified diff to the audit.db projector on a text overwrite", async () => {
+    const captured: Array<{ diff?: string | null }> = [];
+    audit.setProjector({ project: (_r, extras) => captured.push(extras ?? {}) });
+
+    const t = new FakeTransport();
+    t.setExecResult("pct status 101", { stdout: "status: running", stderr: "", exitCode: 0 });
+    t.setExecResult("mktemp -p '/tmp'", { stdout: "/tmp/tmp.W", stderr: "", exitCode: 0 });
+    t.setExecResult("pct pull 101 '/etc/app.conf' '/tmp/tmp.W'", { stdout: "", stderr: "", exitCode: 0 });
+    t.setFile("/tmp/tmp.W", "old body");
+    t.setExecResult("pct exec 101 -- stat -c '%a %u %g' '/etc/app.conf'", { stdout: "644 0 0", stderr: "", exitCode: 0 });
+    t.setExecResult("pct push 101 '/tmp/tmp.W' '/etc/app.conf' --perms '644' --user 0 --group 0", { stdout: "", stderr: "", exitCode: 0 });
+
+    await pctWriteFileHandler(
+      { vmid: 101, path: "/etc/app.conf", content: "new body", encoding: "utf8" },
+      t, audit, backupStore, cfg
+    );
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].diff).toContain("+ new body");
+    expect(captured[0].diff).toContain("- old body");
+  });
+
+  it("forwards diff: null to the projector on a binary write", async () => {
+    const captured: Array<{ diff?: string | null }> = [];
+    audit.setProjector({ project: (_r, extras) => captured.push(extras ?? {}) });
+
+    const t = new FakeTransport();
+    t.setExecResult("pct status 101", { stdout: "status: running", stderr: "", exitCode: 0 });
+    t.setExecResult("mktemp -p '/tmp'", { stdout: "/tmp/tmp.W", stderr: "", exitCode: 0 });
+    t.setExecResult("pct pull 101 '/etc/blob.bin' '/tmp/tmp.W'", { stdout: "", stderr: "No such file", exitCode: 1 });
+    t.setExecResult("pct push 101 '/tmp/tmp.W' '/etc/blob.bin' --perms '0644' --user 0 --group 0", { stdout: "", stderr: "", exitCode: 0 });
+
+    // A NUL byte makes the content non-text ⇒ diff omitted.
+    await pctWriteFileHandler(
+      { vmid: 101, path: "/etc/blob.bin", content: Buffer.from([0x00, 0x01, 0x02]).toString("base64"), encoding: "base64" },
+      t, audit, backupStore, cfg
+    );
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].diff).toBeNull();
+  });
 });

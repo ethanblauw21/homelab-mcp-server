@@ -275,7 +275,10 @@ export async function writeResolvedDocker(
       .join("; ") || undefined,
   });
 
-  await audit.append(record);
+  // ADR-022 — hand the diff-on-write output (already computed above) to the
+  // audit.db projection via the extras side-channel. Redacted + stored only in
+  // the derived index; the JSONL record is untouched. Binary ⇒ diff === null.
+  await audit.append(record, { diff: writeDiff.diff });
 
   return {
     backupPath: backupResult.backupPath ?? backupResult.existingPath ?? null,

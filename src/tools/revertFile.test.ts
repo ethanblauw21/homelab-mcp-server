@@ -100,6 +100,25 @@ describe("revertFileHandler", () => {
     expect(written.toString()).toBe(originalContent);
   });
 
+  // ADR-022 gap 1 — a revert is a write, so its current→restored diff reaches the
+  // audit.db projector via the extras side-channel.
+  it("forwards the current→restored diff to the audit.db projector", async () => {
+    const captured: Array<{ diff?: string | null }> = [];
+    audit.setProjector({ project: (_r, extras) => captured.push(extras ?? {}) });
+
+    const backupPath = makeGzBackup(cfg.backup.baseDir, "line one\nORIGINAL\nline three\n");
+    transport.setFile("/tmp/test.txt", "line one\nCHANGED\nline three\n");
+
+    await revertFileHandler(
+      { path: "/tmp/test.txt", backupPath },
+      transport, audit, backupStore, cfg
+    );
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].diff).toContain("- CHANGED");
+    expect(captured[0].diff).toContain("+ ORIGINAL");
+  });
+
   it("appends an audit record with tool=revert_file", async () => {
     const backupPath = makeGzBackup(cfg.backup.baseDir, "content");
     transport.setFile("/tmp/test.txt", "current");

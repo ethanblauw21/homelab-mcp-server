@@ -4,7 +4,7 @@
 **Date:** 2026-06-19
 **Deciders:** Ethan
 **Depends on:** ADR-002 (census/redaction), ADR-003 (backup pipeline / retention), ADR-005 (`query_audit`, the read-only forensics surface), ADR-006 (config-history `historyCommitted`), ADR-009 (Merkle forest, explained/unexplained drift), ADR-010 (localhost UI sidecar — the renderer/executor split, the honest-UI rule), ADR-014 (re-anchor snapshots, honest revertibility)
-**Required by:** ADR-021 (the rollback circuit breaker's audited refusal becomes an auditStats silent-failure signal)
+**Required by:** ADR-021 (the rollback circuit breaker's audited refusal becomes an auditStats silent-failure signal), ADR-022 (the "derive from the artifacts, don't add a sensor" doctrine + the pure `filterAuditRecords` core reused as `query_audit`'s zero-dependency JSONL fallback under the SQLite fast path)
 
 ## Context
 

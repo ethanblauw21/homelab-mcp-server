@@ -96,6 +96,28 @@ describe("dockerWriteFileHandler", () => {
     expect(rec.historyCommitted).toBe(false); // docker has no git-mirror layout
   });
 
+  // ADR-022 gap 1 — the diff-on-write output reaches the audit.db projector.
+  it("forwards the unified diff to the audit.db projector on a text write", async () => {
+    const captured: Array<{ diff?: string | null }> = [];
+    audit.setProjector({ project: (_r, extras) => captured.push(extras ?? {}) });
+
+    const t = new FakeTransport();
+    primeRunning(t, 101);
+    primeNodeTemp(t);
+    primeInspect(t, 101, "homepage", `cid-abc ${BIND_MOUNTS}`);
+    t.setExecResult(buildPctPullCommand(101, "/srv/config/services.yaml", NODE_TMP), { stdout: "", stderr: "", exitCode: 0 });
+    t.setFile(NODE_TMP, "old: 1\n");
+    t.setExecResult(buildStatCommand(101, "/srv/config/services.yaml"), { stdout: "644 0 0\n", stderr: "", exitCode: 0 });
+
+    await dockerWriteFileHandler(
+      { vmid: 101, container: "homepage", path: "/config/services.yaml", content: "old: 1\nnew: 2\n", encoding: "utf8" },
+      t, audit, backupStore, cfg
+    );
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].diff).toContain("new: 2");
+  });
+
   it("writes via the slow path and restores ownership (stat-before, chown/chmod-after)", async () => {
     const t = new FakeTransport();
     primeRunning(t, 101);

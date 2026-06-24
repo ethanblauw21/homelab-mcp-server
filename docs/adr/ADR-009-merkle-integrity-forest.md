@@ -4,7 +4,7 @@
 **Date:** 2026-06-12
 **Deciders:** Ethan
 **Depends on:** ADR-003 (audit `prevSha256`/`newSha256`, running-guest precondition), ADR-006 (config history — complementary, see §9), ADR-007 (tiers; companion placement, protected-set instinct)
-**Required by:** ADR-018 (drift clarity & speed — the `mode: seeded|compared` honesty signal + batched `find` L1 enumeration; refines `verify_integrity`, does **not** touch the §9/#11 deferrals)
+**Required by:** ADR-018 (drift clarity & speed — the `mode: seeded|compared` honesty signal + batched `find` L1 enumeration; refines `verify_integrity`, does **not** touch the §9/#11 deferrals), ADR-022 (the `better-sqlite3`/WAL store + "pure core, thin I/O shell" precedent `audit.db` reuses, and the hash anchors `beforeHash`/`afterHash`/`hashScope` the projection indexes + the change-event feed pivots on)
 
 ## Context
 

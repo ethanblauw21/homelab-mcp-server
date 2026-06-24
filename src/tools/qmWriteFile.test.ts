@@ -88,6 +88,30 @@ describe("qmWriteFileHandler", () => {
     expect(records[0].prevSha256).toBeTruthy();
   });
 
+  // ADR-022 gap 1 — the hoisted diff-on-write output reaches the audit.db projector.
+  it("forwards the unified diff to the audit.db projector on a text overwrite", async () => {
+    const captured: Array<{ diff?: string | null }> = [];
+    audit.setProjector({ project: (_r, extras) => captured.push(extras ?? {}) });
+
+    const t = new FakeTransport();
+    primeAgent(t, 200, "pve");
+    primeRead(t, "pve", 200, "/etc/app.conf", {
+      stdout: JSON.stringify({ content: "old body", truncated: false }),
+      stderr: "",
+      exitCode: 0,
+    });
+    primeWrite(t, "pve", 200, "/etc/app.conf", Buffer.from("new body"));
+
+    await qmWriteFileHandler(
+      { vmid: 200, path: "/etc/app.conf", content: "new body", encoding: "utf8" },
+      t, audit, backupStore, cfg
+    );
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].diff).toContain("+ new body");
+    expect(captured[0].diff).toContain("- old body");
+  });
+
   it("stores the backup under a qm: file key (distinct from host and pct)", async () => {
     const t = new FakeTransport();
     primeAgent(t, 200, "pve");

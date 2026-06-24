@@ -17,7 +17,7 @@ ADR-016 made an argument from the audit log: **227 of 257 records were `pct_exec
 
 None of these are bugs. They are **missing dedicated tools** for enumerable operations, exactly the gap ADR-016 closed for Docker introspection. The cost is real and recurring: free-form audit rows the ADR-010 UI and ADR-015 metrics cannot parse, a wider denylist/quoting surface, and (for reads) un-budgeted output. This ADR groups the three backlog items (`tool-ideas.md` 5–7) that share two properties: **highest dogfooding value** and **no new subsystem** — each is a thin, structured shell over plumbing that already exists (`buildTailCommand`, the `pct exec` boundary, `validatePath`, the read family, the target-kind tier rule).
 
-It deliberately excludes the rest of the backlog: item 8 (rollback circuit breaker) is cheap but needs cross-call **session-state** semantics the stdio server does not yet have; item 9 (semantic history) requires an embedding dependency and conflicts with ADR-006's "git never on the write's critical path" invariant; item 10 (`index_path`) depends on two indexer subsystems that do not exist in this repo. Those stay in `tool-ideas.md`.
+It deliberately excludes the rest of the backlog: item 8 (rollback circuit breaker) is cheap but needs cross-call **session-state** semantics the stdio server does not yet have — *realized by ADR-021*; item 9 (semantic history) requires an embedding dependency and conflicts with ADR-006's "git never on the write's critical path" invariant — *realized by ADR-022* (pull-first feed, off the write path); item 10 (`index_path`) depends on two indexer subsystems that do not exist in this repo — *realized by ADR-022* (the indexers now exist as separate processes the feed targets). Those stay in `tool-ideas.md`.
 
 ## Decision
 
@@ -56,7 +56,7 @@ The read-side analogue of `edit_file`'s find-and-replace front door (ADR-011) an
 - **Tier follows the target, not a fixed row.** `service_*` and `search_file_regex` resolve their min-tier by target kind via `assertTargetTier` (host ⇒ root, guest ⇒ companion), like `diff_config`/`revert_file`. The probes floor at observe (host-side, credential-free) and escalate to companion only on `fromVmid`. No tool here grants a capability the operator's tier didn't already imply.
 - **Mutation surface is one tool.** Only `service_restart` mutates; it is confirm-gated and fully audited. `service_status`, `service_logs`, both probes, and `search_file_regex` are read-only. `service_logs` is always-redacted (it inherits `tail_log` wholesale, redaction included).
 - **Not a sandbox.** `service_restart` reuses the ADR-004 denylist/confirm tripwire model; the structured-param surface is *narrower* than free-form `execute` (the unit name is charset-validated, the verb is fixed) but it is a tripwire, not isolation — consistent with the project's standing threat model.
-- **Deliberately excluded backlog.** Circuit breaker (8 — needs session-state semantics), semantic history (9 — embedding dependency + ADR-006 write-path invariant), `index_path` (10 — non-existent external indexers) are out of scope and remain ranked in `tool-ideas.md`.
+- **Deliberately excluded backlog.** Circuit breaker (8 — needs session-state semantics; **realized by ADR-021**), semantic history (9 — embedding dependency + ADR-006 write-path invariant; **realized by ADR-022**), `index_path` (10 — non-existent external indexers; **realized by ADR-022**) are out of scope *here* and remain ranked in `tool-ideas.md`.
 
 ## Consequences
 
