@@ -74,6 +74,11 @@ const ConfigSchema = z.object({
     // invisible to retention, per the snapshot ownership rule).
     nodeBackupStorage: z.string().default("local"),
     guestArchivePerGuestCap: z.number().default(1),
+    // ADR-023 #9 — the API path returns a vzdump UPID immediately; poll the task
+    // to completion so an async failure (e.g. the storage lacks `backup` content
+    // type) surfaces loudly instead of as a false success. vzdump is minutes-scale.
+    taskPollIntervalMs: z.number().default(2_000),
+    taskTimeoutMs: z.number().default(600_000),
   }),
   audit: z.object({
     logPath: z.string(),
@@ -400,6 +405,12 @@ function loadConfig(): Config {
       guestArchivePerGuestCap: process.env.GUEST_ARCHIVE_PER_GUEST_CAP
         ? parseInt(process.env.GUEST_ARCHIVE_PER_GUEST_CAP)
         : 1,
+      taskPollIntervalMs: process.env.BACKUP_TASK_POLL_INTERVAL_MS
+        ? parseInt(process.env.BACKUP_TASK_POLL_INTERVAL_MS)
+        : 2_000,
+      taskTimeoutMs: process.env.BACKUP_TASK_TIMEOUT_MS
+        ? parseInt(process.env.BACKUP_TASK_TIMEOUT_MS)
+        : 600_000,
     },
     audit: {
       logPath: process.env.AUDIT_LOG_PATH ?? path.join(LOCAL_DATA_DIR, "audit.jsonl"),

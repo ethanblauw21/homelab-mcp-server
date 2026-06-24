@@ -213,6 +213,27 @@ describe("ApiBackend backups (ADR-008 §6)", () => {
     });
   });
 
+  it("polls a task's terminal status by url-encoded UPID (ADR-023 #9)", async () => {
+    const upid = "UPID:pve:00001234:00ABCDEF:64A:vzdump:101:root@pam:";
+    const encoded = `/nodes/${NODE}/tasks/${encodeURIComponent(upid)}/status`;
+    const { http, calls } = fixtureHttp([
+      { method: "GET", path: encoded, res: ok({ status: "stopped", exitstatus: "OK", upid }) },
+    ]);
+    const be = new ApiBackend(http, { node: NODE });
+    const st = await be.taskStatus(upid);
+    expect(st).toEqual({ status: "stopped", exitstatus: "OK" });
+    expect(calls[0]!.path).toBe(encoded);
+  });
+
+  it("reports a running task's status with no exitstatus yet", async () => {
+    const upid = "UPID:running";
+    const { http } = fixtureHttp([
+      { method: "GET", path: `/nodes/${NODE}/tasks/${encodeURIComponent(upid)}/status`, res: ok({ status: "running" }) },
+    ]);
+    const be = new ApiBackend(http, { node: NODE });
+    expect(await be.taskStatus(upid)).toEqual({ status: "running", exitstatus: undefined });
+  });
+
   it("lists archives on a storage and filters to one vmid", async () => {
     const { http } = fixtureHttp([
       {

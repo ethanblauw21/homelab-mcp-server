@@ -119,6 +119,16 @@ export interface NodeOps {
   /** Delete one archive volume by volid. */
   deleteBackupArchive(storage: string, volid: string): Promise<TaskRef>;
 
+  /**
+   * ADR-023 #9 — poll a task's terminal status by UPID. OPTIONAL: only the API
+   * backend needs it (it returns a UPID before the task finishes, so a failed
+   * vzdump would otherwise read as success). The SSH backend's CLI commands block
+   * to completion and throw on a non-zero exit, so a failure is already loud there
+   * — it may omit this method. `status` is "running" until the task stops;
+   * `exitstatus` is "OK" on success, otherwise the Proxmox error string.
+   */
+  taskStatus?(upid: string): Promise<{ status: string; exitstatus?: string }>;
+
   /** Which backend answered — for audit notes / diagnostics. */
   readonly kind: "api" | "ssh";
 }

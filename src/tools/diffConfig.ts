@@ -24,7 +24,15 @@ export const DiffConfigInputSchema = z
       .int()
       .positive()
       .optional()
-      .describe("Container VMID when the target is an LXC file (used only with `path`)."),
+      .describe("Container VMID when the target is an LXC (or Docker) file (used only with `path`)."),
+    container: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Docker container name when the target is a Docker file. Requires `vmid` (the LXC host). " +
+          "Used only with `path`."
+      ),
   })
   .describe("Preview the diff between a backup and the file's current content. Read-only, not audited.");
 
@@ -46,6 +54,23 @@ export interface DiffConfigResult {
   currentSha256?: string;
   backupSha256?: string;
   note?: string;
+}
+
+/**
+ * Build a BackupTarget from the loose `path`/`vmid`/`container` inputs (ADR-023 #5):
+ * docker (vmid + container) > pct (vmid) > host. `container` requires `vmid` — a
+ * Docker target is addressed by the LXC host vmid plus the container name, exactly
+ * as `list_backups`/`revert_file` already do.
+ */
+function targetFromInput(remotePath: string, vmid?: number, container?: string): BackupTarget {
+  if (container !== undefined) {
+    if (vmid === undefined) {
+      throw new Error("`container` requires `vmid` (a Docker target is addressed by vmid + container).");
+    }
+    return { kind: "docker", vmid, container, remotePath };
+  }
+  if (vmid !== undefined) return { kind: "pct", vmid, remotePath };
+  return { kind: "host", remotePath };
 }
 
 /** path.resolve-style comparison without importing path: normalize separators + case-fold drive. */
@@ -85,15 +110,10 @@ export async function diffConfigHandler(
       if (input.path === undefined) {
         throw new Error("Backup metadata not found and no `path` supplied; cannot resolve the target.");
       }
-      target = input.vmid !== undefined
-        ? { kind: "pct", vmid: input.vmid, remotePath: input.path }
-        : { kind: "host", remotePath: input.path };
+      target = targetFromInput(input.path, input.vmid, input.container);
     }
   } else {
-    target =
-      input.vmid !== undefined
-        ? { kind: "pct", vmid: input.vmid, remotePath: input.path! }
-        : { kind: "host", remotePath: input.path! };
+    target = targetFromInput(input.path!, input.vmid, input.container);
   }
 
   // Choose the backup version: the named one, or the newest for the target.
