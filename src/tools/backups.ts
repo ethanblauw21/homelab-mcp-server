@@ -136,6 +136,18 @@ export function assertVolid(volid: string): void {
   }
 }
 
+/**
+ * Extract the storage name from a volid `<storage>:backup/<file>` (third-pass
+ * H3/F8). The volid the caller passes ALREADY names the storage the archive lives
+ * on, so `guest_backup_restore` must search THAT storage — not the config default
+ * `nodeBackupStorage` (`"local"`), which lacks the `backup` content type and so can
+ * never hold an archive `guest_backup` created. Asserts the volid shape first.
+ */
+export function volidStorage(volid: string): string {
+  assertVolid(volid);
+  return volid.slice(0, volid.indexOf(":"));
+}
+
 // ---------------------------------------------------------------------------
 // SSH CLI builders (SshBackend)
 // ---------------------------------------------------------------------------

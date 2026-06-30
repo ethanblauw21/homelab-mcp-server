@@ -196,3 +196,41 @@ The remaining "consider/confirm" rough edges from the dogfooding notes, resolved
 
 - This ADR does not re-litigate the deliberate tier asymmetries (`tail_log` companion host-read vs the root-gated rest) — those are documented design (ADR-005/007), and the dogfooding confirmed they behave as specified.
 - ~~The `qm_*` family could not be exercised beyond its refusal paths (no VM exists on the node); its mutation surface is unverified live and is called out as a coverage gap, not a finding.~~ **Resolved 2026-06-23** — see the "qm_* live verification addendum" above: the family was dogfooded live against a throwaway VM, found healthy, and two bugs (F1/F2) were fixed.
+
+---
+
+## Third dogfooding pass (2026-06-30)
+
+A third full live pass on **proxlab/10.0.0.10** at **companion tier** (root flag unset → the host tools `execute`/`read_file`/`write_file`/`edit_file`/`list_directory` were *unregistered* and could not be exercised — clean ADR-007 behavior, not a finding; `qm_*` stayed ⚪ N/A, no VMs). ~60 tools exercised; full per-call log in `docs/dogfooding/SESSION-2026-06-24b.md`. The prior-pass fixes (B5/#8, #9/G1 write-side, G4 `diff_config` docker, G6 `revert_file` auto-latest, G7 monotonic depth) all **confirmed deployed**.
+
+Findings are relabeled **H1–H9** here to avoid colliding with the qm-addendum's F1/F2 above. This decision lands the three **🔴 critical** one-liners (H1/H2/H3); the 🟡 backlog (H4–H9) is recorded below for follow-up passes.
+
+### Decision 15 — the three critical portability bugs (H1/H2/H3)
+
+**Theme.** All three are the *same class*: a shared helper reused across an **environment boundary** without adapting the env-specific detail — a GNU-vs-BusyBox flag dialect, a journalctl-vs-docker time grammar, and a write-vs-read storage name. Each had passed unit tests that pinned the *wrong* (un-adapted) output, so each fix also re-points its test.
+
+**H1 (F1) — `docker_exec` hard-fails on BusyBox images.** The ADR-023 G3 fix made the in-container `timeout` *probe* for the binary, but still emitted GNU long options `timeout --signal=TERM --kill-after=5`. BusyBox `timeout` (Alpine — gluetun and most VPN/networking sidecars) **has** the binary, so the probe passed, but rejects `--signal=` with `unrecognized option (BusyBox v1.37.0)` and exits 1 **before the inner command runs**. G3 fixed "timeout absent," not "timeout is BusyBox."
+- **Fix.** `buildInContainerTimeout` emits the **portable short forms `timeout -s TERM -k 5 <secs>`**, accepted by both GNU coreutils and BusyBox. One-line dialect change inside the existing probe/fallback wrapper.
+
+**H2 (F5) — `docker_logs since` is broken for every relative value.** `buildDockerLogsCommand` forwarded the validated `tail_log` grammar straight to `docker logs --since`. journalctl groks `"30 min ago"`; `docker logs --since` does **not** — it takes only a Go duration (which has **no day unit**) or an RFC3339/date timestamp. So `"2h"` was rejected by the server's `validateSince`, and `"30 min ago"` was rejected by docker (`failed to parse value as time or duration`) — there was no value that worked.
+- **Fix.** A pure `translateSinceForDocker` adapter: relative `min`→`Nm`, `hour`→`Nh`, `day`→`(N*24)h` (no Go `d` unit); a space-separated ISO datetime is normalized to docker's `T` separator; a bare date / already-`T` ISO passes through. The handler still validates against the one shared grammar; only the docker-bound emission is adapted.
+
+**H3 (F8) — `guest_backup_restore` searches the wrong storage.** The restore handler hardcoded `storage = cfg.backup.nodeBackupStorage` (default `"local"`). But an archive `guest_backup` wrote **must** live on a backup-content store (e.g. `media-backup`; `local` lacks the `backup` content type), and the archive volid the caller passes (`<storage>:backup/<file>`) already names that store. Result: a correct, server-made archive was reported **"not found on local"** and was un-restorable — the read-side twin of the #9/G1 write-side bug.
+- **Fix.** Derive the storage from the volid: `const storage = volidStorage(input.archive)` (new pure helper in `backups.ts`, asserts the `<storage>:backup/<file>` shape first). A malformed volid now throws `Invalid backup volid` *before* any node call, rather than silently searching `local`.
+
+| ID | Change | State | Verification |
+|---|---|---|---|
+| **H1** | `docker_exec` in-container `timeout` uses portable `-s TERM -k 5`, not GNU `--signal=/--kill-after=` (BusyBox-safe) | **Shipped + tested** | `dockerHelpers.test.ts` re-pins the probe/fallback shape for `sh`+`bash` to the short flags and asserts no `--signal`/`--kill-after` long option survives. |
+| **H2** | `docker_logs since` translated to a docker Go duration / RFC3339 via `translateSinceForDocker` | **Shipped + tested** | `dockerHelpers.test.ts` pins min/hour/day→duration, day→hours, ISO space→`T`, and bare-date passthrough; the logs builder now emits `--since '30m'`. |
+| **H3** | `guest_backup_restore` derives storage from the archive volid (`volidStorage`), not the config default | **Shipped + tested** | `backupTools.test.ts` asserts a `media-backup:` volid is searched on `media-backup` (not `local`) and a storage-less volid is refused; `backups.test.ts` pins `volidStorage`. |
+
+### Backlog — the 🟡 papercuts (H4–H9, not yet landed)
+
+Recorded for a later pass; none block an operator the way H1–H3 did.
+
+- **H4 (F2)** — `docker_exec` on a distroless image with no `sh` returns 127 (honest dead-end); give it a typed "no shell in this image" message.
+- **H5 (F3)** — repeated `revert_file` auto-latest can hit a delta-base mismatch (revert doesn't re-snapshot); re-snapshot pre-revert or fall back to a self-contained backup, and fix the misleading "try a more recent backup" guidance.
+- **H6 (F4)** — the rollback breaker counts a failed/no-op revert but (on the non-tripped path) leaves no audit record, so `recentCount` can't be reconciled against the audit log; audit failed reverts too.
+- **H7 (F6)** — default `/etc` watch produces perpetual `verify_integrity`/`config_sweep` noise (`/etc/lvm/archive/pve_*.vg`, pmxcfs dotfiles `/etc/pve/.clusterlog/.rrd/.version/.vmlist/.members/.debug`) — ~80 unexplained leaves on a quiescent node; add to default `excludePatterns`.
+- **H8 (F7)** — `config_sweep` of `/etc` on CT101 (the 19-container prod stack) exceeds the node-side command timeout → connection dropped, CT101 never mirrored; needs a dedicated larger sweep timeout + chunking. (Error-isolation worked — other targets still committed.)
+- **H9 (F9)** — vzdump archive lifecycle is hard to manage from MCP: `guest_backup` returns a UPID + UTC note but **not the volid**; vzdump names the file in node-**local** time (TZ skew makes the volid un-reconstructable); there is no list/delete tool at companion tier (`pct_exec` into the unprivileged CT101 = `Permission denied`). Fix: return the volid from `guest_backup`, add a `guest_backup_list`, unify server timestamps to UTC.

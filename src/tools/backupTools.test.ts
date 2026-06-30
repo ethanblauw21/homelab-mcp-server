@@ -47,7 +47,9 @@ class FakeNode implements NodeOps {
     this.createOpts = opts;
     return { upid: "UPID:vzdump" };
   }
-  async listBackupArchives(_storage: string, vmid?: number): Promise<BackupArchive[]> {
+  lastListStorage?: string;
+  async listBackupArchives(storage: string, vmid?: number): Promise<BackupArchive[]> {
+    this.lastListStorage = storage;
     return vmid === undefined ? this.archives : this.archives.filter((a) => a.vmid === vmid);
   }
   async restoreBackup(vmid: number, type: GuestType, volid: string): Promise<TaskRef> {
@@ -298,5 +300,36 @@ describe("guest_backup_restore", () => {
     expect(out.restarted).toBe(false);
     expect(node.calls).toEqual([`restore:lxc:101:${archive}`]);
     expect(records[0]!.note).toContain("stopped");
+  });
+
+  it("searches the storage NAMED BY THE VOLID, not the config default (H3/F8)", async () => {
+    // The archive lives on media-backup (config default is "local", which lacks the
+    // `backup` content type). Restore must derive storage from the volid prefix, else
+    // the archive guest_backup created is never findable.
+    const mb = "media-backup:backup/vzdump-lxc-101-2026_06_24-19_21_33.tar.zst";
+    const node = new FakeNode(guests, [{ volid: mb, vmid: 101, notes: "mcp-x" }], "stopped");
+    const out = await guestBackupRestoreHandler(
+      { vmid: 101, archive: mb, confirm: true, stopIfRunning: false },
+      node,
+      audit,
+      cfg
+    );
+    expect(node.lastListStorage).toBe("media-backup");
+    expect(cfg.backup.nodeBackupStorage).toBe("local"); // proves it did NOT use the default
+    expect(out.restarted).toBe(false);
+    expect(node.calls).toEqual([`restore:lxc:101:${mb}`]);
+  });
+
+  it("rejects a malformed archive volid before touching the node (H3/F8)", async () => {
+    const node = new FakeNode(guests, [], "stopped");
+    await expect(
+      guestBackupRestoreHandler(
+        { vmid: 101, archive: "no-storage-prefix.tar.zst", confirm: true, stopIfRunning: true },
+        node,
+        audit,
+        cfg
+      )
+    ).rejects.toThrow(/Invalid backup volid/);
+    expect(node.calls).toEqual([]);
   });
 });

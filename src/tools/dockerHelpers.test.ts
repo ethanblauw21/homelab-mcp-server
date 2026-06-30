@@ -10,6 +10,7 @@ import {
   resolveBindMount,
   buildDockerExecCommand,
   buildDockerLogsCommand,
+  translateSinceForDocker,
   buildDockerCpFromContainer,
   buildDockerCpToContainer,
   buildDockerStatCommand,
@@ -268,7 +269,7 @@ describe("buildDockerExecCommand", () => {
     const cmd = buildDockerExecCommand("web", "sleep 1", { timeoutSecs: 10 });
     expect(cmd).toMatch(/^docker exec 'web' sh -c '/);
     expect(cmd).toContain("command -v timeout");
-    expect(cmd).toContain("exec timeout --signal=TERM --kill-after=5 10 sh -c");
+    expect(cmd).toContain("exec timeout -s TERM -k 5 10 sh -c");
     expect(cmd).toContain("else exec sh -c");
     // The probe protects against the 127 — the bare `timeout …` prefix is gone.
     expect(cmd).not.toMatch(/^docker exec 'web' timeout/);
@@ -276,8 +277,18 @@ describe("buildDockerExecCommand", () => {
 
   it("uses the timeout fallback with a bash shell override too", () => {
     const cmd = buildDockerExecCommand("web", "sleep 1", { timeoutSecs: 5, shell: "bash" });
-    expect(cmd).toContain("exec timeout --signal=TERM --kill-after=5 5 bash -c");
+    expect(cmd).toContain("exec timeout -s TERM -k 5 5 bash -c");
     expect(cmd).toContain("else exec bash -c");
+  });
+
+  it("uses BusyBox-portable short flags, never GNU long options (H1/F1)", () => {
+    // BusyBox `timeout` (Alpine — gluetun et al.) rejects `--signal=`/`--kill-after=`
+    // with `unrecognized option` and exits 1 BEFORE running the inner command. The
+    // short forms `-s SIG -k SECS` are accepted by both GNU coreutils and BusyBox.
+    const cmd = buildDockerExecCommand("web", "sleep 1", { timeoutSecs: 10 });
+    expect(cmd).not.toContain("--signal");
+    expect(cmd).not.toContain("--kill-after");
+    expect(cmd).toMatch(/timeout -s TERM -k 5 10 /);
   });
 
   it("escapes single quotes in the inner command", () => {
@@ -296,9 +307,11 @@ describe("buildDockerLogsCommand", () => {
     expect(buildDockerLogsCommand("web", { tail: 100 })).toBe("docker logs --tail 100 'web'");
   });
 
-  it("includes a validated since when present", () => {
+  it("translates the relative since to a docker Go duration (H2/F5)", () => {
+    // journalctl groks "30 min ago"; `docker logs --since` does NOT — it must get a
+    // Go duration. Forwarding the human grammar raw failed at the docker layer.
     expect(buildDockerLogsCommand("web", { tail: 50, since: "30 min ago" })).toBe(
-      "docker logs --tail 50 --since '30 min ago' 'web'"
+      "docker logs --tail 50 --since '30m' 'web'"
     );
   });
 
@@ -308,6 +321,33 @@ describe("buildDockerLogsCommand", () => {
 
   it("validates the container name", () => {
     expect(() => buildDockerLogsCommand("bad name", { tail: 10 })).toThrow(/Invalid Docker container name/);
+  });
+});
+
+describe("translateSinceForDocker (H2/F5 — tail_log grammar → docker --since)", () => {
+  it("maps minutes/hours to Go durations", () => {
+    expect(translateSinceForDocker("30 min ago")).toBe("30m");
+    expect(translateSinceForDocker("2 hour ago")).toBe("2h");
+    expect(translateSinceForDocker("1 hours ago")).toBe("1h");
+  });
+
+  it("converts days to hours (docker has no `d` unit)", () => {
+    expect(translateSinceForDocker("3 days ago")).toBe("72h");
+    expect(translateSinceForDocker("1 day ago")).toBe("24h");
+  });
+
+  it("tolerates the spacing variants the grammar allows", () => {
+    expect(translateSinceForDocker("  45min ago ")).toBe("45m");
+  });
+
+  it("normalizes a space-separated ISO datetime to the docker `T` separator", () => {
+    expect(translateSinceForDocker("2026-06-25 00:00:00")).toBe("2026-06-25T00:00:00");
+    expect(translateSinceForDocker("2026-06-25 00:00")).toBe("2026-06-25T00:00");
+  });
+
+  it("passes a bare date / already-T-form ISO through unchanged", () => {
+    expect(translateSinceForDocker("2026-06-25")).toBe("2026-06-25");
+    expect(translateSinceForDocker("2026-06-25T12:30:00")).toBe("2026-06-25T12:30:00");
   });
 });
 

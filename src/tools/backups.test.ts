@@ -7,6 +7,7 @@ import {
   parseArchiveContent,
   assertStorageName,
   assertVolid,
+  volidStorage,
   buildVzdumpCommand,
   buildListBackupsCommand,
   buildRestoreCommand,
@@ -170,6 +171,13 @@ describe("charset guards", () => {
     expect(() => assertVolid("local:iso/file.iso")).toThrow(/Invalid backup volid/); // not a backup volid
     expect(() => assertVolid("local:backup/$(reboot)")).toThrow(/Invalid backup volid/);
     expect(() => assertVolid("nostorage")).toThrow(/Invalid backup volid/);
+  });
+  it("volidStorage extracts the storage name from a volid (H3/F8)", () => {
+    expect(volidStorage("media-backup:backup/vzdump-lxc-9001-2026_06_24-19_21_33.tar.zst")).toBe(
+      "media-backup"
+    );
+    expect(volidStorage("local:backup/sub/dir/file")).toBe("local");
+    expect(() => volidStorage("nostorage")).toThrow(/Invalid backup volid/);
   });
 });
 

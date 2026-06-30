@@ -29,6 +29,7 @@ import {
   isMcpArchive,
   planArchiveEviction,
   assertStorageName,
+  volidStorage,
   type ArchiveInfo,
 } from "./backups.js";
 
@@ -239,7 +240,11 @@ export async function guestBackupRestoreHandler(
     }
   }
 
-  const storage = cfg.backup.nodeBackupStorage;
+  // H3/F8 — search the storage NAMED BY THE VOLID, not the config default. The
+  // archive volid (`<storage>:backup/<file>`) already encodes where it lives; an
+  // archive `guest_backup` wrote to a backup-content store (e.g. media-backup) was
+  // unfindable when restore hardcoded `cfg.backup.nodeBackupStorage` ("local").
+  const storage = volidStorage(input.archive);
   const type = await resolveType(node, input.vmid);
 
   // Ownership boundary (mirrors snapshot_rollback): only mcp- archives are
