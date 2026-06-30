@@ -29,6 +29,7 @@ import {
   isMcpArchive,
   planArchiveEviction,
   assertStorageName,
+  volidStorage,
   type ArchiveInfo,
 } from "./backups.js";
 
@@ -115,6 +116,7 @@ export async function guestBackupHandler(
   storage: string;
   taskStatus: string;
   evicted: string[];
+  volid: string | null;
 }> {
   if (!input.confirm) {
     throw new Error(
@@ -166,6 +168,23 @@ export async function guestBackupHandler(
     taskStatus = outcome.exitstatus;
   }
 
+  // H9/F9 — resolve the created archive's VOLID and return it. vzdump names the
+  // file in the node's LOCAL timezone, so the volid is not reconstructable from our
+  // UTC note; instead re-list the storage and match our exact (second-precision,
+  // unique) note. Best-effort: a listing failure or a notes mismatch leaves volid
+  // null — the backup still succeeded and `note` still identifies it. This closes
+  // the gap where guest_backup_restore had no volid to feed back in.
+  let volid: string | null = null;
+  try {
+    const after = await node.listBackupArchives(storage, input.vmid);
+    const mine = after
+      .filter((a) => a.notes !== undefined && a.notes.trim() === note)
+      .sort((a, b) => (b.ctime ?? 0) - (a.ctime ?? 0));
+    volid = mine[0]?.volid ?? null;
+  } catch {
+    /* best-effort — volid stays null */
+  }
+
   await audit.append(
     buildAuditRecord({
       tool: "guest_backup",
@@ -174,11 +193,12 @@ export async function guestBackupHandler(
       isLargeChange: true,
       note:
         `vzdump (${input.mode}) of ${type} ${input.vmid} to ${storage} via ${node.kind}; note "${note}"` +
+        (volid ? `; volid ${volid}` : "") +
         (evicted.length ? `; evicted ${evicted.join(", ")}` : ""),
     })
   );
 
-  return { vmid: input.vmid, guestType: type, mode: input.mode, note, task: ref.upid, storage, taskStatus, evicted };
+  return { vmid: input.vmid, guestType: type, mode: input.mode, note, task: ref.upid, storage, taskStatus, evicted, volid };
 }
 
 // ---------------------------------------------------------------------------
@@ -239,7 +259,11 @@ export async function guestBackupRestoreHandler(
     }
   }
 
-  const storage = cfg.backup.nodeBackupStorage;
+  // H3/F8 — search the storage NAMED BY THE VOLID, not the config default. The
+  // archive volid (`<storage>:backup/<file>`) already encodes where it lives; an
+  // archive `guest_backup` wrote to a backup-content store (e.g. media-backup) was
+  // unfindable when restore hardcoded `cfg.backup.nodeBackupStorage` ("local").
+  const storage = volidStorage(input.archive);
   const type = await resolveType(node, input.vmid);
 
   // Ownership boundary (mirrors snapshot_rollback): only mcp- archives are
@@ -289,4 +313,71 @@ export async function guestBackupRestoreHandler(
   );
 
   return { vmid: input.vmid, guestType: type, archive: input.archive, restarted: wasRunning };
+}
+
+// ---------------------------------------------------------------------------
+// guest_backup_list (H9/F9 — the missing inventory verb)
+// ---------------------------------------------------------------------------
+
+export const GuestBackupListInputSchema = z.object({
+  vmid: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Filter archives to one guest. Omit to list every guest's archives on the storage."),
+  storage: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Node storage to list (must carry the `backup` content type). Defaults to NODE_BACKUP_STORAGE; " +
+        "pass the storage you backed up to (e.g. the one guest_backup returned in its volid)."
+    ),
+  includeForeign: z
+    .boolean()
+    .default(false)
+    .describe("Also list human-made (non-mcp-) archives. Default false — only server-managed mcp- archives."),
+});
+
+export type GuestBackupListInput = z.infer<typeof GuestBackupListInputSchema>;
+
+export interface ListedArchive {
+  volid: string;
+  vmid: number;
+  ctime?: number;
+  sizeBytes?: number;
+  notes?: string;
+  mcpManaged: boolean;
+}
+
+/**
+ * `guest_backup_list` (H9/F9) — read-only inventory of vzdump archives, the verb
+ * the third dogfooding pass found missing: `guest_backup` returned a UPID + note
+ * but no volid, and there was no way to recover the volid to feed `guest_backup_restore`
+ * (the filename is in node-local time, so it isn't reconstructable from the UTC note).
+ * Lists a storage's archives (optionally for one guest), newest-first, flagging which
+ * are server-managed (`mcp-`). Defaults to mcp- only — `includeForeign` shows human
+ * archives too (which restore still refuses). Read-only, not audited.
+ */
+export async function guestBackupListHandler(
+  input: GuestBackupListInput,
+  node: NodeOps,
+  cfg: Config
+): Promise<{ storage: string; vmid?: number; archives: ListedArchive[] }> {
+  const storage = input.storage ?? cfg.backup.nodeBackupStorage;
+  assertStorageName(storage);
+  const raw = await node.listBackupArchives(storage, input.vmid);
+  const archives: ListedArchive[] = raw
+    .map((a) => ({
+      volid: a.volid,
+      vmid: a.vmid,
+      ctime: a.ctime,
+      sizeBytes: a.sizeBytes,
+      notes: a.notes,
+      mcpManaged: isMcpArchive(a.notes),
+    }))
+    .filter((a) => input.includeForeign || a.mcpManaged)
+    .sort((a, b) => (b.ctime ?? 0) - (a.ctime ?? 0));
+  return { storage, vmid: input.vmid, archives };
 }

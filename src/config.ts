@@ -254,6 +254,13 @@ const ConfigSchema = z.object({
       "/etc/mtab",
       "/etc/.pwd.lock",
       "/etc/lvm/cache/*",
+      // ADR-023 third-pass H7/F6 — LVM rewrites a fresh metadata backup +
+      // archive copy on EVERY lvcreate/lvextend/vgchange (thin-pool autoextend
+      // does this constantly under a busy guest), so `/etc/lvm/archive/pve_NNNNN.vg`
+      // and the `backup/` mirror churn perpetually. Siblings of the already-excluded
+      // `cache/*`; runtime state, not config worth versioning.
+      "/etc/lvm/archive/*",
+      "/etc/lvm/backup/*",
       // ADR-023 §E4 — pmxcfs (/etc/pve) volatile runtime state. These regenerate
       // every few seconds (cluster heartbeat / RRD stats / version counter), so
       // without excluding them every integrity scan reports them as perpetual
@@ -270,6 +277,16 @@ const ConfigSchema = z.object({
     // Per-file size cap for sweeps; over-cap files are SKIPPED and noted in the
     // manifest, never silently dropped.
     sweepFileSizeCapBytes: z.number().default(1024 * 1024), // 1 MB
+    // ADR-023 third-pass H8/F7 — config_sweep does heavy node-side work (enumerate
+    // + hash every watched file), which on a busy /etc (e.g. a 19-container LXC)
+    // blew past the ordinary `ssh.commandTimeoutMs` (30 s) and dropped the
+    // connection mid-sweep, so that target never mirrored. Sweeps get their own,
+    // larger node-side timeout, and the hashing is CHUNKED so no single command
+    // runs unbounded.
+    sweepCommandTimeoutMs: z.number().default(180_000), // 3 min
+    // Files per `sha256sum`/`stat` batch. Bounds any single sweep command's runtime
+    // (and argv length) regardless of how large the watched set is.
+    sweepHashBatchSize: z.number().int().positive().default(400),
   }),
   // ADR-009 — Merkle integrity forest. Watched sets are SHARED with history.*
   // (the forest hashes the same paths config_sweep mirrors); this section adds the
@@ -572,6 +589,12 @@ function loadConfig(): Config {
       sweepFileSizeCapBytes: process.env.HISTORY_SWEEP_FILE_SIZE_CAP_BYTES
         ? parseInt(process.env.HISTORY_SWEEP_FILE_SIZE_CAP_BYTES)
         : 1024 * 1024,
+      sweepCommandTimeoutMs: process.env.HISTORY_SWEEP_COMMAND_TIMEOUT_MS
+        ? parseInt(process.env.HISTORY_SWEEP_COMMAND_TIMEOUT_MS, 10)
+        : 180_000,
+      sweepHashBatchSize: process.env.HISTORY_SWEEP_HASH_BATCH_SIZE
+        ? parseInt(process.env.HISTORY_SWEEP_HASH_BATCH_SIZE, 10)
+        : 400,
     },
     integrity: {
       dbPath: process.env.INTEGRITY_DB_PATH ?? path.join(LOCAL_DATA_DIR, "integrity.db"),

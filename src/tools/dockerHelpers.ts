@@ -256,21 +256,27 @@ export interface DockerExecOptions {
 }
 
 /**
- * In-container timeout is BEST-EFFORT (ADR-023 dogfooding #4). Minimal images
- * (distroless / scratch / busybox-without-coreutils — e.g. portainer) lack the
- * `timeout` binary, where the old unconditional `timeout … sh -c …` hard-failed
- * with `exit 127: exec: "timeout": not found`. Probe for `timeout` at run time and
- * fall back to a bare shell when it is absent: the host-side `pct exec` wrapper
+ * In-container timeout is BEST-EFFORT (ADR-023 dogfooding #4 + third-pass H1).
+ * Minimal images (distroless / scratch — e.g. portainer) lack the `timeout` binary,
+ * where the old unconditional `timeout … sh -c …` hard-failed with
+ * `exit 127: exec: "timeout": not found`; probe for `timeout` at run time and fall
+ * back to a bare shell when it is absent. The host-side `pct exec` wrapper
  * (`buildPctExecCommand(..., { timeoutSecs })`) already bounds how long the SERVER
  * waits, so dropping the in-guest layer loses only reliable in-guest termination,
  * never the timeout itself. `exec` replaces the shell so the if/else cannot fall
  * through (avoids the `&&`/`||` short-circuit trap).
+ *
+ * Flags are the PORTABLE short forms `-s TERM -k 5`, NOT GNU long options
+ * `--signal=TERM --kill-after=5` (third-pass H1/F1): BusyBox `timeout` (Alpine —
+ * gluetun et al.) groks `[-s SIG] [-k KILL_SECS] SECS PROG` but rejects `--signal=`
+ * with `unrecognized option`, which exited 1 *before running the inner command*.
+ * Both GNU coreutils and BusyBox v1.37 accept the short forms.
  */
 function buildInContainerTimeout(command: string, secs: number, shell: WrapperShell): string {
   const c = shSingleQuote(command);
   return (
     `if command -v timeout >/dev/null 2>&1; then ` +
-    `exec timeout --signal=TERM --kill-after=5 ${secs} ${shell} -c ${c}; ` +
+    `exec timeout -s TERM -k 5 ${secs} ${shell} -c ${c}; ` +
     `else exec ${shell} -c ${c}; fi`
   );
 }
@@ -296,6 +302,30 @@ export function buildDockerExecCommand(
   return `docker exec ${shSingleQuote(container)} ${inner}`;
 }
 
+/**
+ * Detect the "image has no shell" dead-end (third-pass H4/F2). `docker_exec` runs
+ * everything via `<shell> -c …`, so a distroless/scratch image with no `/bin/sh`
+ * (or `/bin/bash`) cannot be exec'd at all: the runtime fails to start the process
+ * and Docker returns exit **126/127** with an OCI message like
+ * `OCI runtime exec failed: … exec: "sh": executable file not found in $PATH`.
+ * That is environmental and unfixable by retrying — the caller needs a typed
+ * "wrong tool for this image" message, not a bare exit 127 that reads like a
+ * mistyped command. Pure so it is unit-testable without a transport.
+ */
+export function detectNoShell(
+  result: { exitCode: number | null; stderr: string },
+  shell: WrapperShell = "sh"
+): boolean {
+  if (result.exitCode !== 126 && result.exitCode !== 127) return false;
+  const e = result.stderr;
+  // The precise OCI signature (`exec: "<shell>": executable file not found`) — or,
+  // more loosely, an "executable file not found" that names the shell binary.
+  return (
+    new RegExp(`exec: "${shell}": executable file not found`).test(e) ||
+    (/executable file not found/.test(e) && new RegExp(`(^|[^a-z])${shell}([^a-z]|$)`).test(e))
+  );
+}
+
 // ---------------------------------------------------------------------------
 // docker logs
 // ---------------------------------------------------------------------------
@@ -305,11 +335,40 @@ export interface DockerLogsOptions {
   since?: string; // already validated by the handler (tail_log grammar)
 }
 
+/**
+ * Translate the shared `tail_log` `since` grammar into a value that
+ * `docker logs --since` accepts (third-pass H2/F5). journalctl groks
+ * `"<n> min|hour|day ago"`, but `docker logs --since` only takes a Go duration
+ * (which has NO day unit) or an RFC3339/date timestamp — so forwarding the human
+ * grammar untranslated made EVERY relative `since` fail at the docker layer
+ * (`failed to parse value as time or duration`). The handler has already validated
+ * the input against `validateSince` (ISO or the relative grammar), so only those
+ * two shapes reach here.
+ *   "30 min ago"        -> "30m"
+ *   "2 hour ago"        -> "2h"
+ *   "3 days ago"        -> "72h"                 (docker has no `d` unit)
+ *   "2026-06-25 00:00"  -> "2026-06-25T00:00"    (docker wants the `T` separator)
+ *   "2026-06-25"        -> "2026-06-25"          (docker accepts a bare date)
+ */
+export function translateSinceForDocker(since: string): string {
+  const s = since.trim();
+  const rel = /^(\d+)\s*(min|hour|day)s?\s*ago$/.exec(s);
+  if (rel) {
+    const n = Number(rel[1]);
+    if (rel[2] === "min") return `${n}m`;
+    if (rel[2] === "hour") return `${n}h`;
+    return `${n * 24}h`; // day → hours (no Go `d` unit)
+  }
+  // ISO: docker's time parser uses the `T` separator for date-time; the tail_log
+  // grammar also allows a space. Normalize the single date/time separator.
+  return s.replace(" ", "T");
+}
+
 export function buildDockerLogsCommand(container: string, opts: DockerLogsOptions): string {
   assertDockerName(container);
   let cmd = `docker logs --tail ${opts.tail}`;
   if (opts.since !== undefined && opts.since !== "") {
-    cmd += ` --since ${shSingleQuote(opts.since.trim())}`;
+    cmd += ` --since ${shSingleQuote(translateSinceForDocker(opts.since))}`;
   }
   cmd += ` ${shSingleQuote(container)}`;
   return cmd;

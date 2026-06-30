@@ -3,7 +3,7 @@ import type { ExecResult, SshTransport } from "../ssh/transport.js";
 import { checkCommand } from "../guardrails/denylist.js";
 import { detectHeavyCommand } from "../guardrails/largeChange.js";
 import { buildPctExecCommand } from "./pctHelpers.js";
-import { buildDockerExecCommand, assertDockerName } from "./dockerHelpers.js";
+import { buildDockerExecCommand, assertDockerName, detectNoShell } from "./dockerHelpers.js";
 import { timeoutMsToSecs } from "../ssh/command.js";
 import { buildAuditRecord } from "../audit/record.js";
 import type { AuditLog } from "../audit/log.js";
@@ -76,6 +76,18 @@ export async function dockerExecHandler(
       note: heavy.isHeavy ? heavy.reason : undefined,
     })
   );
+
+  // H4/F2 — a shell-less image (distroless/scratch) can't be exec'd at all; the
+  // run was already audited (exit 127), but surface a typed dead-end instead of
+  // handing back a bare 127 that reads like a mistyped command.
+  if (detectNoShell(result)) {
+    throw new Error(
+      `docker_exec: container "${input.container}" on CT${input.vmid} has no shell — its image ` +
+        "appears to be distroless/scratch (no /bin/sh). docker_exec runs commands via `sh -c`, so it " +
+        "cannot operate on a shell-less image. Use docker_inspect/docker_logs/docker_read_file for " +
+        "read-only introspection, or run the command from a sibling container that has a shell."
+    );
+  }
 
   return result;
 }

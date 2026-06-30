@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { guestBackupHandler, guestBackupRestoreHandler } from "./backupTools.js";
+import { guestBackupHandler, guestBackupRestoreHandler, guestBackupListHandler } from "./backupTools.js";
 import type { NodeOps, Guest, GuestType, TaskRef, BackupArchive, BackupCreateOpts } from "../node/nodeOps.js";
 import type { AuditRecord } from "../audit/record.js";
 
@@ -45,9 +45,20 @@ class FakeNode implements NodeOps {
   async createBackup(vmid: number, type: GuestType, opts: BackupCreateOpts): Promise<TaskRef> {
     this.calls.push(`create:${type}:${vmid}:${opts.mode}`);
     this.createOpts = opts;
+    // Mirror Proxmox: the new archive appears in the listing, carrying the notes we
+    // passed (the mcp- ownership tag). A node-LOCAL-time filename — deliberately NOT
+    // reconstructable from our UTC note — so the volid must be recovered by listing.
+    this.archives.push({
+      volid: `${opts.storage}:backup/vzdump-${type}-${vmid}-2026_06_30-local.tar.zst`,
+      vmid,
+      ctime: 9999,
+      notes: opts.notes,
+    });
     return { upid: "UPID:vzdump" };
   }
-  async listBackupArchives(_storage: string, vmid?: number): Promise<BackupArchive[]> {
+  lastListStorage?: string;
+  async listBackupArchives(storage: string, vmid?: number): Promise<BackupArchive[]> {
+    this.lastListStorage = storage;
     return vmid === undefined ? this.archives : this.archives.filter((a) => a.vmid === vmid);
   }
   async restoreBackup(vmid: number, type: GuestType, volid: string): Promise<TaskRef> {
@@ -147,6 +158,24 @@ describe("guest_backup", () => {
     const node = new FakeNode(guests, []);
     const out = await guestBackupHandler({ vmid: 101, mode: "stop", note: "pre-edit", confirm: true }, node, audit, cfg, NOW);
     expect(out.note).toBe("mcp-20260614-153005 — pre-edit");
+  });
+
+  it("resolves and returns the created archive's volid by note-match (H9/F9)", async () => {
+    const node = new FakeNode(guests, []);
+    const out = await guestBackupHandler({ vmid: 101, mode: "snapshot", confirm: true }, node, audit, cfg, NOW);
+    // vzdump named the file in node-local time; the volid is recovered by re-listing
+    // and matching our exact UTC note, not reconstructed from the timestamp string.
+    expect(out.volid).toBe("local:backup/vzdump-lxc-101-2026_06_30-local.tar.zst");
+    expect(records[0]!.note).toContain("volid local:backup/vzdump-lxc-101-2026_06_30-local.tar.zst");
+  });
+
+  it("returns volid null (best-effort) when the listing carries no matching note", async () => {
+    // A pre-existing foreign archive with different notes; the created one would
+    // normally match, but simulate a notes mismatch by stubbing list to drop notes.
+    const node = new FakeNode(guests, []);
+    node.listBackupArchives = async () => [{ volid: "local:backup/x", vmid: 101, notes: "someone-elses" }];
+    const out = await guestBackupHandler({ vmid: 101, mode: "snapshot", confirm: true }, node, audit, cfg, NOW);
+    expect(out.volid).toBeNull();
   });
 
   it("evicts the oldest mcp- archive BEFORE creating (cap 1, incoming 1 → keep none of the old)", async () => {
@@ -298,5 +327,80 @@ describe("guest_backup_restore", () => {
     expect(out.restarted).toBe(false);
     expect(node.calls).toEqual([`restore:lxc:101:${archive}`]);
     expect(records[0]!.note).toContain("stopped");
+  });
+
+  it("searches the storage NAMED BY THE VOLID, not the config default (H3/F8)", async () => {
+    // The archive lives on media-backup (config default is "local", which lacks the
+    // `backup` content type). Restore must derive storage from the volid prefix, else
+    // the archive guest_backup created is never findable.
+    const mb = "media-backup:backup/vzdump-lxc-101-2026_06_24-19_21_33.tar.zst";
+    const node = new FakeNode(guests, [{ volid: mb, vmid: 101, notes: "mcp-x" }], "stopped");
+    const out = await guestBackupRestoreHandler(
+      { vmid: 101, archive: mb, confirm: true, stopIfRunning: false },
+      node,
+      audit,
+      cfg
+    );
+    expect(node.lastListStorage).toBe("media-backup");
+    expect(cfg.backup.nodeBackupStorage).toBe("local"); // proves it did NOT use the default
+    expect(out.restarted).toBe(false);
+    expect(node.calls).toEqual([`restore:lxc:101:${mb}`]);
+  });
+
+  it("rejects a malformed archive volid before touching the node (H3/F8)", async () => {
+    const node = new FakeNode(guests, [], "stopped");
+    await expect(
+      guestBackupRestoreHandler(
+        { vmid: 101, archive: "no-storage-prefix.tar.zst", confirm: true, stopIfRunning: true },
+        node,
+        audit,
+        cfg
+      )
+    ).rejects.toThrow(/Invalid backup volid/);
+    expect(node.calls).toEqual([]);
+  });
+});
+
+describe("guest_backup_list (H9/F9)", () => {
+  const archives: BackupArchive[] = [
+    { volid: "media-backup:backup/mcp-old", vmid: 101, ctime: 100, notes: "mcp-20260101-000000" },
+    { volid: "media-backup:backup/mcp-new", vmid: 101, ctime: 300, notes: "mcp-20260301-000000 — pre-edit" },
+    { volid: "media-backup:backup/human", vmid: 101, ctime: 200, notes: "nightly" },
+  ];
+
+  it("lists mcp- archives newest-first and flags ownership, hiding foreign by default", async () => {
+    const node = new FakeNode(guests, [...archives]);
+    const out = await guestBackupListHandler({ vmid: 101, storage: "media-backup" }, node, cfg);
+    expect(node.lastListStorage).toBe("media-backup");
+    expect(out.archives.map((a) => a.volid)).toEqual([
+      "media-backup:backup/mcp-new",
+      "media-backup:backup/mcp-old",
+    ]);
+    expect(out.archives.every((a) => a.mcpManaged)).toBe(true);
+  });
+
+  it("includeForeign surfaces human archives too (still newest-first)", async () => {
+    const node = new FakeNode(guests, [...archives]);
+    const out = await guestBackupListHandler(
+      { vmid: 101, storage: "media-backup", includeForeign: true },
+      node,
+      cfg
+    );
+    expect(out.archives.map((a) => a.volid)).toEqual([
+      "media-backup:backup/mcp-new",
+      "media-backup:backup/human",
+      "media-backup:backup/mcp-old",
+    ]);
+    expect(out.archives.find((a) => a.volid.endsWith("human"))!.mcpManaged).toBe(false);
+  });
+
+  it("defaults the storage to the config default and validates it", async () => {
+    const node = new FakeNode(guests, []);
+    const out = await guestBackupListHandler({}, node, cfg);
+    expect(out.storage).toBe("local");
+    expect(node.lastListStorage).toBe("local");
+    await expect(
+      guestBackupListHandler({ storage: "bad name" }, node, cfg)
+    ).rejects.toThrow(/Invalid storage/);
   });
 });

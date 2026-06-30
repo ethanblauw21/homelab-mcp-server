@@ -41,6 +41,7 @@ A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zo
 | `compose_discover` | Read-only compose project map from running containers' labels (produces the `composePath` that `compose_redeploy`/`compose_preflight` require) | 016 |
 | `guest_backup` | vzdump archive of a guest — the rollback path for snapshot-incapable guests (confirm-gated; `mcp-` tagged; per-guest retention) | 008 |
 | `guest_backup_restore` | Restore a guest from a server-managed (`mcp-`) vzdump archive (confirm + mcp-only + run-state gated) | 008 |
+| `guest_backup_list` | Read-only inventory of vzdump archives on a storage (per-guest optional), newest-first, `mcpManaged`-flagged; the volid-recovery companion to `guest_backup`/`_restore` (ADR-023 H9) | 008 |
 | `compose_redeploy` | `docker compose -f <path> up -d` inside an LXC (confirm-gated; pairs with `revert_file` for stack rollback) | 008 |
 | `compose_preflight` | Static, read-only hazard analysis of a proposed compose change before deploy (shared-netns port collisions, netns-provider recreate deadlock, ports already bound); not audited | 012 |
 | `compute_tree` | Build/refresh the Merkle integrity baseline at L1/L2/L3 (mutates only the local node store) | 009 |

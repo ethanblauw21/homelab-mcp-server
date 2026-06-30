@@ -97,6 +97,12 @@ export interface AuditRecord {
   refused?: boolean;
   circuitBreaker?: { recentCount: number; limit: number; windowMs: number };
   circuitBreakerOverridden?: boolean;
+  // ADR-023 third-pass H6/F4 — a rollback that got past the circuit breaker (so it
+  // consumed a window slot) but then THREW (delta-base mismatch, write error,
+  // metadata-only). Without this row the breaker's recentCount could not be
+  // reconciled against the audit trail, and a thrash loop of *failing* reverts left
+  // no forensic record. Distinct from `refused` (the breaker itself blocked the call).
+  failed?: boolean;
   note?: string;
 }
 

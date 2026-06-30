@@ -88,6 +88,21 @@ export function buildSha256Command(paths: string[], vmid?: number): string | nul
   return vmid === undefined ? inner : `pct exec ${vmid} -- sh -c ${shQuote(inner)}`;
 }
 
+/**
+ * Split a list into fixed-size batches (H8/F7). The hashing/stat commands are run
+ * one batch at a time so a single node-side command never has to read every file
+ * under a large /etc in one shot — bounding both its runtime (vs. the sweep
+ * timeout) and its argv length. Pure. A non-finite/≤0 `size` (e.g. a config field
+ * left unset) degrades to a SINGLE batch of the whole list — the pre-chunking
+ * behavior — never zero work and never an unbounded loop.
+ */
+export function chunk<T>(items: T[], size: number): T[][] {
+  const n = Number.isFinite(size) && size >= 1 ? Math.floor(size) : items.length || 1;
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += n) out.push(items.slice(i, i + n));
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 
 function targetLabel(t: SweepTarget): string {
@@ -127,7 +142,10 @@ async function sweepOneTarget(
     excluded: 0,
     skippedOversize: 0,
   };
-  const timeoutMs = cfg.ssh.commandTimeoutMs;
+  // H8/F7 — sweeps use their own, larger node-side timeout (enumerate + hash of a
+  // busy /etc routinely exceeds the 30 s exec default and dropped the connection);
+  // fall back to the ordinary exec timeout if the sweep knob is unset.
+  const timeoutMs = cfg.history.sweepCommandTimeoutMs ?? cfg.ssh.commandTimeoutMs;
   const vmid = target === "host" ? undefined : target.vmid;
   const watchPaths = target === "host" ? cfg.history.hostWatchPaths : cfg.history.containerWatchPaths;
 
@@ -154,16 +172,19 @@ async function sweepOneTarget(
     sizeCapBytes: cfg.history.sweepFileSizeCapBytes,
   });
 
-  let remoteHashes = new Map<string, string>();
-  const hashCmd = buildSha256Command(candidates, vmid);
-  if (hashCmd) {
+  // H8/F7 — hash in bounded batches so no single sha256sum has to read every file
+  // under the watched set at once. Merge each batch's results.
+  const remoteHashes = new Map<string, string>();
+  for (const batch of chunk(candidates, cfg.history.sweepHashBatchSize)) {
+    const hashCmd = buildSha256Command(batch, vmid);
+    if (!hashCmd) continue;
     const hashRes = await transport.exec(hashCmd, timeoutMs);
     if (hashRes.exitCode !== 0 && hashRes.stdout.trim() === "") {
       return { ...base, error: `hash failed: ${hashRes.stderr.trim() || "exit " + hashRes.exitCode}` };
     }
     // sha256sum may exit non-zero if a single file vanished mid-sweep; keep the
     // hashes it did produce.
-    remoteHashes = parseSha256Sum(hashRes.stdout);
+    for (const [p, h] of parseSha256Sum(hashRes.stdout)) remoteHashes.set(p, h);
   }
 
   // 3. Compare against the mirror's recorded content.
@@ -218,8 +239,10 @@ async function sweepOneTarget(
   const manifestKey = manifestKeyForSweepTarget(target);
   const manifest = history.readManifest(manifestKey);
   if (toFetch.length > 0) {
-    const statCmd = buildStatBatchCommand(toFetch, vmid);
-    if (statCmd) {
+    // H8/F7 — same bounded-batch treatment as the hashing pass.
+    for (const batch of chunk(toFetch, cfg.history.sweepHashBatchSize)) {
+      const statCmd = buildStatBatchCommand(batch, vmid);
+      if (!statCmd) continue;
       const statRes = await transport.exec(statCmd, timeoutMs);
       if (statRes.exitCode === 0 || statRes.stdout.trim() !== "") {
         const perms = parseStatBatch(statRes.stdout);
@@ -258,7 +281,11 @@ export async function configSweepHandler(
     throw new Error("config history is disabled (git not available); config_sweep is unavailable");
   }
 
-  const targets = await resolveTargets(input, transport, cfg.ssh.commandTimeoutMs);
+  const targets = await resolveTargets(
+    input,
+    transport,
+    cfg.history.sweepCommandTimeoutMs ?? cfg.ssh.commandTimeoutMs
+  );
   const results: SweepTargetResult[] = [];
   for (const t of targets) {
     try {

@@ -75,6 +75,8 @@ import {
   guestBackupHandler,
   GuestBackupRestoreInputSchema,
   guestBackupRestoreHandler,
+  GuestBackupListInputSchema,
+  guestBackupListHandler,
 } from "./tools/backupTools.js";
 import { ComposeRedeployInputSchema, composeRedeployHandler } from "./tools/composeRedeploy.js";
 import { ComposePreflightInputSchema, composePreflightHandler } from "./tools/composePreflightHandler.js";
@@ -922,6 +924,24 @@ register(
   async (input) => {
     try {
       const result = await guestBackupRestoreHandler(input, nodeOps, audit, config, rollbackBreaker);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "guest_backup_list",
+  {
+    description:
+      "List vzdump archives on a node backup storage (optionally for one guest), newest-first, flagging which " +
+      "are server-managed (mcp-). The inventory companion to guest_backup/guest_backup_restore: recover an " +
+      "archive's volid (guest_backup also returns it now). Defaults to mcp- only; includeForeign adds human " +
+      "archives (which restore still refuses). Read-only.",
+    inputSchema: GuestBackupListInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await guestBackupListHandler(input, nodeOps, config);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) { return errResult(err); }
   }
