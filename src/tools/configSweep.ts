@@ -92,10 +92,12 @@ export function buildSha256Command(paths: string[], vmid?: number): string | nul
  * Split a list into fixed-size batches (H8/F7). The hashing/stat commands are run
  * one batch at a time so a single node-side command never has to read every file
  * under a large /etc in one shot — bounding both its runtime (vs. the sweep
- * timeout) and its argv length. Pure; `size` is clamped to ≥1.
+ * timeout) and its argv length. Pure. A non-finite/≤0 `size` (e.g. a config field
+ * left unset) degrades to a SINGLE batch of the whole list — the pre-chunking
+ * behavior — never zero work and never an unbounded loop.
  */
 export function chunk<T>(items: T[], size: number): T[][] {
-  const n = Math.max(1, Math.floor(size));
+  const n = Number.isFinite(size) && size >= 1 ? Math.floor(size) : items.length || 1;
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += n) out.push(items.slice(i, i + n));
   return out;
@@ -141,8 +143,9 @@ async function sweepOneTarget(
     skippedOversize: 0,
   };
   // H8/F7 — sweeps use their own, larger node-side timeout (enumerate + hash of a
-  // busy /etc routinely exceeds the 30 s exec default and dropped the connection).
-  const timeoutMs = cfg.history.sweepCommandTimeoutMs;
+  // busy /etc routinely exceeds the 30 s exec default and dropped the connection);
+  // fall back to the ordinary exec timeout if the sweep knob is unset.
+  const timeoutMs = cfg.history.sweepCommandTimeoutMs ?? cfg.ssh.commandTimeoutMs;
   const vmid = target === "host" ? undefined : target.vmid;
   const watchPaths = target === "host" ? cfg.history.hostWatchPaths : cfg.history.containerWatchPaths;
 
@@ -278,7 +281,11 @@ export async function configSweepHandler(
     throw new Error("config history is disabled (git not available); config_sweep is unavailable");
   }
 
-  const targets = await resolveTargets(input, transport, cfg.history.sweepCommandTimeoutMs);
+  const targets = await resolveTargets(
+    input,
+    transport,
+    cfg.history.sweepCommandTimeoutMs ?? cfg.ssh.commandTimeoutMs
+  );
   const results: SweepTargetResult[] = [];
   for (const t of targets) {
     try {

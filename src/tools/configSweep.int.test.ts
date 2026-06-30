@@ -42,6 +42,8 @@ function makeConfig(historyDir: string): Config {
       containerWatchPaths: [SWEEP_DIR],
       excludePatterns: ["**/*.lock"],
       sweepFileSizeCapBytes: 1024 * 1024,
+      sweepCommandTimeoutMs: 60_000,
+      sweepHashBatchSize: 2, // small, so the batching path is genuinely exercised
     },
   } as unknown as Config;
 }

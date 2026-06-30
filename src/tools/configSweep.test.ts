@@ -44,11 +44,16 @@ describe("config_sweep command builders", () => {
     );
   });
 
-  it("chunk splits into fixed-size batches and clamps size to >=1 (H8/F7)", () => {
+  it("chunk splits into fixed-size batches and degrades safely on a bad size (H8/F7)", () => {
     expect(chunk([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
     expect(chunk([1, 2, 3], 10)).toEqual([[1, 2, 3]]);
     expect(chunk([], 3)).toEqual([]);
-    expect(chunk([1, 2], 0)).toEqual([[1], [2]]); // clamps to 1, never an infinite loop
+    // An invalid/unset size (0, NaN, undefined) degrades to a SINGLE batch of the
+    // whole list — the pre-chunking behavior — never zero work, never a hang.
+    expect(chunk([1, 2], 0)).toEqual([[1, 2]]);
+    expect(chunk([1, 2], NaN)).toEqual([[1, 2]]);
+    expect(chunk([1, 2], undefined as unknown as number)).toEqual([[1, 2]]);
+    expect(chunk([], 0)).toEqual([]);
   });
 });
 
