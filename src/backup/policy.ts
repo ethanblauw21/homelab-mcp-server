@@ -194,9 +194,11 @@ export async function applyReverseDiff(diffBlob: Buffer, currentContent?: Buffer
     const currentHash = contentHash(currentContent);
     if (currentHash !== envelope.baseHash) {
       throw new Error(
-        `Cannot apply delta backup: the current file has changed since this backup was created ` +
-        `(base ${envelope.baseHash.slice(0, 8)}…, current ${currentHash.slice(0, 8)}…). ` +
-        `Try reverting a more recent backup first, or restore the file manually.`
+        `Cannot apply delta backup: the live file no longer matches this delta's base ` +
+        `(base ${envelope.baseHash.slice(0, 8)}…, current ${currentHash.slice(0, 8)}…) — it changed ` +
+        `since this backup was taken (an earlier revert, or an out-of-band edit). ` +
+        `Revert the NEWEST backup for this file instead — call revert_file with just \`path\` ` +
+        `(it auto-resolves the latest, which is self-contained after a revert) — or restore manually.`
       );
     }
     return applyHunks(envelope.hunks, currentContent.toString("utf8").split("\n"));

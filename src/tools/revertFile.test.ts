@@ -6,7 +6,7 @@ import { buildPctExecCommand } from "./pctHelpers.js";
 import { buildPctStatusCommand, buildPctPullCommand, buildStatCommand } from "./pctFiles.js";
 import { buildDockerInspectCommand } from "./dockerHelpers.js";
 import { FakeTransport } from "../ssh/fakeTransport.js";
-import { RollbackBreaker } from "../guardrails/rollbackBreaker.js";
+import { RollbackBreaker, rollbackTargetKey } from "../guardrails/rollbackBreaker.js";
 import { BackupStore } from "../backup/store.js";
 import { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
@@ -81,6 +81,53 @@ describe("revertFileHandler", () => {
         transport, audit, backupStore, cfg
       )
     ).rejects.toThrow(/metadata-only/i);
+  });
+
+  it("audits a FAILED revert so the breaker slot reconciles with the trail (H6/F4)", async () => {
+    // A revert that consumed a breaker slot but threw (here: metadata-only) must
+    // leave a failed:true record — else recentCount can't be reconciled.
+    const keyDir = path.join(cfg.backup.baseDir, "anykey");
+    fs.mkdirSync(keyDir, { recursive: true });
+    const metaPath = path.join(keyDir, "ts.meta");
+    fs.writeFileSync(metaPath, JSON.stringify({ remotePath: "/tmp/test.txt", revertible: false }));
+    const breaker = new RollbackBreaker({ enabled: true, limit: 3, windowMs: 600_000 });
+
+    await expect(
+      revertFileHandler(
+        { path: "/tmp/test.txt", backupPath: metaPath },
+        transport, audit, backupStore, cfg, undefined, breaker
+      )
+    ).rejects.toThrow(/metadata-only/i);
+
+    const recs = audit.readAll();
+    const failedRec = recs.find((r) => r.tool === "revert_file" && r.failed === true);
+    expect(failedRec).toBeDefined();
+    expect(failedRec!.path).toBe("/tmp/test.txt");
+    expect(failedRec!.note).toMatch(/revert_file failed/i);
+    // The breaker recorded this attempt (one slot consumed for this target).
+    expect(breaker.check(rollbackTargetKey({ kind: "host", remotePath: "/tmp/test.txt" }), Date.now()).recentCount).toBe(2);
+  });
+
+  it("re-snapshots pre-revert content so repeated auto-latest reverts converge (H5/F3)", async () => {
+    const backupPath = makeGzBackup(cfg.backup.baseDir, "ORIGINAL");
+    transport.setFile("/tmp/test.txt", "CURRENT");
+
+    // First revert: ORIGINAL is restored, and the pre-revert "CURRENT" is captured
+    // as a NEW self-contained backup under the target's computed key.
+    await revertFileHandler({ path: "/tmp/test.txt", backupPath }, transport, audit, backupStore, cfg);
+    expect((await transport.readFile("/tmp/test.txt")).toString()).toBe("ORIGINAL");
+
+    const versions = backupStore.listBackupsForPath({ kind: "host", remotePath: "/tmp/test.txt" });
+    expect(versions.length).toBeGreaterThanOrEqual(1);
+    const newest = versions[0]!;
+    expect(newest.requiresBaseHash ?? null).toBeNull(); // self-contained ⇒ always revertible
+    expect((await backupStore.restore(newest.backupPath))!.toString()).toBe("CURRENT");
+
+    // Second revert with NO backupPath (auto-latest) resolves to that self-contained
+    // snapshot and applies cleanly — no delta-base mismatch, no confusing error.
+    const res = await revertFileHandler({ path: "/tmp/test.txt" }, transport, audit, backupStore, cfg);
+    expect(res.restoredFrom).toBe(newest.backupPath);
+    expect((await transport.readFile("/tmp/test.txt")).toString()).toBe("CURRENT");
   });
 
   it("restores file content from a gzip backup", async () => {

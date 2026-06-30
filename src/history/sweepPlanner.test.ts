@@ -30,6 +30,15 @@ describe("globToRegExp / matchesAnyGlob", () => {
     expect(matchesAnyGlob("/etc/x.sock", ["**/*.lock", "**/*.sock"])).toBe(true);
     expect(matchesAnyGlob("/etc/x.conf", ["**/*.lock", "**/*.sock"])).toBe(false);
   });
+
+  it("excludes LVM metadata-backup churn but not real /etc/lvm config (H7/F6)", () => {
+    const pats = ["/etc/lvm/archive/*", "/etc/lvm/backup/*"];
+    expect(matchesAnyGlob("/etc/lvm/archive/pve_00042-1734567890.vg", pats)).toBe(true);
+    expect(matchesAnyGlob("/etc/lvm/backup/pve", pats)).toBe(true);
+    // The single `*` stays within one segment, so lvm.conf and nested dirs are kept.
+    expect(matchesAnyGlob("/etc/lvm/lvm.conf", pats)).toBe(false);
+    expect(matchesAnyGlob("/etc/lvm/archive/sub/x.vg", pats)).toBe(false);
+  });
 });
 
 describe("classifyEnumeration", () => {

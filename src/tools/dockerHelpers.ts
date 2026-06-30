@@ -302,6 +302,30 @@ export function buildDockerExecCommand(
   return `docker exec ${shSingleQuote(container)} ${inner}`;
 }
 
+/**
+ * Detect the "image has no shell" dead-end (third-pass H4/F2). `docker_exec` runs
+ * everything via `<shell> -c …`, so a distroless/scratch image with no `/bin/sh`
+ * (or `/bin/bash`) cannot be exec'd at all: the runtime fails to start the process
+ * and Docker returns exit **126/127** with an OCI message like
+ * `OCI runtime exec failed: … exec: "sh": executable file not found in $PATH`.
+ * That is environmental and unfixable by retrying — the caller needs a typed
+ * "wrong tool for this image" message, not a bare exit 127 that reads like a
+ * mistyped command. Pure so it is unit-testable without a transport.
+ */
+export function detectNoShell(
+  result: { exitCode: number | null; stderr: string },
+  shell: WrapperShell = "sh"
+): boolean {
+  if (result.exitCode !== 126 && result.exitCode !== 127) return false;
+  const e = result.stderr;
+  // The precise OCI signature (`exec: "<shell>": executable file not found`) — or,
+  // more loosely, an "executable file not found" that names the shell binary.
+  return (
+    new RegExp(`exec: "${shell}": executable file not found`).test(e) ||
+    (/executable file not found/.test(e) && new RegExp(`(^|[^a-z])${shell}([^a-z]|$)`).test(e))
+  );
+}
+
 // ---------------------------------------------------------------------------
 // docker logs
 // ---------------------------------------------------------------------------

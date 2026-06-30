@@ -88,4 +88,31 @@ describe("dockerExecHandler (denylist v2 + confirm — the 4th exec path)", () =
     expect(r.exitCode).toBeNull();
     expect(audit.readAll()[0].signal).toBe("SIGKILL");
   });
+
+  it("throws a typed no-shell dead-end on a distroless image, after auditing (H4/F2)", async () => {
+    t.setExecResult(execCmd(101, "portainer", "ls"), {
+      stdout: "",
+      stderr:
+        'OCI runtime exec failed: exec failed: unable to start container process: ' +
+        'exec: "sh": executable file not found in $PATH: unknown',
+      exitCode: 127,
+    });
+    await expect(
+      dockerExecHandler({ vmid: 101, container: "portainer", command: "ls" }, t, audit, cfg)
+    ).rejects.toThrow(/no shell|distroless/i);
+    // The run is still audited (exit 127) — the typed throw is on top of the record.
+    const rec = audit.readAll()[0];
+    expect(rec.tool).toBe("docker_exec");
+    expect(rec.exitCode).toBe(127);
+  });
+
+  it("does NOT mistake an ordinary command-not-found (working shell) for no-shell", async () => {
+    t.setExecResult(execCmd(101, "web", "nosuchbin"), {
+      stdout: "",
+      stderr: "sh: 1: nosuchbin: not found",
+      exitCode: 127,
+    });
+    const r = await dockerExecHandler({ vmid: 101, container: "web", command: "nosuchbin" }, t, audit, cfg);
+    expect(r.exitCode).toBe(127); // returned normally, no typed throw
+  });
 });

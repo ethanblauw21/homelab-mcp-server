@@ -567,7 +567,8 @@ describe("selectBackupKind", () => {
         // hash has a 9th hex char where the ellipsis must be, so these fail on the mutant.
         await expect(applyReverseDiff(kind.blob, wrongBase)).rejects.toThrow(/base [0-9a-f]{8}…/);
         await expect(applyReverseDiff(kind.blob, wrongBase)).rejects.toThrow(/current [0-9a-f]{8}…/);
-        await expect(applyReverseDiff(kind.blob, wrongBase)).rejects.toThrow(/Try reverting a more recent backup first/);
+        // H5/F3 — honest guidance: point at the auto-latest revert, not "a more recent backup".
+        await expect(applyReverseDiff(kind.blob, wrongBase)).rejects.toThrow(/Revert the NEWEST backup for this file/);
       }
     });
   });

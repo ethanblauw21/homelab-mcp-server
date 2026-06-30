@@ -1,4 +1,6 @@
 import { z } from "zod";
+import zlib from "zlib";
+import { promisify } from "util";
 import type { SshTransport } from "../ssh/transport.js";
 import { validatePath } from "../guardrails/pathValidation.js";
 import { targetFromInput, targetKeyString, type BackupStore, type BackupTarget } from "../backup/store.js";
@@ -63,6 +65,8 @@ export const RevertFileInputSchema = z.object({
 });
 
 export type RevertFileInput = z.infer<typeof RevertFileInputSchema>;
+
+const gzipBuffer = promisify(zlib.gzip);
 
 export async function revertFileHandler(
   input: RevertFileInput,
@@ -151,6 +155,11 @@ export async function revertFileHandler(
     }
   }
 
+  // H6/F4 — from here on a throw means a revert that consumed a breaker slot but
+  // did not complete (stale delta base, write failure, metadata-only). Audit the
+  // failure before rethrowing so the breaker's recentCount reconciles with the
+  // trail and a thrash loop of failing reverts is visible to query_audit/metrics.
+  try {
   const timeoutMs = cfg.ssh.commandTimeoutMs;
 
   // Read current content first — needed for the audit record and to apply
@@ -222,6 +231,26 @@ export async function revertFileHandler(
   const restored = await backupStore.restore(backupPath, currentContent);
   if (restored === null) {
     throw new Error("Backup is metadata-only — no content stored, cannot revert");
+  }
+
+  // H5/F3 — re-snapshot the current (pre-revert) content as a SELF-CONTAINED backup
+  // before overwriting it. The restored bytes are already in hand, so this can't
+  // race the blob we just read. Two payoffs: the revert becomes undoable, and the
+  // newest backup for this target is now always self-contained — so a *repeated*
+  // auto-latest revert resolves to it instead of re-selecting a delta whose base no
+  // longer matches the (now reverted) file, which was the confusing "current file
+  // has changed since this backup" loop the third dogfooding pass hit. Best-effort:
+  // a snapshot failure must never block the revert the caller asked for.
+  if (currentContent !== undefined) {
+    try {
+      await backupStore.storeBackup(
+        target,
+        { type: "gzip-full", blob: await gzipBuffer(currentContent) },
+        sha256(currentContent)
+      );
+    } catch {
+      /* the re-snapshot is a safety net, not a precondition */
+    }
   }
 
   if (target.kind === "pct") {
@@ -330,4 +359,21 @@ export async function revertFileHandler(
     bytes: restored.length,
     vmid,
   };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await audit.append(
+      buildAuditRecord({
+        tool: "revert_file",
+        host: cfg.ssh.host,
+        vmid: target.kind !== "host" ? target.vmid : undefined,
+        ...(target.kind === "docker" && { container: target.container }),
+        path: target.remotePath,
+        failed: true,
+        // A failed revert that bypassed a tripped breaker still records the override.
+        ...(input.overrideCircuitBreaker && { circuitBreakerOverridden: true }),
+        note: `revert_file failed for ${backupPath}: ${message}`,
+      })
+    );
+    throw err instanceof Error ? err : new Error(message);
+  }
 }

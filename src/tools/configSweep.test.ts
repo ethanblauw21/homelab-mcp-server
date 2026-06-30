@@ -8,6 +8,7 @@ import {
   configSweepHandler,
   buildFindEnumCommand,
   buildSha256Command,
+  chunk,
 } from "./configSweep.js";
 import { ConfigHistory } from "../history/configHistory.js";
 import { FakeTransport } from "../ssh/fakeTransport.js";
@@ -42,6 +43,13 @@ describe("config_sweep command builders", () => {
       "sha256sum -- '/etc/hosts' '/etc/issue'"
     );
   });
+
+  it("chunk splits into fixed-size batches and clamps size to >=1 (H8/F7)", () => {
+    expect(chunk([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
+    expect(chunk([1, 2, 3], 10)).toEqual([[1, 2, 3]]);
+    expect(chunk([], 3)).toEqual([]);
+    expect(chunk([1, 2], 0)).toEqual([[1], [2]]); // clamps to 1, never an infinite loop
+  });
 });
 
 describe.skipIf(!gitAvailable)("configSweepHandler (real git temp repo)", () => {
@@ -62,6 +70,8 @@ describe.skipIf(!gitAvailable)("configSweepHandler (real git temp repo)", () => 
         containerWatchPaths: ["/etc"],
         excludePatterns: ["**/*.lock"],
         sweepFileSizeCapBytes: 1000,
+        sweepCommandTimeoutMs: 180_000,
+        sweepHashBatchSize: 400,
       },
     } as unknown as Config;
   }
@@ -121,6 +131,40 @@ describe.skipIf(!gitAvailable)("configSweepHandler (real git temp repo)", () => 
     const log = spawnSync("git", ["-C", dir, "log", "--format=%s%n%b"]).stdout.toString();
     expect(log).toContain("config_sweep host");
     expect(log).toContain(`audit: ${r.auditId}`);
+  });
+
+  it("hashes/stats in bounded batches when the watched set is large (H8/F7)", async () => {
+    const t = new FakeTransport();
+    const calls: string[] = [];
+    const realExec = t.exec.bind(t);
+    t.exec = async (command: string, timeoutMs?: number) => {
+      calls.push(command);
+      return realExec(command, timeoutMs);
+    };
+
+    // Two candidate files; force a batch size of 1 so each must hash/stat alone.
+    const batchCfg = { ...cfg, history: { ...cfg.history, sweepHashBatchSize: 1 } } as Config;
+    t.setExecResult(buildFindEnumCommand(["/etc"]), {
+      stdout: "2\t/etc/a\n2\t/etc/b\n",
+      stderr: "",
+      exitCode: 0,
+    });
+    // ONLY the per-file (chunked) hash commands are set — the combined two-file
+    // command is deliberately absent, so a non-chunked sweep would miss both hashes.
+    t.setExecResult(buildSha256Command(["/etc/a"]) as string, { stdout: `${sha256Hex("aa")}  /etc/a\n`, stderr: "", exitCode: 0 });
+    t.setExecResult(buildSha256Command(["/etc/b"]) as string, { stdout: `${sha256Hex("bb")}  /etc/b\n`, stderr: "", exitCode: 0 });
+    t.setExecResult("stat -c '%a %u %g %n' -- '/etc/a'", { stdout: "644 0 0 /etc/a", stderr: "", exitCode: 0 });
+    t.setExecResult("stat -c '%a %u %g %n' -- '/etc/b'", { stdout: "644 0 0 /etc/b", stderr: "", exitCode: 0 });
+    t.setFile("/etc/a", "aa");
+    t.setFile("/etc/b", "bb");
+
+    const r = await configSweepHandler({ targets: ["host"] }, t, history, audit, batchCfg);
+
+    expect(r.targets[0]).toMatchObject({ added: 2, changed: 0, deleted: 0 });
+    // Two separate sha256sum commands were issued — never the combined one.
+    expect(calls).toContain(buildSha256Command(["/etc/a"]));
+    expect(calls).toContain(buildSha256Command(["/etc/b"]));
+    expect(calls).not.toContain(buildSha256Command(["/etc/a", "/etc/b"]));
   });
 
   it("a second sweep with identical content fetches nothing (hash-compare)", async () => {

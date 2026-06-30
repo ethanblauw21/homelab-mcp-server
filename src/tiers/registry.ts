@@ -115,6 +115,9 @@ export const TOOL_MIN_TIER: Record<string, Tier> = {
   // behind RBAC that is blind to the mcp- tag.
   guest_backup: "companion",
   guest_backup_restore: "companion",
+  // H9/F9 — read-only archive inventory; same companion `NodeOps` reach as the
+  // backup pair (and not audited, like the other read-only census/list verbs).
+  guest_backup_list: "companion",
   compose_redeploy: "companion",
 
   // ADR-012 — compose_preflight reads a compose file inside an LXC and probes

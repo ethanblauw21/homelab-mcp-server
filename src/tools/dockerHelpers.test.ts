@@ -9,6 +9,7 @@ import {
   parseDockerMounts,
   resolveBindMount,
   buildDockerExecCommand,
+  detectNoShell,
   buildDockerLogsCommand,
   translateSinceForDocker,
   buildDockerCpFromContainer,
@@ -299,6 +300,31 @@ describe("buildDockerExecCommand", () => {
 
   it("validates the container name", () => {
     expect(() => buildDockerExecCommand("bad name", "echo")).toThrow(/Invalid Docker container name/);
+  });
+});
+
+describe("detectNoShell (H4/F2 — distroless/scratch dead-end)", () => {
+  it("flags the OCI no-shell signature at exit 127", () => {
+    const stderr =
+      'OCI runtime exec failed: exec failed: unable to start container process: ' +
+      'exec: "sh": executable file not found in $PATH: unknown';
+    expect(detectNoShell({ exitCode: 127, stderr })).toBe(true);
+  });
+
+  it("flags a bash override that is missing too", () => {
+    const stderr = 'exec: "bash": executable file not found in $PATH';
+    expect(detectNoShell({ exitCode: 126, stderr }, "bash")).toBe(true);
+  });
+
+  it("does NOT flag an ordinary command-not-found inside a working shell", () => {
+    expect(detectNoShell({ exitCode: 127, stderr: "sh: 1: nosuchbin: not found" })).toBe(false);
+  });
+
+  it("does NOT flag a non-127/126 exit", () => {
+    const stderr = 'exec: "sh": executable file not found';
+    expect(detectNoShell({ exitCode: 1, stderr })).toBe(false);
+    expect(detectNoShell({ exitCode: 0, stderr })).toBe(false);
+    expect(detectNoShell({ exitCode: null, stderr })).toBe(false);
   });
 });
 
