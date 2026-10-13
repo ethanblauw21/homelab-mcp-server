@@ -1,4 +1,5 @@
 import https from "https";
+import net from "net";
 import tls from "tls";
 import {
   sha256Fingerprint,
@@ -52,6 +53,18 @@ export function apiTrustKey(baseUrl: string | undefined): string {
 }
 
 /**
+ * SNI servername for a TLS connection to `host`. SNI may only carry a DNS name
+ * (RFC 6066) and Node throws ERR_INVALID_ARG_VALUE on an IP-literal servername,
+ * so IPv4/IPv6 literals (bare or bracketed) yield undefined. Identity is
+ * unaffected: it rests on the fingerprint pin, not on SNI.
+ */
+export function sniServername(host: string | undefined): string | undefined {
+  if (!host) return undefined;
+  const bare = host.replace(/^\[(.*)\]$/, "$1");
+  return net.isIP(bare) === 0 ? bare : undefined;
+}
+
+/**
  * https.Agent that pins the PVE API TLS cert fail-closed. The handshake runs with
  * rejectUnauthorized:false (the self-signed cert would otherwise be refused before
  * we can inspect it); on `secureConnect` we compute the cert fingerprint and, on a
@@ -67,7 +80,8 @@ export function makePinnedHttpsAgent(api: Config["api"]): https.Agent {
     callback?: (err: Error | null, socket?: tls.TLSSocket) => void
   ): tls.TLSSocket => {
     const socket = tls.connect(
-      { ...options, rejectUnauthorized: false, servername: options.host },
+      // servername from sniServername: the base Agent may pass an IP through, which tls.connect rejects.
+      { ...options, rejectUnauthorized: false, servername: sniServername(options.host) },
       () => {
         const cert = socket.getPeerCertificate(false);
         const der = cert && cert.raw;

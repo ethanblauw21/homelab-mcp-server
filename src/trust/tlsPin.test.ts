@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { certFingerprint, decideTlsPin, apiTrustKey } from "./tlsPin.js";
+import { certFingerprint, decideTlsPin, apiTrustKey, sniServername } from "./tlsPin.js";
 
 describe("certFingerprint", () => {
   it("produces a SHA256: fingerprint over the DER bytes", () => {
@@ -38,5 +38,21 @@ describe("apiTrustKey", () => {
   });
   it("returns the raw string when it is not a parseable URL", () => {
     expect(apiTrustKey("not a url")).toBe("not a url");
+  });
+});
+
+describe("sniServername", () => {
+  it("omits SNI for an IPv4 host (RFC 6066 forbids IP literals)", () => {
+    expect(sniServername("10.0.0.10")).toBeUndefined();
+  });
+  it("omits SNI for an IPv6 host, bare or bracketed", () => {
+    expect(sniServername("fd00::10")).toBeUndefined();
+    expect(sniServername("[fd00::10]")).toBeUndefined();
+  });
+  it("uses the hostname as SNI for a DNS name", () => {
+    expect(sniServername("pve.lan")).toBe("pve.lan");
+  });
+  it("omits SNI when no host is given", () => {
+    expect(sniServername(undefined)).toBeUndefined();
   });
 });
