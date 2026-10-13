@@ -29,9 +29,12 @@ jobs:
       # the bug fixed in node-gyp >=10.2. Refresh npm (which carries a modern
       # node-gyp) so the native build can find the toolchain. Windows-only; the
       # other matrix cells either find a prebuilt or have a working compiler.
+      # Pinned to npm 11, not @latest: npm 12 requires Node >=22.22 (breaks the
+      # Node 20 cell) and skips dependency install scripts by default (so
+      # better-sqlite3's native binding is never built).
       - name: Modernize node-gyp toolchain (Windows)
         if: runner.os == 'Windows'
-        run: npm install -g npm@latest
+        run: npm install -g npm@11
       - run: npm ci
       - run: npm run build
       - run: npm run typecheck
