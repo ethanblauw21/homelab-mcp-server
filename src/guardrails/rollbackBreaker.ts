@@ -79,6 +79,9 @@ export function rollbackTargetKey(t: {
       return `docker:${t.vmid}:${t.container}:${t.remotePath}`;
     case "guest":
       return `guest/${t.vmid}`;
+    case "compose":
+      // ADR-025 — compose_update's automatic re-tag rollback, keyed per service.
+      return `compose/${t.vmid}/${t.remotePath}`;
     default:
       return `${t.kind}/${t.remotePath ?? t.vmid ?? ""}`;
   }
@@ -117,6 +120,21 @@ export class RollbackBreaker {
    * a pass-through `{ tripped: false }` that records nothing (true no-op). Prunes
    * out-of-window timestamps so the map cannot grow without bound for a hot key.
    */
+  /**
+   * ADR-025 — evaluate WITHOUT recording. compose_update gates on prior
+   * auto-rollbacks of a service (a call that never rolls back must not consume a
+   * window slot), then `check`s (records) only when it actually rolls back. Trips
+   * when the in-window history already holds `limit` attempts.
+   */
+  peek(key: string, now: number): BreakerVerdict {
+    if (!this.cfg.enabled) {
+      return { tripped: false, recentCount: 0, limit: this.cfg.limit, windowMs: this.cfg.windowMs };
+    }
+    const history = this.history.get(key) ?? [];
+    const { recentCount } = evaluateRollbackBreaker(history, now, this.cfg.windowMs, this.cfg.limit);
+    return { tripped: recentCount >= this.cfg.limit, recentCount, limit: this.cfg.limit, windowMs: this.cfg.windowMs };
+  }
+
   check(key: string, now: number): BreakerVerdict {
     if (!this.cfg.enabled) {
       return { tripped: false, recentCount: 0, limit: this.cfg.limit, windowMs: this.cfg.windowMs };

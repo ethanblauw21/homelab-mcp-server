@@ -1,0 +1,19 @@
+{
+  "image": {
+    "name": "lscr.io/linuxserver/sonarr",
+    "manifests": [
+      {
+        "tag": "latest",
+        "mimeType": "application/vnd.oci.image.index.v1+json",
+        "digest": "sha256:dffc730adcb8b4f4342792fbb27fcad9c62fb8660523f2aeb082416980d7fe0c",
+        "created": "2026-10-10T02:37:18.432372117Z",
+        "labels": {
+          "build_version": "Linuxserver.io version:- 4.0.20.3014-ls327 Build-date:- 2026-10-10T02:35:31+00:00",
+          "maintainer": "thespad",
+          "org.opencontainers.image.version": "4.0.20.3014-ls327"
+        },
+        "platform": "linux/amd64"
+      }
+    ]
+  }
+}

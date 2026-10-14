@@ -146,3 +146,27 @@ describe("RollbackBreaker (stateful shell, injected now)", () => {
     }
   });
 });
+
+// ADR-025 — compose_update keys per service and gates with a non-recording peek.
+describe("ADR-025 compose key + peek", () => {
+  it("keys compose_update per vmid/service", () => {
+    expect(rollbackTargetKey({ kind: "compose", vmid: 101, remotePath: "sonarr" })).toBe("compose/101/sonarr");
+  });
+
+  it("peek never records, and trips once `limit` attempts are already in the window", () => {
+    const b = new RollbackBreaker({ enabled: true, limit: 2, windowMs: 1000 });
+    expect(b.peek("k", 0).tripped).toBe(false);
+    expect(b.peek("k", 0).recentCount).toBe(0); // peeking twice recorded nothing
+    b.check("k", 10);
+    expect(b.peek("k", 20)).toMatchObject({ tripped: false, recentCount: 1 });
+    b.check("k", 30);
+    expect(b.peek("k", 40)).toMatchObject({ tripped: true, recentCount: 2 });
+    expect(b.peek("k", 2000).tripped).toBe(false); // window cleared
+  });
+
+  it("peek is a no-op when disabled", () => {
+    const b = new RollbackBreaker({ enabled: false, limit: 1, windowMs: 1000 });
+    b.check("k", 0);
+    expect(b.peek("k", 1).tripped).toBe(false);
+  });
+});

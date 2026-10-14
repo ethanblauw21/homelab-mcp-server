@@ -84,3 +84,15 @@ describe("humanToolsForTier — obeys the ADR-007 tier floor", () => {
     expect(humanToolsForTier("operate")).toEqual([]);
   });
 });
+
+// ADR-024 §4 — the startup allowlist applies to the human executor set too.
+describe("humanToolsForTier under the ADR-024 allowlist", () => {
+  it("unset allowlist leaves the tier set unchanged", () => {
+    expect(humanToolsForTier("companion", undefined)).toEqual(humanToolsForTier("companion"));
+  });
+
+  it("can only shrink the set, never add", () => {
+    expect(humanToolsForTier("companion", ["verify_integrity", "execute"])).toEqual(["verify_integrity"]);
+    expect(humanToolsForTier("observe", ["verify_integrity"])).toEqual([]);
+  });
+});

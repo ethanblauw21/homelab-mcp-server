@@ -36,7 +36,9 @@ export type AuditTool =
   | "compute_tree"
   | "verify_integrity"
   | "accept_truth"
-  | "service_restart";
+  | "service_restart"
+  | "docker_restart"
+  | "compose_update";
 
 export interface AuditRecord {
   id: string;

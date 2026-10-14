@@ -1,0 +1,61 @@
+v4.33.0
+@@DIUN@@
+{
+  "images": [
+    {
+      "name": "docker.io/amir20/dozzle",
+      "manifestsCount": "1",
+      "latest": {
+        "tag": "latest",
+        "mimeType": "application/vnd.oci.image.index.v1+json",
+        "digest": "sha256:ba65da5af3d2147cfc2ee68ea5a6e35b75d2dff7eeff226151a65c9d77831c02",
+        "created": "2026-10-10T20:23:59.152275356Z",
+        "labels": {
+          "org.opencontainers.image.source": "https://github.com/amir20/dozzle",
+          "org.opencontainers.image.version": "v11.3.1"
+        },
+        "platform": "linux/amd64"
+      }
+    },
+    {
+      "name": "docker.io/containrrr/watchtower",
+      "manifestsCount": "1",
+      "latest": {
+        "tag": "latest",
+        "mimeType": "application/vnd.docker.distribution.manifest.list.v2+json",
+        "digest": "sha256:6dd50763bbd632a83cb154d5451700530d1e44200b268a4e9488fefdfcf2b038",
+        "created": "2023-11-11T18:51:37.413006095Z",
+        "labels": {
+          "com.centurylinklabs.watchtower": "true"
+        },
+        "platform": "linux/amd64"
+      }
+    },
+    {
+      "name": "docker.io/louislam/uptime-kuma",
+      "manifestsCount": "1",
+      "latest": {
+        "tag": "1",
+        "mimeType": "application/vnd.oci.image.index.v1+json",
+        "digest": "sha256:70233f4acb5163fd2a59a49909cf01e44415cecff13dba69e3a86647a2919f83",
+        "created": "2026-09-16T11:41:26.123511601Z",
+        "platform": "linux/amd64"
+      }
+    },
+    {
+      "name": "lscr.io/linuxserver/sonarr",
+      "manifestsCount": "1",
+      "latest": {
+        "tag": "latest",
+        "mimeType": "application/vnd.oci.image.index.v1+json",
+        "digest": "sha256:dffc730adcb8b4f4342792fbb27fcad9c62fb8660523f2aeb082416980d7fe0c",
+        "created": "2026-10-10T02:37:18.432372117Z",
+        "labels": {
+          "build_version": "Linuxserver.io version:- 4.0.20.3014-ls327 Build-date:- 2026-10-10T02:35:31+00:00",
+          "org.opencontainers.image.version": "4.0.20.3014-ls327"
+        },
+        "platform": "linux/amd64"
+      }
+    }
+  ]
+}

@@ -120,6 +120,14 @@ export const TOOL_MIN_TIER: Record<string, Tier> = {
   guest_backup_list: "companion",
   compose_redeploy: "companion",
 
+  // ADR-025 — container update workflow, on the same companion `pct exec docker …`
+  // boundary as the rest of the Docker family. docker_restart + compose_update are
+  // confirm-gated, audited mutations; image_updates is read-only and not audited.
+  // compose_update's automatic re-tag rollback joins the ADR-021 breaker family.
+  docker_restart: "companion",
+  image_updates: "companion",
+  compose_update: "companion",
+
   // ADR-012 — compose_preflight reads a compose file inside an LXC and probes
   // ports in the guest (pct exec/pull), exactly the Docker family's companion
   // reach; an observe-tier API token cannot exec in a container, so it would be
@@ -194,4 +202,84 @@ export function assertTargetTier(tool: string, kind: TargetKind, tier: Tier): vo
         `Host-file operations are root-tier only (ADR-007 §2); raise the tier via setup + restart.`
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-024 — startup tool allowlist. An operator-chosen subset INSIDE the tier:
+// registered(tool) = isToolEnabled(tool, tier) && (no allowlist || listed). The
+// allowlist can only remove tools, never add one above the tier. Read once at
+// startup; there is no runtime path to change it (ADR-007's no-escalation rule,
+// applied in both directions).
+// ---------------------------------------------------------------------------
+
+/** True when `tool` is registered: tier-enabled AND (no allowlist, or listed). */
+export function isToolRegistered(tool: string, tier: Tier, allowlist?: readonly string[]): boolean {
+  if (!isToolEnabled(tool, tier)) return false;
+  return allowlist === undefined || allowlist.includes(tool);
+}
+
+/** The exact registered set at a tier under an optional allowlist (sorted). */
+export function registeredTools(tier: Tier, allowlist?: readonly string[]): string[] {
+  return toolsForTier(tier).filter((t) => allowlist === undefined || allowlist.includes(t));
+}
+
+export interface AllowlistCheck {
+  /** Listed tools that exist but sit above the active tier (warn, never register). */
+  aboveTier: string[];
+}
+
+/**
+ * Validate an allowlist against the registry, fail-closed (ADR-024 §2): an empty
+ * list or any unknown name is a STARTUP ERROR (a typo must never silently drop a
+ * tool the operator thinks they enabled). Known tools above the tier are returned
+ * for a stderr warning. `undefined` (unset) is the no-filter case and always passes.
+ */
+export function checkToolAllowlist(allowlist: readonly string[] | undefined, tier: Tier): AllowlistCheck {
+  if (allowlist === undefined) return { aboveTier: [] };
+  if (allowlist.length === 0) {
+    throw new Error(
+      "MCP_TOOL_ALLOWLIST is set but empty. An empty allowlist would register zero tools; " +
+        "unset it for the full tier set, or list the tools to expose (comma-separated)."
+    );
+  }
+  const known = Object.keys(TOOL_MIN_TIER);
+  const unknown = allowlist.filter((t) => !(t in TOOL_MIN_TIER));
+  if (unknown.length > 0) {
+    const hints = unknown.map((u) => {
+      const near = nearestNames(u, known);
+      return near.length > 0 ? `${u} (did you mean ${near.join(" / ")}?)` : u;
+    });
+    throw new Error(
+      `MCP_TOOL_ALLOWLIST names unknown tool(s): ${hints.join(", ")}. ` +
+        "Refusing to start: a misspelled entry would silently drop a tool (ADR-024 §2)."
+    );
+  }
+  return { aboveTier: allowlist.filter((t) => !isToolEnabled(t, tier)) };
+}
+
+/** Up to three known names within a small edit distance of `name` (typo hints). */
+export function nearestNames(name: string, known: readonly string[]): string[] {
+  const maxDist = Math.max(2, Math.floor(name.length / 4));
+  return known
+    .map((k) => ({ k, d: editDistance(name, k) }))
+    .filter((x) => x.d <= maxDist)
+    .sort((a, b) => a.d - b.d || a.k.localeCompare(b.k))
+    .slice(0, 3)
+    .map((x) => x.k);
+}
+
+function editDistance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(
+        (prev[j] ?? 0) + 1,
+        (cur[j - 1] ?? 0) + 1,
+        (prev[j - 1] ?? 0) + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+    }
+    prev = cur;
+  }
+  return prev[b.length] ?? 0;
 }
