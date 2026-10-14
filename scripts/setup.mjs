@@ -13,6 +13,11 @@
  *   node scripts/setup.mjs --tier=companion --node-host=192.168.1.100
  *   node scripts/setup.mjs --tier=observe   --node-host=192.168.1.100 --bootstrap-mode=paste
  *   node scripts/setup.mjs --tier=observe   --node-host=192.168.1.100 --dry-run
+ *   node scripts/setup.mjs --tier=companion --node-host=192.168.1.100 --token-name=mcp-agent
+ *
+ * --token-name (default mcp-<tier>) names the API token. Give each install at the
+ * same tier its own name: two installs sharing mcp@pve!mcp-companion share one
+ * secret, and rotating it for one breaks the other.
  *
  * Tier matrix:
  *   observe    API token (PVEAuditor), Proxmox-RBAC-enforced
@@ -62,6 +67,13 @@ const pveUser      = flags["pve-user"]       || "mcp@pve";
 const apiPort      = parseInt(flags["api-port"] || "8006", 10);
 const dryRun       = Boolean(flags["dry-run"]);
 const rotateToken  = Boolean(flags["rotate-token"]);
+const tokenNameFlag = typeof flags["token-name"] === "string" ? flags["token-name"] : null;
+// PVE token ids are [A-Za-z][A-Za-z0-9._-]+; checked here because the name is
+// interpolated into the provisioning shell blob.
+if (tokenNameFlag !== null && !/^[A-Za-z][A-Za-z0-9._-]{1,63}$/.test(tokenNameFlag)) {
+  console.error(`--token-name must match [A-Za-z][A-Za-z0-9._-]+ (got ${JSON.stringify(tokenNameFlag)}).`);
+  process.exit(1);
+}
 const entryPoint   = flags["entry-point"]    || path.join(ROOT, "dist", "index.js");
 
 const wasInteractive = !flags["tier"];
@@ -204,12 +216,13 @@ console.log(c(90, "  ------------------------------------------"));
 console.log(`  Tier    ${tier}`);
 console.log(`  Node    ${nodeHost}`);
 console.log(`  Mode    ${dryRun ? `${bootstrapMode} (dry run)` : bootstrapMode}`);
+console.log(`  Token   ${pveUser}!${tokenNameFlag ?? `mcp-${tier}`}${rotateToken ? " (rotate)" : ""}`);
 console.log(c(90, "  ------------------------------------------"));
 
 // ---------------------------------------------------------------------------
 // Derived values
 // ---------------------------------------------------------------------------
-const tokenName = `mcp-${tier}`;
+const tokenName = tokenNameFlag ?? `mcp-${tier}`;
 const tokenId   = `${pveUser}!${tokenName}`;
 const apiBase   = `https://${nodeHost}:${apiPort}/api2/json`;
 const roleName  = "MCPOperate";
@@ -239,7 +252,9 @@ function buildProvisionBlob(pubKey) {
   if (rotateToken) {
     lines.push(`pveum user token remove ${pveUser} ${tokenName} 2>/dev/null || true`);
   }
-  lines.push(`TOKLINE=$(pveum user token add ${pveUser} ${tokenName} --privsep 1 --output-format json 2>/dev/null || pveum user token add ${pveUser} ${tokenName} --privsep 1 --output-format json --force 2>/dev/null || true)`);
+  // No silent regenerate: an existing token is replaced only with --rotate-token,
+  // because a new secret breaks whichever other install still holds the old one.
+  lines.push(`TOKLINE=$(pveum user token add ${pveUser} ${tokenName} --privsep 1 --output-format json 2>/dev/null || true)`);
   lines.push(`pveum acl modify / --tokens '${tokenId}' --roles $ROLES`);
 
   if (tier === "companion" && pubKey) {
@@ -366,8 +381,10 @@ const nodeName    = getVal(resultText, "NODE_NAME");
 
 if (!tokenSecret) {
   console.error(
-    "Did not capture a token secret. If this is a re-run without --rotate-token, " +
-    "the secret is only shown at creation — re-run with --rotate-token to mint a fresh one.\n" +
+    `Did not capture a token secret for ${tokenId}. If that token already exists, its secret ` +
+    "is only shown at creation. Either:\n" +
+    "  - give this install its own token: --token-name=<name>, or\n" +
+    `  - re-run with --rotate-token to replace ${tokenId}. This BREAKS any other install using it.\n` +
     "Raw output:\n" + resultText
   );
   rl.close(); process.exit(1);
