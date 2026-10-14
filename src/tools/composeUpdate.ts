@@ -275,7 +275,7 @@ export async function composeUpdateHandler(
     throw new Error(`Unexpected image id for ${target.name}: ${JSON.stringify(oldImageId)}; refusing to continue.`);
   }
   const infoRes = await transport.exec(pct(buildImageInfoCommand([oldImageId])), timeoutMs);
-  const oldInfo = infoRes.exitCode === 0 ? parseImageInfo(infoRes.stdout).get(oldImageId) : undefined;
+  const oldInfo = parseImageInfo(infoRes.stdout).get(oldImageId);
   const oldRepoDigest = localDigestFor(target.ref, oldInfo?.repoDigests ?? []);
   const holdTag = holdTagFor(/^sha256:/.test(target.ref) ? fileRef : target.ref, input.service);
   assertImageRef(holdTag);
@@ -345,8 +345,7 @@ export async function composeUpdateHandler(
     return finish({ ...base, outcome: "pull-failed", newImageId: null, newVersion: null }, { failed: true });
   }
   const newInfoRes = await transport.exec(pct(buildImageInfoCommand([newImageId])), timeoutMs);
-  const newVersion =
-    newInfoRes.exitCode === 0 ? (parseImageInfo(newInfoRes.stdout).get(newImageId)?.version ?? null) : null;
+  const newVersion = parseImageInfo(newInfoRes.stdout).get(newImageId)?.version ?? null;
   if (newImageId === oldImageId && !refMismatch) {
     return finish({ ...base, outcome: "already-current", newImageId, newVersion });
   }

@@ -11,6 +11,7 @@ import {
   extractImageVersion,
   parseContainerIdentities,
   parseImageInfo,
+  buildImageInfoCommand,
   pickEnv,
   parseWatchtowerConfig,
   watchtowerManages,
@@ -38,6 +39,7 @@ import {
   type DiunManifest,
   type HealthSample,
 } from "./dockerUpdate.js";
+import { imageInfoRow, ociVersion } from "./dockerUpdateTestkit.js";
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), "__fixtures__", "diun");
 const fixture = (f: string): string => fs.readFileSync(path.join(FIX, f), "utf8");
@@ -134,11 +136,36 @@ describe("container identity + image info parsing", () => {
 
   it("parses RepoDigests + version per image id, tolerating bad JSON", () => {
     const out =
-      `${D("4")}\t["lscr.io/linuxserver/sonarr@${D("4")}"]\t\tLinuxserver.io version:- 4.0.19.2979-ls322 Build\n` +
-      `${D("5")}\tnot-json\t1.2.3\t\n`;
+      imageInfoRow(D("4"), [`lscr.io/linuxserver/sonarr@${D("4")}`], { build_version: "Linuxserver.io version:- 4.0.19.2979-ls322 Build" }) +
+      "\n" +
+      `${D("5")}\tnot-json\t${JSON.stringify({ Labels: ociVersion("1.2.3") })}\n` +
+      `${D("6")}\t[]\tnot-json\n`;
     const m = parseImageInfo(out);
     expect(m.get(D("4"))).toEqual({ id: D("4"), repoDigests: [`lscr.io/linuxserver/sonarr@${D("4")}`], version: "4.0.19.2979-ls322" });
     expect(m.get(D("5"))).toEqual({ id: D("5"), repoDigests: [], version: "1.2.3" });
+    expect(m.get(D("6"))).toEqual({ id: D("6"), repoDigests: [], version: null });
+  });
+
+  it("an image with NO Labels key (or a null Config) parses version-less alongside labelled ones", () => {
+    const out = [
+      imageInfoRow(D("4"), [`a/b@${D("4")}`], ociVersion("1.0")),
+      imageInfoRow(D("5"), [`louislam/uptime-kuma@${D("5")}`], null),
+      `${D("6")}\t[]\tnull`,
+      `${D("7")}\t[]\t${JSON.stringify({ Labels: null })}`,
+    ].join("\n");
+    const m = parseImageInfo(out);
+    expect(m.get(D("4"))?.version).toBe("1.0");
+    expect(m.get(D("5"))).toEqual({ id: D("5"), repoDigests: [`louislam/uptime-kuma@${D("5")}`], version: null });
+    expect(m.get(D("6"))?.version).toBeNull();
+    expect(m.get(D("7"))?.version).toBeNull();
+  });
+
+  it("the image template never dereferences .Config.Labels (a label-less image fails the whole batch)", () => {
+    const cmd = buildImageInfoCommand([D("4"), D("5")]);
+    expect(cmd).not.toContain(".Config.Labels");
+    expect(cmd).not.toMatch(/\{\{\s*index /);
+    expect(cmd).toContain("{{json .Config}}");
+    expect(cmd).toContain(`${D("4")} ${D("5")}`);
   });
 });
 

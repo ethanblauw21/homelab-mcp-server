@@ -8,7 +8,7 @@ import { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
 import { dockerRestartHandler, DockerRestartInputSchema } from "./dockerRestart.js";
 import { imageUpdatesHandler, ImageUpdatesInputSchema, resolveDiunLocation } from "./imageUpdates.js";
-import { ScriptTransport, identityRow, makeConfig } from "./dockerUpdateTestkit.js";
+import { ScriptTransport, identityRow, imageInfoRow, makeConfig, ociVersion } from "./dockerUpdateTestkit.js";
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), "__fixtures__", "diun");
 const D = (c: string): string => "sha256:" + c.repeat(64).slice(0, 64);
@@ -127,12 +127,12 @@ describe("image_updates", () => {
         /docker image inspect --format/,
         ok(
           [
-            `${SONARR_OLD}\t["lscr.io/linuxserver/sonarr@${SONARR_OLD}"]\t4.0.19.2979-ls322\t`,
-            `${DOZZLE}\t["amir20/dozzle@${DOZZLE}"]\tv11.3.1\t`,
-            `${D("5")}\t[]\t\t`,
-            `${D("6")}\t["ghcr.io/analogj/scrutiny@${D("6")}"]\t\t`,
-            `${D("7")}\t["containrrr/watchtower@${D("7")}"]\t\t`,
-            `${D("8")}\t["crazymax/diun@${D("8")}"]\t4.33.0\t`,
+            imageInfoRow(SONARR_OLD, [`lscr.io/linuxserver/sonarr@${SONARR_OLD}`], ociVersion("4.0.19.2979-ls322")),
+            imageInfoRow(DOZZLE, [`amir20/dozzle@${DOZZLE}`], ociVersion("v11.3.1")),
+            imageInfoRow(D("5"), []),
+            imageInfoRow(D("6"), [`ghcr.io/analogj/scrutiny@${D("6")}`]),
+            imageInfoRow(D("7"), [`containrrr/watchtower@${D("7")}`], null),
+            imageInfoRow(D("8"), [`crazymax/diun@${D("8")}`], ociVersion("4.33.0")),
           ].join("\n")
         )
       )
@@ -180,6 +180,32 @@ describe("image_updates", () => {
     expect(r.sources.diun).toMatchObject({ available: true, container: "diun", version: "v4.33.0", schedule: "0 0 6 * * 1", watchRepoEnabled: false });
     expect(r.watchtower).toEqual({ container: "watchtower", schedule: "0 0 3 * * 6", labelEnable: true, cleanup: true });
     expect(r.notes.join(" ")).toMatch(/watch_repo/);
+  });
+
+  it("a label-less image (no Labels key) still gets a real, version-less verdict", async () => {
+    const r = await run({ source: "registry" });
+    const wt = r.containers.find((c) => c.name === "watchtower")!;
+    expect(wt).toMatchObject({ status: "up-to-date", verdictSource: "registry", localDigest: D("7") });
+    expect(wt.currentVersion ?? null).toBeNull();
+  });
+
+  it("degrades per image: a non-zero inspect exit keeps verdicts for the images that parsed", async () => {
+    t.on(/docker image inspect --format/, {
+      stdout: [
+        imageInfoRow(SONARR_OLD, [`lscr.io/linuxserver/sonarr@${SONARR_OLD}`], ociVersion("4.0.19.2979-ls322")),
+        imageInfoRow(DOZZLE, [`amir20/dozzle@${DOZZLE}`], ociVersion("v11.3.1")),
+      ].join("\n"),
+      stderr: 'template parsing error: template: :1:23: executing "" at <.Config.Labels>: map has no entry for key "Labels"\n',
+      exitCode: 1,
+    });
+    const r = await run({ source: "registry" });
+    const by = Object.fromEntries(r.containers.map((c) => [c.name, c]));
+    expect(by.sonarr).toMatchObject({ status: "update-available", localDigest: SONARR_OLD, currentVersion: "4.0.19.2979-ls322" });
+    expect(by.dozzle).toMatchObject({ status: "up-to-date" });
+    expect(by.watchtower).toMatchObject({ status: "unknown", verdictSource: "none" });
+    expect(by.watchtower!.reason).toMatch(/image inspect failed for this image: .*no entry for key "Labels"/);
+    expect(by.scrutiny!.status).toBe("pinned");
+    expect(r.notes.join(" ")).toMatch(/docker image inspect failed \(exit 1\) for 4 of 6 image\(s\)/);
   });
 
   it("never queries the registry for local or pinned images", async () => {

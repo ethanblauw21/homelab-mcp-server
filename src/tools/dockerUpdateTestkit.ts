@@ -51,6 +51,18 @@ export function identityRow(c: Partial<ContainerIdentity> & { name: string }): s
   ].join("\t");
 }
 
+/**
+ * One `docker image inspect` row in the IMAGE_FORMAT shape (id, RepoDigests JSON,
+ * Config JSON). `labels: null` models an image built with NO `Labels` key at all.
+ */
+export function imageInfoRow(id: string, repoDigests: string[], labels: Record<string, string> | null = {}): string {
+  const config = labels === null ? { Cmd: ["sh"] } : { Cmd: ["sh"], Labels: labels };
+  return [id, JSON.stringify(repoDigests), JSON.stringify(config)].join("\t");
+}
+
+/** Shorthand: an image whose only version label is `org.opencontainers.image.version`. */
+export const ociVersion = (v: string): Record<string, string> => ({ "org.opencontainers.image.version": v });
+
 export function makeConfig(tmpDir: string, docker: Partial<Config["docker"]> = {}): Config {
   return {
     ssh: { host: "h", commandTimeoutMs: 5000 },

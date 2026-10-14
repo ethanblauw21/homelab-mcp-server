@@ -198,18 +198,35 @@ export interface LocalImageInfo {
   version: string | null;
 }
 
-const IMAGE_FORMAT = [
-  "{{.Id}}",
-  "{{json .RepoDigests}}",
-  '{{index .Config.Labels "org.opencontainers.image.version"}}',
-  '{{index .Config.Labels "build_version"}}',
-].join(SEP);
+/**
+ * Labels are read from `{{json .Config}}` and picked apart here, never with
+ * `{{index .Config.Labels …}}` in the template: an image built with no labels has no
+ * `Labels` key at all, and the CLI's raw-map template fallback then fails the WHOLE
+ * batched inspect ("map has no entry for key Labels") — `{{with .Config.Labels}}`
+ * does not help, the field lookup itself is what errors (verified on a containerd
+ * image store). `json` of a missing/nil Config prints `null`.
+ */
+const IMAGE_FORMAT = ["{{.Id}}", "{{json .RepoDigests}}", "{{json .Config}}"].join(SEP);
 
 /** RepoDigests + version labels for the given image ids (the ADR-016 §1 second round trip, batched). */
 export function buildImageInfoCommand(imageIds: string[]): string {
   const ids = imageIds.filter((i) => DIGEST_RE.test(i));
   if (ids.length === 0) return "true";
   return `docker image inspect --format ${shSingleQuote(IMAGE_FORMAT)} ${ids.join(" ")}`;
+}
+
+/** String labels from a `{{json .Config}}` field; anything absent/malformed ⇒ `{}`. */
+function labelsFromConfigJson(field: string | undefined): Record<string, string> {
+  try {
+    const cfg: unknown = JSON.parse(clean(field) || "null");
+    const labels = cfg && typeof cfg === "object" ? (cfg as { Labels?: unknown }).Labels : undefined;
+    if (!labels || typeof labels !== "object") return {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(labels)) if (typeof v === "string") out[k] = v;
+    return out;
+  } catch {
+    return {};
+  }
 }
 
 export function parseImageInfo(output: string): Map<string, LocalImageInfo> {
@@ -226,7 +243,12 @@ export function parseImageInfo(output: string): Map<string, LocalImageInfo> {
     } catch {
       repoDigests = [];
     }
-    out.set(id, { id, repoDigests, version: extractImageVersion(f[2], f[3]) });
+    const labels = labelsFromConfigJson(f[2]);
+    out.set(id, {
+      id,
+      repoDigests,
+      version: extractImageVersion(labels["org.opencontainers.image.version"], labels["build_version"]),
+    });
   }
   return out;
 }

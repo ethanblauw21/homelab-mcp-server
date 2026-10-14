@@ -7,7 +7,7 @@ import { AuditLog } from "../audit/log.js";
 import type { Config } from "../config.js";
 import { RollbackBreaker } from "../guardrails/rollbackBreaker.js";
 import { composeUpdateHandler, ComposeUpdateInputSchema } from "./composeUpdate.js";
-import { ScriptTransport, identityRow, makeConfig } from "./dockerUpdateTestkit.js";
+import { ScriptTransport, identityRow, imageInfoRow, makeConfig, ociVersion } from "./dockerUpdateTestkit.js";
 
 const D = (c: string): string => "sha256:" + c.repeat(64).slice(0, 64);
 const OLD = D("a");
@@ -89,8 +89,8 @@ describe("compose_update", () => {
       .on(has("docker image inspect --format", "RepoDigests"), (cmd) =>
         ok(
           [
-            inner(cmd).includes(OLD) ? `${OLD}\t["lscr.io/linuxserver/sonarr@${OLD}"]\t4.0.19\t` : "",
-            inner(cmd).includes(NEW) ? `${NEW}\t["lscr.io/linuxserver/sonarr@${NEW}"]\t4.0.20\t` : "",
+            inner(cmd).includes(OLD) ? imageInfoRow(OLD, [`lscr.io/linuxserver/sonarr@${OLD}`], ociVersion("4.0.19")) : "",
+            inner(cmd).includes(NEW) ? imageInfoRow(NEW, [`lscr.io/linuxserver/sonarr@${NEW}`], ociVersion("4.0.20")) : "",
           ].join("\n")
         )
       )
@@ -123,6 +123,22 @@ describe("compose_update", () => {
     expect(rec).toMatchObject({ tool: "compose_update", vmid: 101, container: "sonarr", path: PATH, isRevertible: true, confirmGated: true });
     expect(rec.note).toMatch(/updated/);
     expect(breaker.peek("compose/101/sonarr", clock).recentCount).toBe(0);
+  });
+
+  it("label-less images (no Labels key) still hold, update and report version-less", async () => {
+    t.on(has("docker image inspect --format", "RepoDigests"), (cmd) =>
+      ok(
+        [
+          inner(cmd).includes(OLD) ? imageInfoRow(OLD, [`lscr.io/linuxserver/sonarr@${OLD}`], null) : "",
+          inner(cmd).includes(NEW) ? imageInfoRow(NEW, [`lscr.io/linuxserver/sonarr@${NEW}`], null) : "",
+        ].join("\n")
+      )
+    );
+    const r = await run();
+    expect(r.outcome).toBe("updated");
+    expect(r).toMatchObject({ oldRepoDigest: OLD, currentVersion: null, newVersion: null });
+    const infoCmd = t.commands.map(inner).find((c) => c.includes("RepoDigests"))!;
+    expect(infoCmd).not.toContain(".Config.Labels");
   });
 
   it("already-current: same image after pull → no recreate", async () => {

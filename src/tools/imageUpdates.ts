@@ -182,8 +182,18 @@ export async function imageUpdatesHandler(
   // 2. RepoDigests + version labels of the images in scope (one batched round trip).
   const imageIds = [...new Set(inScope.map((c) => c.imageId))];
   const imgRes = await transport.exec(pct(buildImageInfoCommand(imageIds)), timeoutMs);
-  const images = imgRes.exitCode === 0 ? parseImageInfo(imgRes.stdout) : new Map();
-  if (imgRes.exitCode !== 0) notes.push(`docker image inspect failed (exit ${imgRes.exitCode}); local digests unknown.`);
+  // Degrade per image: a failing image must not blank the ones that inspected fine,
+  // so stdout is parsed whatever the exit code and only the missing ids go unknown.
+  const images = parseImageInfo(imgRes.stdout);
+  let inspectError: string | null = null;
+  if (imgRes.exitCode !== 0) {
+    const missing = imageIds.filter((id) => !images.has(id));
+    inspectError = imgRes.stderr.trim().split("\n")[0] || `exit ${imgRes.exitCode}`;
+    notes.push(
+      `docker image inspect failed (exit ${imgRes.exitCode}) for ${missing.length} of ${imageIds.length} image(s); ` +
+        `those report unknown: ${inspectError}`
+    );
+  }
 
   // 3. Watchtower ownership.
   const watchtower = await loadWatchtower(transport, input.vmid, running, timeoutMs);
@@ -279,6 +289,7 @@ export async function imageUpdatesHandler(
   // 6. Assemble.
   const containers: ImageUpdateEntry[] = inScope.map((c) => {
     const img = images.get(c.imageId);
+    const inspectFailed = !img && inspectError !== null;
     const parsed = parseImageRef(c.ref);
     const localDigest = localDigestFor(c.ref, img?.repoDigests ?? []);
     const r = remote.get(c.ref);
@@ -305,7 +316,11 @@ export async function imageUpdatesHandler(
       return diunForTag.digest === localDigest ? { status: "up-to-date" } : { status: "update-available" };
     };
     const registryFailed = !!regVerdict && regVerdict.status === "unknown" && !!r && !r.digest;
-    if (regVerdict && !(registryFailed && diunVerdict())) {
+    if (inspectFailed && !isDigestPinned(c.ref)) {
+      status = "unknown";
+      reason = `docker image inspect failed for this image: ${inspectError}`;
+      verdictSource = "none";
+    } else if (regVerdict && !(registryFailed && diunVerdict())) {
       ({ status, reason } = regVerdict);
       verdictSource = regVerdict.status === "unknown" ? "none" : "registry";
     } else {
