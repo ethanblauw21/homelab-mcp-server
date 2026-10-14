@@ -1,6 +1,6 @@
 # ADR-019: Opt-in Redaction for the File-Read Family
 
-**Status:** Accepted (implemented 2026-06-19)
+**Status:** Accepted (implemented 2026-06-19). **Amended by ADR-026 (2026-10-14):** read content is now always redacted at the MCP boundary, and `redact` only adds the `redacted`/`redactionCount` fields.
 **Date:** 2026-06-19
 **Deciders:** Ethan
 **Depends on:** ADR-002 (the shared redaction module — the single secret-pattern matcher), ADR-004 (the read surface: `read_file` stat-gating + the deliberate "reads return fidelity, logs always redact" doctrine this ADR amends)

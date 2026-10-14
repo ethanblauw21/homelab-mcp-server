@@ -6,7 +6,7 @@ describe("redactSecrets", () => {
   describe("env-var assignments", () => {
     it("redacts PASSWORD=value", () => {
       const out = redactSecrets("export PASSWORD=hunter2");
-      expect(out).toContain("PASSWORD=[REDACTED]");
+      expect(out).toContain("PASSWORD=<redacted len=");
       expect(out).not.toContain("hunter2");
     });
 
@@ -17,7 +17,7 @@ describe("redactSecrets", () => {
 
     it("redacts SECRET=value", () => {
       const out = redactSecrets("SECRET=mysecretvalue ./run.sh");
-      expect(out).toContain("SECRET=[REDACTED]");
+      expect(out).toContain("SECRET=<redacted len=");
       expect(out).not.toContain("mysecretvalue");
     });
 
@@ -29,7 +29,7 @@ describe("redactSecrets", () => {
     it("redacts API_KEY=value", () => {
       const out = redactSecrets("curl -d API_KEY=abc123 https://api.example.com");
       expect(out).not.toContain("abc123");
-      expect(out).toContain("API_KEY=[REDACTED]");
+      expect(out).toContain("API_KEY=<redacted len=");
     });
 
     it("redacts API_SECRET=value", () => {
@@ -55,7 +55,7 @@ describe("redactSecrets", () => {
     it("redacts AWS_SECRET_ACCESS_KEY=value", () => {
       const out = redactSecrets("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCY curl ...");
       expect(out).not.toContain("wJalrXUtnFEMI");
-      expect(out).toContain("[REDACTED]");
+      expect(out).toMatch(/<redacted len=\d+>/);
     });
 
     it("redacts DB_PASSWORD=value", () => {
@@ -64,9 +64,9 @@ describe("redactSecrets", () => {
     });
 
     it("is case-insensitive for the key name", () => {
-      expect(redactSecrets("password=abc")).toContain("[REDACTED]");
-      expect(redactSecrets("PASSWORD=abc")).toContain("[REDACTED]");
-      expect(redactSecrets("Password=abc")).toContain("[REDACTED]");
+      expect(redactSecrets("password=abc")).toMatch(/<redacted len=\d+>/);
+      expect(redactSecrets("PASSWORD=abc")).toMatch(/<redacted len=\d+>/);
+      expect(redactSecrets("Password=abc")).toMatch(/<redacted len=\d+>/);
     });
 
     it("redacts multiple secrets in one string", () => {
@@ -80,7 +80,7 @@ describe("redactSecrets", () => {
     it("redacts Authorization: Bearer token", () => {
       const out = redactSecrets("curl -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9'");
       expect(out).not.toContain("eyJhbGciOiJIUzI1NiJ9");
-      expect(out).toContain("Authorization: [REDACTED]");
+      expect(out).toContain("Authorization: Bearer <redacted len=");
     });
 
     it("redacts Authorization: Token value (full multi-word value)", () => {
@@ -91,7 +91,7 @@ describe("redactSecrets", () => {
     it("redacts x-api-key header value", () => {
       const out = redactSecrets("curl -H 'x-api-key: sk-abc123'");
       expect(out).not.toContain("sk-abc123");
-      expect(out).toContain("[REDACTED]");
+      expect(out).toMatch(/<redacted len=\d+>/);
     });
 
     it("redacts x-auth-token header value", () => {
@@ -104,7 +104,7 @@ describe("redactSecrets", () => {
     it("redacts AKIA-format AWS access key", () => {
       const out = redactSecrets("aws configure set aws_access_key_id AKIAIOSFODNN7EXAMPLE");
       expect(out).not.toContain("AKIAIOSFODNN7EXAMPLE");
-      expect(out).toContain("[REDACTED]");
+      expect(out).toMatch(/<redacted len=\d+>/);
     });
 
     it("does not redact strings that only start with AKIA but are not 20 chars", () => {
@@ -117,18 +117,19 @@ describe("redactSecrets", () => {
     it("redacts RSA private key block", () => {
       const key = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA1234\n-----END RSA PRIVATE KEY-----";
       const out = redactSecrets(key);
-      expect(out).toBe("[REDACTED]");
+      expect(out).toBe("-----BEGIN RSA PRIVATE KEY-----\n<redacted len=20>\n-----END RSA PRIVATE KEY-----");
     });
 
     it("redacts EC PRIVATE KEY block", () => {
       const key = "-----BEGIN EC PRIVATE KEY-----\nMHQCAQEEIK\n-----END EC PRIVATE KEY-----";
       const out = redactSecrets(key);
-      expect(out).toBe("[REDACTED]");
+      expect(out).not.toContain("MHQCAQEEIK");
+      expect(out).toContain("-----BEGIN EC PRIVATE KEY-----");
     });
 
-    it("redacts CERTIFICATE block", () => {
+    it("leaves a CERTIFICATE block alone (public; ADR-026 narrows PEM redaction to private keys)", () => {
       const cert = "-----BEGIN CERTIFICATE-----\nMIICpDCC\n-----END CERTIFICATE-----";
-      expect(redactSecrets(cert)).toBe("[REDACTED]");
+      expect(redactSecrets(cert)).toBe(cert);
     });
 
     it("redacts key block embedded in a longer string", () => {
@@ -164,7 +165,7 @@ describe("redactSecrets", () => {
 describe("buildAuditRecord secret redaction", () => {
   it("redacts secrets in the cmd field", () => {
     const r = buildAuditRecord({ tool: "execute", cmd: "export API_KEY=supersecret123" });
-    expect(r.cmd).toContain("[REDACTED]");
+    expect(r.cmd).toMatch(/<redacted len=\d+>/);
     expect(r.cmd).not.toContain("supersecret123");
   });
 

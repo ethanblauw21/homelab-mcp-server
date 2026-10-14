@@ -37,7 +37,7 @@ The server runs at one of four tiers. Choose the lowest tier that covers what yo
 
 | Tool | Description |
 |------|-------------|
-| `describe_homelab` | Secret-redacted census of the node: guests, storage, network, services, Tailscale |
+| `describe_homelab` | Census of the node: guests, storage, network, services, Tailscale (output redacted, best-effort — see below) |
 | `health_check` | Fixed-probe node health → ok / warn / crit per section (node, storage, guests, units, updates) |
 | `pct_list` | List LXC containers and status |
 | `qm_list` | List QEMU/KVM VMs and status |
@@ -265,6 +265,15 @@ Point `MCP_BACKUP_DIR` at a synced folder or NAS for extra durability.
 ## Security
 
 The tier model is the primary defense: `observe` and `operate` are enforced by Proxmox RBAC, so no bug or injected prompt can exceed the token's privileges. At `companion` and above, the MCP server's guardrails take over — denylist, confirm gate, protected set, pinned trust, and an immutable audit trail.
+
+**Secret redaction (ADR-026).** Every tool result, error result and error message passes one redactor before the model sees it. There's no flag to turn it off.
+
+- **By key name:** the value is replaced and the key kept. This applies to `*WEBHOOK*`, `*TOKEN*`, `*SECRET*`, `*PASS*`, `*API_KEY`, `*_KEY`, `*AUTH*`, `*COOKIE*`, `*SESSION*` and similar keys, in env vars, labels, YAML/INI/.env lines, JSON, XML and CLI flags.
+- **By shape:** webhook URLs, `user:pass@`, `Authorization` headers, PVE API token secrets, JWTs, private keys, `ghp_`/`sk-`/`AKIA`/`tskey-`-style tokens, and long high-entropy strings. Image digests, container IDs, git SHAs, SSH public keys and paths are kept.
+
+Values become `<redacted len=N fp=…>`, where `fp` is a per-install HMAC. The same value always gives the same `fp`, so you can confirm a rotation without seeing the secret. Write tools refuse content that would put a marker over a real secret.
+
+This is best-effort and not a security control. A secret with no telling key name and no recognisable shape gets through. Data stored before ADR-026, the git config mirror and the backup store are not redacted at rest. See [ADR-026](docs/adr/ADR-026-secret-redaction-boundary.md) for exactly what is and isn't covered.
 
 See [SECURITY.md](SECURITY.md) for the full threat model, each layer of defense, and root tier guidance.
 

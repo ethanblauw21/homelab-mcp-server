@@ -43,12 +43,10 @@ describe("projectDiff", () => {
     expect(out.text).toContain("keep=this");
   });
 
-  it("leaves the diff verbatim when redactDiffs is off", () => {
-    const diff = "+password=supersecret123";
-    const out = projectDiff(diff, { ...OPTS, redactDiffs: false });
-    expect(out.text).toBe(diff);
-    expect(out.redacted).toBe(false);
-    expect(out.redactionCount).toBe(0);
+  it("redacts even when redactDiffs is off (ADR-026: no bypass)", () => {
+    const out = projectDiff("+password=supersecret123", { ...OPTS, redactDiffs: false });
+    expect(out.text).toBe("+password=<redacted len=14>");
+    expect(out.redacted).toBe(true);
   });
 
   it("reports redacted:false when redaction runs but changes nothing", () => {

@@ -57,6 +57,23 @@ describe("writeFileHandler dryRun (ADR-004 §6)", () => {
     expect(fs.existsSync(cfg.backup.baseDir)).toBe(false);
   });
 
+  it("ADR-026: refuses to write redaction markers back over real secrets (dryRun and real)", async () => {
+    transport.setFile("/etc/app.env", "PORT=1\nDB_PASSWORD=fake-real-secret\n");
+    for (const dryRun of [true, false]) {
+      await expect(
+        writeFileHandler(
+          { path: "/etc/app.env", content: "PORT=2\nDB_PASSWORD=<redacted len=16>\n", encoding: "utf8", dryRun },
+          transport,
+          audit,
+          backupStore,
+          cfg
+        )
+      ).rejects.toThrow(/redacted len=/);
+    }
+    expect((await transport.readFile("/etc/app.env")).toString()).toBe("PORT=1\nDB_PASSWORD=fake-real-secret\n");
+    expect(audit.readAll()).toHaveLength(0);
+  });
+
   it("flags a new file in the preview", async () => {
     const r = (await writeFileHandler(
       { path: "/etc/new.conf", content: "hello\n", encoding: "utf8", dryRun: true },

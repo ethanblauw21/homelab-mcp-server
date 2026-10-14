@@ -21,7 +21,7 @@ A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zo
 | `pct_read_file` / `pct_write_file` | Container file I/O via `pct pull`/`pct push` (`dryRun`) | 003 |
 | `revert_file` / `list_backups` | Restore a file from a local backup; list versions | 003 |
 | `snapshot_create` / `_list` / `_rollback` / `_delete` | Server-managed (`mcp-`) guest snapshots | 003 |
-| `describe_homelab` | Read-only secret-redacted census + drift | 002 |
+| `describe_homelab` | Read-only census + drift (output redacted at the MCP boundary, best-effort — ADR-026) | 002 |
 | `qm_list` | List QEMU/KVM VMs + status | 005 |
 | `qm_agent_ping` | Check a VM's QEMU guest agent responsiveness | 005 |
 | `qm_exec` | Run a command in a VM via the guest agent (denylist + confirm gate) | 005 |
@@ -36,7 +36,7 @@ A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zo
 | `docker_exec` | Run a command in a Docker container via `pct exec … docker exec` (denylist + confirm gate) | 008 |
 | `docker_logs` | Bounded, **always-redacted** Docker container logs | 008 |
 | `docker_read_file` / `docker_write_file` | Docker container file I/O (host-visible fast path / `docker cp` relay; `dryRun`) | 008 / 016 |
-| `docker_inspect` | Structured, secret-redacted single-container view (image/`imageId` pin, mounts, ports, restart policy, compose labels, name-kept value-redacted env; `fields?` narrows) | 016 |
+| `docker_inspect` | Structured single-container view (boundary-redacted, best-effort — ADR-026) (image/`imageId` pin, mounts, ports, restart policy, compose labels, name-kept value-redacted env; `fields?` narrows) | 016 |
 | `docker_stats` | Point-in-time `--no-stream` resource snapshot, mem-sorted | 016 |
 | `compose_discover` | Read-only compose project map from running containers' labels (produces the `composePath` that `compose_redeploy`/`compose_preflight` require) | 016 |
 | `guest_backup` | vzdump archive of a guest — the rollback path for snapshot-incapable guests (confirm-gated; `mcp-` tagged; per-guest retention) | 008 |
@@ -70,6 +70,38 @@ A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zo
 > **Raw-exec gap closers (ADR-020) — "dedicated tool beats raw exec," applied to the last three enumerable patterns.** Three structured shells over existing plumbing, each replacing recurring free-form `execute`/`pct_exec` text. **systemd front door** (`service_status`/`service_logs`/`service_restart`, `tools/serviceTools.ts` + pure `serviceHelpers.ts`): `systemctl show` key=value parse, `service_logs` *delegates to `tailLogHandler`* (full reuse — `since` grammar, line cap, mandatory redaction), `service_restart` is the only mutation (confirm-gated, audited as `service_restart`/`hashScope:"unknown"`). The whole trio's tier **follows the target kind** via `assertTargetTier` (host unit ⇒ root, LXC ⇒ companion) — deliberately stricter than `tail_log` even for the read-only pair; `tail_log` stays the companion host-journal escape hatch. **Probes** (`tcp_ping`/`http_probe`, `tools/probes.ts`): host-side via Node `net`/`http` (observe floor, zero credentials, no node round-trip), `http_probe.fromVmid` shells `pct exec curl` (companion, asserted at runtime); `from: "host" | "vmid:<n>"` names the namespace; **TLS is not verified** (reachability/status check, not a trust check). **`search_file_regex`** (`tools/searchFileRegex.ts`): content-addressed `grep -C` "balloon" — find first, return only the matched line + N context lines each side (`-m max+1` detects overflow; pure parser reconstructs before/after from line numbers, robust to merged groups). Honest deviation: `grep` runs **remotely** (host shell / `pct exec` / `docker exec`), reusing the read family's surface-selection + `validatePath` but not its byte transfer — only matched neighborhoods transit. Tier follows target kind (host ⇒ root, LXC/Docker ⇒ companion). All read-only except `service_restart`; none add a new transport/store/dependency.
 
 > **Output budgeting (ADR-017) — the output side of ADR-011 §1's token-economy doctrine.** Three existing read tools gain opt-in/scoping levers + one new scoped tool, all pure reshaping over data already computed. **`query_audit`** takes `cmdMaxChars` (opt-in: truncate each record's `cmd` to a head window + `…(+N chars)` marker) / `cmdFull` (force verbatim) — the on-disk log is untouched, and truncation is **off by default** (it can hide a forensically-relevant flag). **`health_check`** drops pseudo/virtual mounts (`/dev`, `/run/*`, `/sys/*`, `/proc/*` — `isPseudoMount`) from the storage findings **by default**; `includePseudoFs: true` restores them, and the **rollup status is computed pre-filter** so a hidden mount never changes the verdict. **`describe_homelab`** adds `depth: "status"` between `summary` and `full` — identity + run-state + `snapshotCapable`, dropping **only** the bulky `containers[].config` blob (the `services[].docker` roster is kept at every depth so the ladder is monotonic, `summary ⊆ status ⊆ full` — ADR-023 #1). **`describe_guest`** is the new single-VMID census (companion). The per-surface default split is deliberate: §1 stays opt-in (truncation loses data), §2 defaults-on (pseudo mounts are 0.0%-used noise, verdict preserved) — both are provably non-breaking for existing callers/tests.
+
+## Secret redaction at the MCP boundary (ADR-026)
+
+**Every tool result passes one redactor; no bypass flag.** `register` in `index.ts` wraps every callback in `withRedaction` (`guardrails/redactionBoundary.ts`), so each text block, error result, structured content and thrown error message goes through `redactToolResult` (`guardrails/redaction.ts`) before it reaches the model. Compact-JSON results are parsed and deep-redacted; raw text keeps its layout. Per-tool redaction (census, `docker_inspect` env, log tools) still runs and is idempotent with the boundary.
+
+- **Key name (value replaced, key kept):** `WEBHOOK|TOKEN|SECRET|PASS(WORD|WD)?|API_?KEY|_KEY$|^KEY$|AUTH|COOKIE|CREDENTIAL|PRIVATE|SESSION|SIGNATURE|SALT|DSN|CONN(ECTION)?_?STRING`.
+  - Applied in env `K=v`, YAML/INI/.env lines (to end of line; YAML block scalars too), JSON keys, XML elements, CLI `--flag=x`/`--flag x`, query params, and parsed records/objects.
+  - `${VAR}`/`$VAR` references and booleans are left readable; `${VAR:-default}` is redacted.
+- **Shape (anywhere):**
+  - webhook URLs (host + path prefix kept) and shoutrrr notification URLs;
+  - `user:pass@`; secret query params; `Authorization:` (scheme kept); `X-Api-Key`/`Cookie` headers;
+  - `PVEAPIToken=…!name=<uuid>` (token ID kept);
+  - JWTs; PEM private keys; `ghp_`/`github_pat_`/`glpat-`/`xox?-`/`sk-`/`AKIA`/`tskey-` (prefix kept);
+  - a 32+ hex / base64 entropy fallback that allow-lists `sha256:` digests, 40/64/128 lowercase hex (git SHAs, container and image IDs), SSH public keys, `SHA256:` fingerprints and paths.
+- **Marker** `<redacted len=N fp=xxxxxxxx>`. `fp` is an HMAC-SHA256 prefix keyed by a per-install `redaction.key` beside the audit log (never a plain hash), so a rotation shows as a changed fp.
+- **Write guard:** the four `writeResolved*` cores (and so every `*_edit_file` and `revert_file`) refuse content that adds markers the file didn't have. Writing redacted output back would destroy real secrets; use `*_edit_file` for targeted changes.
+- **Best-effort, not a security control.** Not caught:
+  - a bare secret with no key and no shape;
+  - lowercase 40/64/128-hex secrets (they look like digests);
+  - short or low-entropy base64;
+  - YAML flow mappings.
+
+  Over-redacts some harmless values: `SESSION_TIMEOUT`-style numbers, md5 sums, base64 binary reads (the blob becomes one marker).
+- **Not covered (data at rest, stated rather than hidden):**
+  - audit `cmd`/`note` and `audit.db` diffs written before ADR-026 keep what the old rules missed. `query_audit` re-redacts them on the way out, but the files and the UI audit panel don't;
+  - the git mirror and the backup store hold real content by design;
+  - `beforeHash`/`afterHash` are unkeyed SHA-256 of file content, which is brute-forceable for a file whose whole content is one short secret;
+  - `audit.redactDiffs` is now ignored (always on).
+- **Enforcement:** `redaction.test.ts` covers every rule in both directions over fake fixtures (`redactionFixtures.ts`). `redactionBoundary.test.ts`:
+  - pins the `index.ts` wiring;
+  - requires every `TOOL_MIN_TIER` tool to be exercised or listed with a reason;
+  - runs the dump tools against a backend that leaks on every channel.
 
 ## Permission tiers & hybrid transport (ADR-007)
 
@@ -201,7 +233,7 @@ src/
   tools/
     execute.ts          # execute tool handler
     readFile.ts         # read_file tool handler
-    readRedaction.ts    # Pure: applyReadRedaction — opt-in return-boundary redaction for the 4 read tools (ADR-019)
+    readRedaction.ts    # Pure: applyReadRedaction — the ADR-019 redacted/redactionCount fields (content is always boundary-redacted, ADR-026)
     writeFile.ts        # write_file handler — calls backup pipeline before write
     listDirectory.ts    # list_directory tool handler
     pctExec.ts          # pct_exec tool handler
@@ -252,6 +284,9 @@ src/
     pathValidation.ts   # Pure fn: traversal checks, allowlist enforcement
     largeChange.ts      # Pure fn: threshold detection for size/new-file/heavy-cmd
     rollbackBreaker.ts  # Pure evaluateRollbackBreaker/rollbackTargetKey + stateful RollbackBreaker shell (ADR-021)
+    redaction.ts        # Pure: THE redactor — key-name + shape rules, marker/fp, redactToolResult, write-guard check (ADR-002/026)
+    redactionBoundary.ts # withRedaction — wraps every registered tool callback (ADR-026)
+    redactionKey.ts     # I/O: per-install HMAC key for the marker fp (ADR-026)
   backup/
     policy.ts           # Pure fns: dedup, gzipped reverse-diff, large-file policy selection
     eviction.ts         # Pure fns: per-file version cap + global size cap, LRU eviction
@@ -303,7 +338,7 @@ Root is granted at the SSH layer on purpose — Proxmox's tooling assumes root. 
 - **Denylist is two-tier and segment-anchored** (`guardrails/denylist.ts` → `checkCommand`): **DENY** (unconditional: `rm -rf /`, `mkfs`, `dd` to block devices, fork bomb, `chmod -R 777 /`) and **CONFIRM** (command-position only: `shutdown`/`reboot`/`halt`/`poweroff`/`init 0|6`/`systemctl reboot|poweroff|halt`). `execute`/`pct_exec` take `confirm?: boolean`; a CONFIRM match without it is refused, with it the audit notes `confirmGated`. Configured entries are segment-prefix matched and may carry a `confirm:` tier prefix. Known limit: a tripwire, not a sandbox — `bash -c "reboot"` hides the command in an argument and is not caught.
 - **Rollback circuit breaker — the one *cross-call* guardrail (ADR-021).** Every other guardrail judges a single call; the breaker (`guardrails/rollbackBreaker.ts`) catches a **thrash loop** across calls on the rollback family (`revert_file`/`snapshot_rollback`/`guest_backup_restore`). It refuses a verb once it has fired `limit` (default 3) times against the **same target** inside a sliding `windowMs` (default 10 min), keyed per target (`rollbackTargetKey`: the backup descriptor for file reverts, `guest/<vmid>` for the whole-guest verbs) so an honest revert of file A never trips a restore of guest 105. **Pure core** (`evaluateRollbackBreaker`/`rollbackTargetKey`/`breakerRefusal`) + a **thin stateful shell** (`RollbackBreaker`, a `Map<key, number[]>` — the first guardrail that *carries state*, `now` injected), one process singleton in `index.ts` injected into the three handlers. **Session = process lifetime** (a stdio server is one client over one long-lived process; ADR-021 resolved ADR-020's "what is a session" blocker with this), so a restart is the strongest reset and the window self-heals over time. On a trip the handler **audits the refusal** (`refused: true` + `circuitBreaker: {recentCount, limit, windowMs}` — the first audited *refusal*, since denylist/confirm refusals throw before append; it becomes an ADR-015 silent-failure signal) and throws a structured "hand back to a human / wait / re-issue with `overrideCircuitBreaker: true`" error. The override is **loud, not free**: it bypasses the breaker for that one call and stamps `circuitBreakerOverridden: true` (kept distinct from `confirm`), and an overridden call records no timestamp so the *next* non-override call re-trips the still-hot window. A tripwire, not a sandbox: a caller that always overrides, or varies its target each call, defeats it — the value is the forced pause and the audit trail. Config `guardrails.rollbackBreaker {enabled, limit, windowMs}` (env `ROLLBACK_BREAKER_ENABLED`/`_LIMIT`/`_WINDOW_MS`); `enabled: false` is a pure no-op kill switch.
 - **`read_file` is stat-gated** at `tools.readFileMaxBytes` (2 MB default); use `offset`/`maxBytes` for windowed reads, or `execute` with `head`/`tail`/`grep`/`wc`. `pct_read_file` enforces the same cap + `offset`/`maxBytes` window on the pulled bytes (the `pct pull` copies the whole file first, so the cap bounds the returned payload; point users at `pct_exec` + `head`/`tail`/`grep`/`wc`).
-- **Reads are fidelity-by-default, redaction-by-opt-in (ADR-019).** All four file-read tools (`read_file`/`pct_read_file`/`qm_read_file`/`docker_read_file`) take an optional `redact?: boolean`. **Absent ⇒ byte-for-byte unchanged** (the load-bearing default-invariance — no extra result fields, identical node-side read). With `redact: true` the returned text passes through the **same ADR-002 redaction module the log tools use** (`applyReadRedaction` at the *return boundary only*, `tools/readRedaction.ts`), adding `redacted`/`redactionCount`. It is **utf8-only** (a base64 read returns `redacted: false`, blob untouched) and **best-effort, not a security control**. Crucially it touches **only the returned payload** — `bytes` still reports the true pre-redaction length, and the backup/diff/integrity-hash/revert pipelines all keep using the true bytes (a write of a value previously read-with-redact must round-trip the real secret). This **amends ADR-004's "reads never redact" to "reads never redact *by default*."
+- **Reads are always redacted at the MCP boundary (ADR-026, superseding the ADR-019 default below).** The `redact` flag now only adds `redacted`/`redactionCount`; the content is redacted either way. The rest of this bullet describes ADR-019 as first designed. **Original ADR-019 text — reads were fidelity-by-default, redaction-by-opt-in.** All four file-read tools (`read_file`/`pct_read_file`/`qm_read_file`/`docker_read_file`) take an optional `redact?: boolean`. **Absent ⇒ byte-for-byte unchanged** (the load-bearing default-invariance — no extra result fields, identical node-side read). With `redact: true` the returned text passes through the **same ADR-002 redaction module the log tools use** (`applyReadRedaction` at the *return boundary only*, `tools/readRedaction.ts`), adding `redacted`/`redactionCount`. It is **utf8-only** (a base64 read returns `redacted: false`, blob untouched) and **best-effort, not a security control**. Crucially it touches **only the returned payload** — `bytes` still reports the true pre-redaction length, and the backup/diff/integrity-hash/revert pipelines all keep using the true bytes (a write of a value previously read-with-redact must round-trip the real secret). This **amends ADR-004's "reads never redact" to "reads never redact *by default*."
 - **`dryRun` on `write_file`** runs the full pipeline read-only and returns a `computeUnifiedDiff` preview (`util/diff.ts`, shared with ADR-005) plus would-be metadata — **no write, no backup, no audit**. `pct_write_file` takes the same `dryRun` flag with identical no-side-effect semantics.
 
 ## Storage: backups are not naive copies

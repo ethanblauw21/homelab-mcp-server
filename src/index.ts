@@ -1,3 +1,4 @@
+import path from "path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { config } from "./config.js";
@@ -98,6 +99,9 @@ import {
   httpProbeHandler,
 } from "./tools/probes.js";
 import { SearchFileRegexInputSchema, searchFileRegexHandler } from "./tools/searchFileRegex.js";
+import { withRedaction } from "./guardrails/redactionBoundary.js";
+import { loadOrCreateRedactionKey } from "./guardrails/redactionKey.js";
+import { setRedactionFingerprintKey } from "./guardrails/redaction.js";
 import {
   ComputeTreeInputSchema,
   computeTreeHandler,
@@ -153,6 +157,10 @@ if (config.tier.rootEnabled) {
 }
 
 const sshTransport = new Ssh2Transport(config.ssh);
+// ADR-026: per-install HMAC key for the `fp=` field of redaction markers.
+setRedactionFingerprintKey(
+  loadOrCreateRedactionKey(process.env.REDACTION_KEY_PATH ?? path.join(path.dirname(config.audit.logPath), "redaction.key"))
+);
 const audit = new AuditLog(config.audit.logPath);
 // ADR-022 — the derived audit.db projection. Mirror each append into it (best-
 // effort, fail-soft — see AuditLog.append), giving query_audit an indexed + FTS
@@ -228,7 +236,9 @@ const register = ((name: string, def: unknown, cb: unknown) => {
   // so an unknown/hallucinated param errors loudly instead of being silently stripped.
   const d = def as { inputSchema?: unknown };
   if (d && d.inputSchema !== undefined) d.inputSchema = strictifyInputSchema(d.inputSchema);
-  return (server.registerTool as (n: string, d: unknown, c: unknown) => unknown)(name, def, cb);
+  // ADR-026: every result, error result and thrown message is secret-redacted here.
+  const redacted = withRedaction(cb as (...a: unknown[]) => unknown);
+  return (server.registerTool as (n: string, d: unknown, c: unknown) => unknown)(name, def, redacted);
 }) as typeof server.registerTool;
 
 register(

@@ -25,7 +25,7 @@ describe("finalizeInventory — redaction (R2)", () => {
       { vmid: 101, name: "c", status: "running", config: { password: "hunter2", cores: "2" } },
     ];
     const out = finalizeInventory(rawSnap({ sections: { containers } }), opts);
-    expect(out.sections.containers?.[0]?.config?.password).toBe("[REDACTED:password]");
+    expect(out.sections.containers?.[0]?.config?.password).toMatch(/^<redacted len=\d+>$/);
     expect(out.sections.containers?.[0]?.config?.cores).toBe("2");
     expect(out.redactions).toBe(1);
     expect(JSON.stringify(out)).not.toContain("hunter2");

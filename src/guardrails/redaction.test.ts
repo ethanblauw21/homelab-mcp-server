@@ -1,168 +1,185 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import {
   redact,
   redactString,
   redactRecord,
+  redactDeep,
+  redactToolText,
+  redactToolResult,
+  redactionMarker,
+  setRedactionFingerprintKey,
+  containsRedactionMarker,
+  introducesRedactionMarker,
   summarizeUnparsable,
   buildKeyNameRegex,
 } from "./redaction.js";
+import { REDACT_FIXTURES, DIUN_ENV, FAKE_WEBHOOK_TOKEN, FAKE_WEBHOOK_ID, FAKE_DISCORD_WEBHOOK } from "./redactionFixtures.js";
 
-// A WireGuard-shaped key: 43 base64 chars + '=' (32 bytes).
-const WG_KEY = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq=";
-const JWT =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+afterEach(() => setRedactionFingerprintKey(null));
 
-describe("redactString — value patterns", () => {
-  it("redacts a PEM private-key block to a single token", () => {
-    const key =
-      "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXkBASE64\n-----END OPENSSH PRIVATE KEY-----";
-    const r = redactString(key);
-    expect(r.value).toBe("[REDACTED]");
-    expect(r.redactedCount).toBe(1);
-  });
-
-  it("redacts a JWT", () => {
-    const r = redactString(`token is ${JWT} ok`);
-    expect(r.value).not.toContain("SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c");
-    expect(r.value).toContain("[REDACTED]");
-    expect(r.redactedCount).toBe(1);
-  });
-
-  it("does NOT redact a bare 44-char base64 key with no secret key-name", () => {
-    // Tailscale/WireGuard public keys, base64 SHA-256 digests, and cert
-    // fragments share this shape and are useful census content. Only the
-    // key-name / env-style layers redact base64 — never a blanket value scan.
-    const r = redactString(`peer pubkey ${WG_KEY} active`);
-    expect(r.value).toContain(WG_KEY);
-    expect(r.redactedCount).toBe(0);
-  });
-
-  it("redacts credentials embedded in a URL but keeps scheme/user/host", () => {
-    const r = redactString("postgres://admin:s3cr3tpw@db.local:5432/app");
-    expect(r.value).not.toContain("s3cr3tpw");
-    expect(r.value).toContain("postgres://admin:[REDACTED]@db.local");
-    expect(r.redactedCount).toBe(1);
-  });
-
-  it("redacts an Authorization header value", () => {
-    const r = redactString("Authorization: Bearer abc.def.ghi");
-    expect(r.value).toBe("Authorization: [REDACTED]");
-    expect(r.redactedCount).toBe(1);
-  });
-});
-
-describe("redactString — env-style assignments", () => {
-  it("redacts a Gluetun-style env block (password + wireguard key only)", () => {
-    const env = [
-      "OPENVPN_USER=myuser",
-      "OPENVPN_PASSWORD=supersecretvpn",
-      `WIREGUARD_PRIVATE_KEY=${WG_KEY}`,
-      "SERVER_COUNTRIES=Switzerland",
-      "TZ=America/Chicago",
-    ].join("\n");
-    const r = redactString(env);
-
-    expect(r.value).not.toContain("supersecretvpn");
-    expect(r.value).not.toContain(WG_KEY);
-    // Non-secret values are preserved.
-    expect(r.value).toContain("OPENVPN_USER=myuser");
-    expect(r.value).toContain("SERVER_COUNTRIES=Switzerland");
-    expect(r.value).toContain("TZ=America/Chicago");
-    expect(r.redactedCount).toBe(2);
-  });
-
-  it("is case-insensitive on the key name", () => {
-    expect(redactString("Password=abc").value).toBe("Password=[REDACTED]");
-    expect(redactString("APITOKEN=abc").value).toContain("[REDACTED]");
-  });
-
-  it("does not redact non-secret assignments", () => {
-    const s = "VERSION=1.2.3 TIMESTAMP=2024-01-01 cores=2";
-    expect(redactString(s).value).toBe(s);
-    expect(redactString(s).redactedCount).toBe(0);
-  });
-
-  it("counts multiple distinct secrets accurately", () => {
-    const r = redactString("TOKEN=t1 PASSWORD=p2 ok");
-    expect(r.redactedCount).toBe(2);
-    expect(r.value).not.toContain("t1");
-    expect(r.value).not.toContain("p2");
-  });
-});
-
-describe("redactRecord — parsed config maps", () => {
-  it("redacts secret-named keys with a labeled token and scans the rest", () => {
-    const r = redactRecord({
-      cores: "2",
-      memory: "1024",
-      net0: "name=eth0,bridge=vmbr0",
-      WIREGUARD_PRIVATE_KEY: WG_KEY,
-      password: "hunter2",
+describe("fixtures — every rule, both directions", () => {
+  for (const f of REDACT_FIXTURES) {
+    it(f.name, () => {
+      const out = redactString(f.input).value;
+      for (const s of f.secrets) expect(out, `leaked ${JSON.stringify(s)}\n${out}`).not.toContain(s);
+      for (const k of f.keep) expect(out, `lost ${JSON.stringify(k)}\n${out}`).toContain(k);
+      if (f.secrets.length === 0) expect(out).toBe(f.input);
+      else expect(out).toMatch(/<redacted len=\d+>/);
     });
+  }
+});
 
-    expect(r.value.cores).toBe("2");
-    expect(r.value.memory).toBe("1024");
-    expect(r.value.net0).toBe("name=eth0,bridge=vmbr0");
-    expect(r.value.WIREGUARD_PRIVATE_KEY).toBe("[REDACTED:WIREGUARD_PRIVATE_KEY]");
-    expect(r.value.password).toBe("[REDACTED:password]");
+describe("marker + fingerprint", () => {
+  it("replaces only the value and records its length", () => {
+    expect(redactString("Password=abc").value).toBe("Password=<redacted len=3>");
+    expect(redactString('API_TOKEN="fake two"').value).toBe('API_TOKEN="<redacted len=8>"');
+  });
+
+  it("adds a stable HMAC fingerprint once a per-install key is set — never a plain hash", () => {
+    setRedactionFingerprintKey(Buffer.from("fake-install-key-0000000000000000"));
+    const a = redactionMarker("hunter2");
+    expect(a).toMatch(/^<redacted len=7 fp=[0-9a-f]{8}>$/);
+    expect(redactionMarker("hunter2")).toBe(a); // stable → a rotation shows as a changed fp
+    expect(redactionMarker("hunter3")).not.toBe(a);
+    // sha256("hunter2") starts f52fbd32 — the fp must not be the unkeyed digest.
+    expect(a).not.toContain("f52fbd32");
+    setRedactionFingerprintKey(Buffer.from("another-install-key-000000000000"));
+    expect(redactionMarker("hunter2")).not.toBe(a);
+  });
+
+  it("is idempotent — a second pass changes nothing", () => {
+    for (const f of REDACT_FIXTURES) {
+      const once = redactString(f.input).value;
+      expect(redactString(once).value).toBe(once);
+      expect(redactString(once).redactedCount).toBe(0);
+    }
+  });
+
+  it("counts distinct secrets", () => {
+    const r = redactString("run TOKEN=t1 PASSWORD=p2 ok");
     expect(r.redactedCount).toBe(2);
+    expect(r.value).toBe("run TOKEN=<redacted len=2> PASSWORD=<redacted len=2> ok");
   });
 
-  it("redacts value-pattern secrets even under a non-secret key", () => {
-    const r = redactRecord({ description: `deploy with ${JWT}` });
-    expect(r.value.description).not.toContain("SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c");
-    expect(r.redactedCount).toBe(1);
+  it("a line-leading KEY=value runs to end of line (env_file semantics: no half-leak)", () => {
+    expect(redactString("TOKEN=t1 t2 t3").value).toBe("TOKEN=<redacted len=8>");
   });
 
-  it("returns zero redactions for an all-clean record", () => {
-    const r = redactRecord({ cores: "4", ostype: "debian", arch: "amd64" });
-    expect(r.redactedCount).toBe(0);
+  it("leaves non-secret assignments alone", () => {
+    const s = "VERSION=1.2.3 TIMESTAMP=2024-01-01 cores=2 monkey=1 keyboard=us";
+    expect(redactString(s)).toEqual({ value: s, redactedCount: 0 });
   });
 });
 
-describe("redact — dispatch", () => {
-  it("dispatches string input to redactString", () => {
-    expect(redact("PASSWORD=x").value).toBe("PASSWORD=[REDACTED]");
+describe("Diun regression — docker inspect Env", () => {
+  it("free-text docker inspect JSON never shows the webhook token or id", () => {
+    const raw = JSON.stringify([{ Config: { Env: DIUN_ENV } }], null, 2);
+    const out = redactString(raw).value;
+    expect(out).not.toContain(FAKE_WEBHOOK_TOKEN);
+    expect(out).not.toContain(FAKE_WEBHOOK_ID);
+    expect(out).toContain('"DIUN_NOTIF_DISCORD_WEBHOOKURL=');
+    expect(() => JSON.parse(out)).not.toThrow(); // structure preserved
   });
-  it("dispatches record input to redactRecord", () => {
-    const v = redact({ token: "abc" }).value as Record<string, string>;
-    expect(v.token).toBe("[REDACTED:token]");
+
+  it("a parsed env map (docker_inspect's projection) keeps the name, masks the value", () => {
+    const env = Object.fromEntries(DIUN_ENV.map((e) => [e.slice(0, e.indexOf("=")), e.slice(e.indexOf("=") + 1)]));
+    const r = redactRecord(env);
+    expect(r.value.DIUN_NOTIF_DISCORD_WEBHOOKURL).toBe(`<redacted len=${FAKE_DISCORD_WEBHOOK.length}>`);
+    expect(r.value.TZ).toBe("America/Chicago");
+    expect(r.redactedCount).toBe(1);
+  });
+});
+
+describe("redactRecord / redactDeep", () => {
+  it("masks secret-named keys and shape-scans the rest", () => {
+    const r = redactRecord({ cores: "2", net0: "name=eth0,bridge=vmbr0", password: "hunter2", description: "see ghp_FAKEfake0123456789FAKEfake0123456789" });
+    expect(r.value).toMatchObject({ cores: "2", net0: "name=eth0,bridge=vmbr0", password: "<redacted len=7>" });
+    expect(r.value.description).toBe("see ghp_<redacted len=36>");
+    expect(r.redactedCount).toBe(2);
+  });
+
+  it("deep-walks tool results: keyed scalars, nested strings; structural `key` and booleans kept", () => {
+    const r = redactDeep({
+      key: "pct config 101",
+      passed: true,
+      env: { WEBHOOK_URL: "https://x.test/a", DB_PASSWORD: "fake-pw" },
+      lines: ["ok", "Authorization: Bearer fakeBearerToken0001"],
+      pin_secret: 1234,
+    });
+    expect(r.value).toEqual({
+      key: "pct config 101",
+      passed: true,
+      env: { WEBHOOK_URL: "<redacted len=16>", DB_PASSWORD: "<redacted len=7>" },
+      lines: ["ok", "Authorization: Bearer <redacted len=19>"],
+      pin_secret: "<redacted len=4>",
+    });
+  });
+
+  it("dispatches on type", () => {
+    expect(redact("PASSWORD=x").value).toBe("PASSWORD=<redacted len=1>");
+    expect((redact({ token: "abc" }).value as Record<string, string>).token).toBe("<redacted len=3>");
+  });
+});
+
+describe("redactToolText / redactToolResult (the MCP boundary)", () => {
+  it("compact JSON is deep-redacted and stays valid JSON", () => {
+    const text = JSON.stringify({ env: Object.fromEntries([["DIUN_NOTIF_DISCORD_WEBHOOKURL", FAKE_DISCORD_WEBHOOK]]) });
+    const out = redactToolText(text);
+    expect(out).not.toContain(FAKE_WEBHOOK_TOKEN);
+    expect(JSON.parse(out).env.DIUN_NOTIF_DISCORD_WEBHOOKURL).toMatch(/^<redacted len=\d+>$/);
+  });
+
+  it("raw text (file content) keeps its layout", () => {
+    const file = '{\n  "password": "fake-pw",\n  "port": 8080\n}\n';
+    expect(redactToolText(file)).toBe('{\n  "password": "<redacted len=7>",\n  "port": 8080\n}\n');
+  });
+
+  it("redacts every text block, error results included", () => {
+    const res = redactToolResult({ isError: true, content: [{ type: "text", text: `failed: ${FAKE_DISCORD_WEBHOOK}` }] });
+    expect(res.isError).toBe(true);
+    expect(res.content[0]!.text).not.toContain(FAKE_WEBHOOK_TOKEN);
+  });
+});
+
+describe("write guard", () => {
+  it("refuses content that adds markers; allows reverts / edits that do not", () => {
+    expect(introducesRedactionMarker("TOKEN=real", "TOKEN=<redacted len=4>")).toBe(true);
+    expect(introducesRedactionMarker(null, "x <redacted len=4 fp=0123abcd>")).toBe(true);
+    expect(introducesRedactionMarker("a <redacted len=4> b", "a <redacted len=4> c")).toBe(false);
+    expect(introducesRedactionMarker("TOKEN=real", "TOKEN=real\nPORT=1")).toBe(false);
+    expect(containsRedactionMarker("[REDACTED]")).toBe(true);
   });
 });
 
 describe("summarizeUnparsable — fail closed", () => {
-  it("returns a summary instead of raw content and counts pattern hits", () => {
-    const blob = "garbage line\nOPENVPN_PASSWORD=leak\nAPI_TOKEN=abc123";
-    const r = summarizeUnparsable(blob);
+  it("summarizes instead of passing raw content through", () => {
+    const r = summarizeUnparsable("garbage line\nOPENVPN_PASSWORD=leak\nAPI_TOKEN=abc123");
     expect(r.value).toBe("[unparsed: 3 lines, 2 redactions by pattern scan]");
-    expect(r.value).not.toContain("leak");
-    expect(r.value).not.toContain("abc123");
     expect(r.redactedCount).toBe(2);
   });
-
   it("handles empty input", () => {
     expect(summarizeUnparsable("").value).toBe("[unparsed: 0 lines, 0 redactions by pattern scan]");
   });
 });
 
-describe("buildKeyNameRegex — extensibility", () => {
-  it("matches built-in secret tokens", () => {
+describe("buildKeyNameRegex", () => {
+  it("matches the ADR-026 key list", () => {
     const re = buildKeyNameRegex();
-    for (const k of ["password", "API_KEY", "wireguard_private_key", "psk", "auth"]) {
-      expect(re.test(k)).toBe(true);
+    for (const k of [
+      "DIUN_NOTIF_DISCORD_WEBHOOKURL", "token", "SECRET", "pass", "password", "passwd", "API_KEY", "apikey",
+      "ENCRYPTION_KEY", "KEY", "app.key", "auth", "cookie", "credential", "private", "session", "signature",
+      "salt", "dsn", "connection_string", "CONNSTRING", "psk", "wireguard_private_key",
+    ]) expect(re.test(k), k).toBe(true);
+  });
+  it("does not match ordinary keys", () => {
+    const re = buildKeyNameRegex();
+    for (const k of ["cores", "memory", "ostype", "bridge", "hostname", "monkey", "keyboard", "TZ", "PUID"]) {
+      expect(re.test(k), k).toBe(false);
     }
   });
-
-  it("does not match ordinary config keys", () => {
-    const re = buildKeyNameRegex();
-    for (const k of ["cores", "memory", "ostype", "bridge", "hostname"]) {
-      expect(re.test(k)).toBe(false);
-    }
-  });
-
-  it("honors extra keys (REDACTION_EXTRA_KEYS) but cannot disable built-ins", () => {
+  it("extra keys extend, never disable", () => {
     const re = buildKeyNameRegex(["vpn_user"]);
     expect(re.test("VPN_USER")).toBe(true);
-    expect(re.test("password")).toBe(true); // built-in still on
+    expect(re.test("password")).toBe(true);
   });
 });
