@@ -136,3 +136,59 @@ describe("target-kind tier rule (diff_config / revert_file)", () => {
     expect(() => assertTargetTier("revert_file", "host", "root")).not.toThrow();
   });
 });
+
+// ADR-024 — startup tool allowlist: an intersection inside the tier, fail-closed.
+import { isToolRegistered, registeredTools, checkToolAllowlist, nearestNames } from "./registry.js";
+
+describe("tool allowlist (ADR-024)", () => {
+  it("unset allowlist registers exactly the tier set (byte-for-byte today's behaviour)", () => {
+    for (const tier of ["observe", "operate", "companion", "root"] as Tier[]) {
+      expect(registeredTools(tier)).toEqual(toolsForTier(tier));
+    }
+  });
+
+  it("is an intersection: it can shrink the set but never add a tool above the tier", () => {
+    const list = ["docker_ps", "query_audit", "execute"]; // execute is root-only
+    expect(registeredTools("companion", list)).toEqual(["docker_ps", "query_audit"]);
+    expect(isToolRegistered("execute", "companion", list)).toBe(false);
+    expect(isToolRegistered("execute", "root", list)).toBe(true);
+    expect(isToolRegistered("pct_exec", "companion", list)).toBe(false);
+  });
+
+  it("every registered tool under any allowlist is a subset of the tier set", () => {
+    const list = Object.keys(TOOL_MIN_TIER).filter((_, i) => i % 3 === 0);
+    for (const tier of ["observe", "operate", "companion", "root"] as Tier[]) {
+      const reg = registeredTools(tier, list);
+      for (const t of reg) expect(toolsForTier(tier)).toContain(t);
+      for (const t of reg) expect(list).toContain(t);
+    }
+  });
+
+  it("unset passes the startup check", () => {
+    expect(checkToolAllowlist(undefined, "observe")).toEqual({ aboveTier: [] });
+  });
+
+  it("an empty list is a startup error, never 'zero tools'", () => {
+    expect(() => checkToolAllowlist([], "companion")).toThrow(/empty/);
+  });
+
+  it("an unknown name is a startup error with a nearest-name hint", () => {
+    expect(() => checkToolAllowlist(["docker_pss", "query_audit"], "companion")).toThrow(
+      /unknown tool\(s\): docker_pss \(did you mean docker_ps/
+    );
+  });
+
+  it("known tools above the tier are reported for a warning, not an error", () => {
+    expect(checkToolAllowlist(["docker_ps", "execute", "pct_exec"], "operate").aboveTier).toEqual([
+      "docker_ps",
+      "execute",
+      "pct_exec",
+    ]);
+    expect(checkToolAllowlist(["docker_ps", "execute"], "companion").aboveTier).toEqual(["execute"]);
+  });
+
+  it("nearestNames returns close matches only", () => {
+    expect(nearestNames("health_chek", Object.keys(TOOL_MIN_TIER))).toContain("health_check");
+    expect(nearestNames("zzzzzzzzzzzz", Object.keys(TOOL_MIN_TIER))).toEqual([]);
+  });
+});

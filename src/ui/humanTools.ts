@@ -17,7 +17,7 @@
  * bounded blast radius. The old ADR-001 property — "no server without Claude" — is
  * exactly this property with the human set EMPTY; the new property parameterizes it.
  */
-import { isToolEnabled, type Tier } from "../tiers/registry.js";
+import { isToolRegistered, type Tier } from "../tiers/registry.js";
 
 /**
  * The bounded set the standing UI executor may run. Deliberately four tools, all
@@ -73,6 +73,9 @@ export const EXCLUDED_AGENT_TOOLS = [
   "guest_backup",
   "guest_backup_restore",
   "compose_redeploy",
+  // ADR-025 — container restart/update are agent-principal mutations.
+  "docker_restart",
+  "compose_update",
   "snapshot_create",
   "snapshot_rollback",
   "snapshot_delete",
@@ -89,6 +92,8 @@ export function isHumanTool(name: string): name is HumanTool {
  * §2 promise — "an observe install's executor's companion-only actions are simply
  * absent" — enforced by the same registry that gates the MCP server.
  */
-export function humanToolsForTier(tier: Tier): HumanTool[] {
-  return HUMAN_TOOLS.filter((t) => isToolEnabled(t, tier));
+export function humanToolsForTier(tier: Tier, allowlist?: readonly string[]): HumanTool[] {
+  // ADR-024 §4 — the startup allowlist shrinks this set too: a tool the operator
+  // excluded must not be reachable from a button either. It can never add one.
+  return HUMAN_TOOLS.filter((t) => isToolRegistered(t, tier, allowlist));
 }

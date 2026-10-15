@@ -69,7 +69,7 @@ export class UiExecutor {
       );
     }
 
-    for (const tool of humanToolsForTier(deps.tier)) {
+    for (const tool of humanToolsForTier(deps.tier, deps.config.tier?.toolAllowlist)) {
       switch (tool) {
         case "verify_integrity":
           this.runners.set(tool, (i) =>

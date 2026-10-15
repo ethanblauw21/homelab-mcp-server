@@ -24,6 +24,7 @@
   .\scripts\setup.ps1 -Tier companion -NodeHost 192.168.1.100
   .\scripts\setup.ps1 -Tier operate   -NodeHost 192.168.1.100 -BootstrapMode paste
   .\scripts\setup.ps1 -Tier observe   -NodeHost 192.168.1.100 -DryRun
+  .\scripts\setup.ps1 -Tier companion -NodeHost 192.168.1.100 -TokenName mcp-agent
 #>
 [CmdletBinding()]
 param(
@@ -39,7 +40,9 @@ param(
 
     [switch]$DryRun,
 
-    [switch]$RotateToken
+    [switch]$RotateToken,
+
+    [string]$TokenName
 )
 
 $nodeArgs = @()
@@ -49,6 +52,7 @@ if ($BootstrapMode) { $nodeArgs += "--bootstrap-mode=$BootstrapMode" }
 if ($SshKeyPath)    { $nodeArgs += "--ssh-key-path=$SshKeyPath" }
 if ($DryRun)        { $nodeArgs += "--dry-run" }
 if ($RotateToken)   { $nodeArgs += "--rotate-token" }
+if ($TokenName)     { $nodeArgs += "--token-name=$TokenName" }
 
 & node "$PSScriptRoot\setup.mjs" @nodeArgs
 exit $LASTEXITCODE

@@ -42,6 +42,10 @@ const ConfigSchema = z.object({
     // True ONLY when MCP_HOST_ROOT_ENABLED holds the exact acknowledgment string
     // (tiers/rootFlag.ts). Any other value, including "true", is disabled.
     rootEnabled: z.boolean().default(false),
+    // ADR-024 — optional startup tool allowlist, applied ON TOP of the tier
+    // (intersection: it can only remove tools). Undefined = no filter. An empty or
+    // unknown-name list is a startup error (tiers/registry.ts checkToolAllowlist).
+    toolAllowlist: z.array(z.string()).optional(),
   }),
   // ADR-007 — PVE API backend (the API path of the hybrid transport). Required
   // for observe/operate (no SSH key exists at those tiers); optional but preferred
@@ -331,6 +335,25 @@ const ConfigSchema = z.object({
       "/dev/pve",
     ]),
   }),
+  // ADR-025 — container update workflow (docker_restart / image_updates /
+  // compose_update). All optional; handlers fall back to these defaults.
+  docker: z
+    .object({
+      // "<vmid>:<container>" of the Diun instance to read; unset ⇒ auto-detect a
+      // crazymax/diun container in the target LXC.
+      diunContainer: z.string().optional(),
+      updateHealthTimeoutSec: z.number().int().positive().default(120),
+      updateHealthTimeoutMaxSec: z.number().int().positive().default(600),
+      updateStableSec: z.number().int().nonnegative().default(20),
+      updatePollIntervalMs: z.number().int().positive().default(2_000),
+      // Pull + recreate run node-side under these (an image pull is far slower
+      // than an ordinary command).
+      updatePullTimeoutMs: z.number().int().positive().default(600_000),
+      updateRecreateTimeoutMs: z.number().int().positive().default(180_000),
+      registryCheckTimeoutMs: z.number().int().positive().default(120_000),
+      imageUpdatesMaxCandidates: z.number().int().positive().default(25),
+    })
+    .default({}),
   // ADR-010 — localhost UI sidecar. A SECOND, standing, human-facing process
   // (`npm run ui`), separate from the stdio MCP server. The renderer half reads
   // only client-side artifacts (no credentials); the executor half runs ONLY the
@@ -367,6 +390,12 @@ const ConfigSchema = z.object({
 
 export type Config = z.infer<typeof ConfigSchema>;
 
+/** Integer env var, or undefined so the schema default applies. */
+function envInt(name: string): number | undefined {
+  const v = process.env[name];
+  return v ? parseInt(v, 10) : undefined;
+}
+
 function loadConfig(): Config {
   const raw = {
     ssh: {
@@ -392,6 +421,12 @@ function loadConfig(): Config {
       // (e.g. "root") is rejected by the enum on purpose — root is flag-only.
       level: (process.env.MCP_TIER ?? "companion") as "observe" | "operate" | "companion",
       rootEnabled: parseRootFlag(process.env.MCP_HOST_ROOT_ENABLED),
+      // ADR-024 — `!== undefined` (not truthiness) so a set-but-empty value reaches
+      // the fail-closed check as [] instead of silently meaning "no filter".
+      toolAllowlist:
+        process.env.MCP_TOOL_ALLOWLIST !== undefined
+          ? process.env.MCP_TOOL_ALLOWLIST.split(",").map((s) => s.trim()).filter(Boolean)
+          : undefined,
     },
     api: {
       baseUrl: process.env.PVE_API_BASE_URL || undefined,
@@ -612,6 +647,16 @@ function loadConfig(): Config {
       containerBackingPaths: process.env.INTEGRITY_CONTAINER_BACKING_PATHS
         ? process.env.INTEGRITY_CONTAINER_BACKING_PATHS.split(",").map((s) => s.trim()).filter(Boolean)
         : undefined,
+    },
+    docker: {
+      diunContainer: process.env.DOCKER_DIUN_CONTAINER || undefined,
+      updateHealthTimeoutSec: envInt("DOCKER_UPDATE_HEALTH_TIMEOUT_SEC"),
+      updateStableSec: envInt("DOCKER_UPDATE_STABLE_SEC"),
+      updatePollIntervalMs: envInt("DOCKER_UPDATE_POLL_INTERVAL_MS"),
+      updatePullTimeoutMs: envInt("DOCKER_UPDATE_PULL_TIMEOUT_MS"),
+      updateRecreateTimeoutMs: envInt("DOCKER_UPDATE_RECREATE_TIMEOUT_MS"),
+      registryCheckTimeoutMs: envInt("DOCKER_REGISTRY_CHECK_TIMEOUT_MS"),
+      imageUpdatesMaxCandidates: envInt("DOCKER_IMAGE_UPDATES_MAX_CANDIDATES"),
     },
     ui: {
       bindAddress: process.env.UI_BIND_ADDRESS ?? "127.0.0.1",

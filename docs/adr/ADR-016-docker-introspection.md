@@ -4,7 +4,7 @@
 **Date:** 2026-06-19
 **Deciders:** Ethan
 **Depends on:** ADR-002 (shared redaction module — env-value redaction), ADR-004 (read caps, path validation, denylist), ADR-008 (the Docker layer: `pct exec docker …` plumbing, `dockerHelpers.ts` pure builders/parsers, the `docker:<vmid>:<container>:<path>` descriptor, the bind-mount fast path)
-**Required by:** ADR-020 (extends the "dedicated tool beats raw exec" doctrine + the audit-log evidence method to systemd, service probes, and content-addressed reads)
+**Required by:** ADR-020 (extends the "dedicated tool beats raw exec" doctrine + the audit-log evidence method to systemd, service probes, and content-addressed reads), ADR-025 (the `imageId` container-level pin + `compose_discover`'s `composePath` feed `image_updates` and `compose_update`; pays the `RepoDigests` round trip ADR-016 §1 deferred)
 **Source:** Dogfooding run 2026-06-19 — the audit log showed **227 of 257 records were `pct_exec` running hand-rolled `docker inspect`/`docker stats`/`docker exec cat` loops**, because the Docker layer has tools for *listing, logs, and files* but none for *inspection*.
 
 ## Context

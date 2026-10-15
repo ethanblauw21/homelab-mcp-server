@@ -56,7 +56,7 @@ import { assertFeedTarget } from "./feed/feedGuard.js";
 import { DiffConfigInputSchema, diffConfigHandler } from "./tools/diffConfig.js";
 import { ConfigHistory } from "./history/configHistory.js";
 import { ConfigSweepInputSchema, configSweepHandler } from "./tools/configSweep.js";
-import { isToolEnabled, type Tier } from "./tiers/registry.js";
+import { checkToolAllowlist, isToolEnabled, isToolRegistered, registeredTools, type Tier } from "./tiers/registry.js";
 import { resolveTier, rootBanner } from "./tiers/rootFlag.js";
 import type { NodeOps } from "./node/nodeOps.js";
 import { ApiBackend } from "./node/apiBackend.js";
@@ -79,6 +79,9 @@ import {
   guestBackupListHandler,
 } from "./tools/backupTools.js";
 import { ComposeRedeployInputSchema, composeRedeployHandler } from "./tools/composeRedeploy.js";
+import { dockerRestartHandler, DockerRestartInputSchema } from "./tools/dockerRestart.js";
+import { imageUpdatesHandler, ImageUpdatesInputSchema } from "./tools/imageUpdates.js";
+import { composeUpdateHandler, ComposeUpdateInputSchema } from "./tools/composeUpdate.js";
 import { ComposePreflightInputSchema, composePreflightHandler } from "./tools/composePreflightHandler.js";
 import {
   ServiceStatusInputSchema,
@@ -119,12 +122,30 @@ const server = new McpServer({
 // registered, so the model never sees a tool it cannot run.
 const activeTier: Tier = resolveTier(config.tier.level, config.tier.rootEnabled);
 const isRootTier = activeTier === "root";
+// ADR-024 — optional startup allowlist, an intersection inside the tier. Unknown or
+// empty lists throw here (fail-closed, before anything connects); known tools
+// above the tier only warn. Capability gates below keep using isToolEnabled (the
+// credential's reach); only registration consults the allowlist.
+const toolAllowlist = config.tier.toolAllowlist;
+const allowlistCheck = checkToolAllowlist(toolAllowlist, activeTier);
 
 // One-line startup identity: answers "is the right thing running?" before someone asks.
 const hostDisplay = config.api.baseUrl
   ? (() => { try { return new URL(config.api.baseUrl).hostname; } catch { return config.api.baseUrl; } })()
   : config.ssh.host || "unconfigured";
-process.stderr.write(`homelab-mcp v0.2.0 | tier: ${activeTier} | host: ${hostDisplay}\n`);
+const allowlistBanner = toolAllowlist
+  ? ` | allowlist: ${registeredTools(activeTier, toolAllowlist).length}/${registeredTools(activeTier).length} tools`
+  : "";
+process.stderr.write(`homelab-mcp v0.2.0 | tier: ${activeTier} | host: ${hostDisplay}${allowlistBanner}\n`);
+if (toolAllowlist) {
+  process.stderr.write(`[allowlist] registered: ${registeredTools(activeTier, toolAllowlist).join(", ")}\n`);
+  if (allowlistCheck.aboveTier.length > 0) {
+    process.stderr.write(
+      `[allowlist] WARNING: listed but above the '${activeTier}' tier, NOT registered: ` +
+        `${allowlistCheck.aboveTier.join(", ")}\n`
+    );
+  }
+}
 
 if (config.tier.rootEnabled) {
   // Loud, every start. stdout is the MCP channel — diagnostics go to stderr.
@@ -202,7 +223,7 @@ function errResult(err: unknown) {
  * inference; the gate short-circuits before the SDK ever sees a too-high tool.
  */
 const register = ((name: string, def: unknown, cb: unknown) => {
-  if (!isToolEnabled(name, activeTier)) return undefined;
+  if (!isToolRegistered(name, activeTier, toolAllowlist)) return undefined;
   // ADR-023 #3/#7 — stricten every tool's input schema at the registration boundary
   // so an unknown/hallucinated param errors loudly instead of being silently stripped.
   const d = def as { inputSchema?: unknown };
@@ -964,6 +985,68 @@ register(
   }
 );
 
+// ADR-025 — container update workflow (companion). docker_restart replaces a raw
+// `pct_exec docker restart`; image_updates is the read-only registry + Diun
+// pending-update report; compose_update is the per-service pull → recreate →
+// health-gate → re-tag-rollback verb (breaker-guarded like the rollback family).
+register(
+  "docker_restart",
+  {
+    description:
+      "Restart one named Docker container inside an LXC (docker restart). Confirm-gated; audited. Refuses by " +
+      "default when other containers share its network namespace (they lose networking) — netnsDependents: " +
+      "\"restart\" restarts them after it, \"ignore\" proceeds with a warning. Does NOT apply compose-file changes " +
+      "(use compose_redeploy / compose_update for that).",
+    inputSchema: DockerRestartInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await dockerRestartHandler(input, sshTransport, audit, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "image_updates",
+  {
+    description:
+      "Which Docker containers in an LXC have image updates, without a shell. The registry digest check " +
+      "(buildx imagetools, in the LXC) decides up-to-date / update-available / pinned / unknown; Diun, when " +
+      "running, adds currentVersion -> availableVersion from image version labels and (with Diun watch_repo " +
+      "enabled) ranked tag candidates for choosing a version. Flags Watchtower-managed containers. Read-only, " +
+      "not audited.",
+    inputSchema: ImageUpdatesInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await imageUpdatesHandler(input, sshTransport, config);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
+register(
+  "compose_update",
+  {
+    description:
+      "Update ONE compose service in an LXC: hold the running image under <repo>:mcp-hold-<service>, pull, " +
+      "up -d --no-deps <service>, then health-gate it (HEALTHCHECK, else running with no restarts for stableSec; " +
+      "optional HTTP probe). On failure it re-tags the held image and recreates with --pull never (automatic " +
+      "rollback). The compose file is never written. Refuses build: services, digest-pinned refs, netns " +
+      "providers, and Watchtower-managed containers (unless allowWatchtowerManaged). Rollback restores the " +
+      "image, not volume data — guest_backup first for risky upgrades. Confirm-gated; audited; rollbacks count " +
+      "toward the rollback circuit breaker.",
+    inputSchema: ComposeUpdateInputSchema,
+  },
+  async (input) => {
+    try {
+      const result = await composeUpdateHandler(input, sshTransport, audit, config, rollbackBreaker);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (err) { return errResult(err); }
+  }
+);
+
 // ADR-012 — compose_preflight: static hazard analysis BEFORE a stack deploy. The
 // read-only, never-audited counterpart to compose_redeploy (predict the bad
 // outcome cheaply, like dryRun/diff_config/health_check). Companion tier.
@@ -1099,7 +1182,9 @@ register(
 // when the tier actually registers an integrity tool. The engine reads file content
 // over the same SSH transport (host SFTP / pct pull) the other companion tools use.
 let integrityStore: NodeStore | undefined;
-if (isToolEnabled("verify_integrity", activeTier)) {
+// ADR-024 §3 — open the store iff an integrity tool is actually REGISTERED (an
+// allowlisted-to-Docker companion server must not load better-sqlite3 for nothing).
+if (["compute_tree", "verify_integrity", "accept_truth"].some((t) => isToolRegistered(t, activeTier, toolAllowlist))) {
   // Fail fast (§4): the host subtree and the container subtrees must never describe
   // the same bytes, or a file would be hashed twice (raw host view vs pct view).
   assertNonOverlap(config.history.hostWatchPaths, config.integrity.containerBackingPaths);
