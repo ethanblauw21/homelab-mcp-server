@@ -21,7 +21,11 @@ import { redactString } from "../guardrails/redaction.js";
 export interface DiffProjectionOpts {
   /** Persist diffs at all (audit.storeDiffs). */
   storeDiffs: boolean;
-  /** Redact the diff before storage (audit.redactDiffs). */
+  /**
+   * Ignored since ADR-026: stored diffs are ALWAYS redacted (no bypass). Kept so
+   * existing configs/callers still type-check.
+   * @deprecated
+   */
   redactDiffs: boolean;
   /** Cap the stored (redacted) diff in bytes (audit.diffMaxBytes). */
   diffMaxBytes: number;
@@ -57,8 +61,8 @@ export function projectDiff(
   let text = diff;
   let redacted = false;
   let redactionCount = 0;
-  if (opts.redactDiffs) {
-    const r = redactString(text);
+  {
+    const r = redactString(text); // ADR-026: unconditional — `redactDiffs: false` no longer disables it
     text = r.value;
     redactionCount = r.redactedCount;
     redacted = r.redactedCount > 0;

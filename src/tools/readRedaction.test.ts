@@ -28,7 +28,7 @@ describe("applyReadRedaction (ADR-019)", () => {
     expect(r.redacted).toBe(true);
     expect(r.redactionCount).toBeGreaterThan(0);
     // The secret-bearing keys are masked...
-    expect(r.content).toContain("[REDACTED]");
+    expect(r.content).toMatch(/<redacted len=\d+>/);
     expect(r.content).not.toContain("supersecret");
     expect(r.content).not.toContain("deadbeefhash");
     // ...but the non-secret structure survives (structure-over-secrets is the point).
@@ -45,7 +45,7 @@ describe("applyReadRedaction (ADR-019)", () => {
   });
 
   it("redact:true + utf8 with nothing to redact ⇒ redacted:true, count 0", () => {
-    const clean = "key=value\nfoo=bar\n";
+    const clean = "name=value\nfoo=bar\n";
     const r = applyReadRedaction(clean, "utf8", true);
     expect(r.redacted).toBe(true);
     expect(r.redactionCount).toBe(0);

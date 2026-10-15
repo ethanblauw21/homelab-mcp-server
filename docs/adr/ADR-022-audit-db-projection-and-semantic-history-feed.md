@@ -1,6 +1,6 @@
 # ADR-022: The Audit-DB Projection and the Semantic Change-History Feed
 
-**Status:** Accepted
+**Status:** Accepted. **Amended by ADR-026 (2026-10-14):** `audit.redactDiffs` is ignored, and stored diffs are always redacted.
 **Date:** 2026-06-22 (accepted 2026-06-24)
 **Deciders:** Ethan
 **Depends on:** ADR-004 (the JSONL audit log + atomic `O_APPEND` durability, the ADR-002 redaction module, and the diff-on-write `computeUnifiedDiff` whose output is currently *discarded*), ADR-006 (the git mirror as the pull-feed content corpus + the load-bearing "git is never on the write's critical path" invariant this feed must not break), ADR-009 (the `better-sqlite3`/WAL precedent, the "pure core, thin I/O shell" split, and the hash-anchored audit fields `beforeHash`/`afterHash`/`hashScope` this projection indexes), ADR-010 (the "no standing network-reachable surface fronting the server" property — the reason the feed is *pull*, not push-from-this-server), ADR-015 (the "derive from the artifacts, don't add a sensor" doctrine + the pure `filterAuditRecords` core reused here as the fallback path), ADR-017 (`query_audit` output budgeting / `cmd` projection — the surface being upgraded), ADR-019 (redaction is best-effort, "not a security control" — the caveat now guarding a *feed/exfil* boundary, not just at-rest)

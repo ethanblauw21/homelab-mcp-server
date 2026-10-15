@@ -13,8 +13,8 @@ export const PctReadFileInputSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "ADR-019: opt into the log tools' secret redaction for this read (utf8 only). " +
-        "Default false = full fidelity. Best-effort, not a security control."
+      "Adds redacted/redactionCount fields to the result (ADR-019). The returned content is ALWAYS " +
+        "secret-redacted at the MCP boundary (ADR-026), with or without this flag. Best-effort."
     ),
   offset: z
     .number()

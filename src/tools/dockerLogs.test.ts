@@ -52,7 +52,7 @@ describe("dockerLogsHandler", () => {
     t.setExecResult(logCmd(101, "web", 100), { stdout: leak, stderr: "", exitCode: 0 });
     const r = await dockerLogsHandler({ vmid: 101, container: "web", tail: 100 }, t, cfg);
     expect(r.content).not.toContain("SUPERSECRETVALUE123");
-    expect(r.content).toContain("[REDACTED]");
+    expect(r.content).toMatch(/<redacted len=\d+>/);
   });
 
   it("redacts error text too and surfaces a failure", async () => {

@@ -66,7 +66,7 @@ describe("describeGuestHandler (ADR-017 §4)", () => {
     // local-lvm is lvmthin (not dir) ⇒ snapshot-capable.
     expect(res.snapshotCapable).toEqual({ capable: true });
     // config is redacted, not raw.
-    expect(res.config?.password).toBe("[REDACTED:password]");
+    expect(res.config?.password).toMatch(/^<redacted len=\d+>$/);
     expect(res.redactions).toBe(1);
     expect(JSON.stringify(res)).not.toContain("supersecret");
     expect(res.docker).toEqual([{ name: "web", image: "nginx:latest", status: "Up 2 days" }]);

@@ -17,6 +17,7 @@ import {
 import { computeUnifiedDiff } from "../util/diff.js";
 import type { ConfigHistory } from "../history/configHistory.js";
 import { contentLeafHash } from "../integrity/leafHash.js";
+import { introducesRedactionMarker, REDACTION_MARKER_WRITE_REFUSAL } from "../guardrails/redaction.js";
 
 export const PctWriteFileInputSchema = z.object({
   vmid: z.number().int().positive().describe("LXC container ID"),
@@ -121,6 +122,10 @@ export async function writeResolvedPct(
   const { vmid, path, prev, newContent, tool, transport, audit, backupStore, cfg, history, timeoutMs } =
     args;
   const { prevContent, prevHash, isNewFile } = prev;
+  // ADR-026: tool output is secret-redacted; refuse to write markers back over real secrets.
+  if (introducesRedactionMarker(prevContent ? prevContent.toString("utf8") : null, newContent.toString("utf8"))) {
+    throw new Error(REDACTION_MARKER_WRITE_REFUSAL);
+  }
 
   // ADR-014 §2 — last managed write's content hash; drives the re-anchor on drift.
   const chainBaseHash = backupStore.latestBaseHash({ kind: "pct", vmid, remotePath: path });

@@ -10,6 +10,7 @@ import type { Config } from "../config.js";
 import { computeUnifiedDiff } from "../util/diff.js";
 import type { ConfigHistory } from "../history/configHistory.js";
 import { contentLeafHash } from "../integrity/leafHash.js";
+import { introducesRedactionMarker, REDACTION_MARKER_WRITE_REFUSAL } from "../guardrails/redaction.js";
 
 export const WriteFileInputSchema = z.object({
   path: z.string().min(1).describe("Absolute path on the Proxmox host"),
@@ -101,6 +102,10 @@ export async function writeResolvedHost(
 ): Promise<WriteFileResult | WriteFileDryRunResult> {
   const { path, prev, newContent, tool, transport, audit, backupStore, cfg, history } = args;
   const { prevContent, prevHash, isNewFile } = prev;
+  // ADR-026: tool output is secret-redacted; refuse to write markers back over real secrets.
+  if (introducesRedactionMarker(prevContent ? prevContent.toString("utf8") : null, newContent.toString("utf8"))) {
+    throw new Error(REDACTION_MARKER_WRITE_REFUSAL);
+  }
   const rootTier = args.rootTier ?? false;
 
   // ADR-014 §2 — the last managed write's content hash for this target; passed to

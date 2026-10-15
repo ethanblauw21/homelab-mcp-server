@@ -17,6 +17,7 @@ import {
 } from "./dockerFiles.js";
 import { computeUnifiedDiff } from "../util/diff.js";
 import { contentLeafHash } from "../integrity/leafHash.js";
+import { introducesRedactionMarker, REDACTION_MARKER_WRITE_REFUSAL } from "../guardrails/redaction.js";
 
 export const DockerWriteFileInputSchema = z.object({
   vmid: z.number().int().positive().describe("LXC container ID hosting the Docker daemon"),
@@ -156,6 +157,10 @@ export async function writeResolvedDocker(
   const { vmid, container, path, prev, newContent, tool, transport, audit, backupStore, cfg, timeoutMs } =
     args;
   const { inspect, prevContent, viaBindMount, prevHash, isNewFile } = prev;
+  // ADR-026: tool output is secret-redacted; refuse to write markers back over real secrets.
+  if (introducesRedactionMarker(prevContent ? prevContent.toString("utf8") : null, newContent.toString("utf8"))) {
+    throw new Error(REDACTION_MARKER_WRITE_REFUSAL);
+  }
 
   // ADR-014 §2 — last managed write's content hash; drives the re-anchor on drift.
   const chainBaseHash = backupStore.latestBaseHash({ kind: "docker", vmid, container, remotePath: path });

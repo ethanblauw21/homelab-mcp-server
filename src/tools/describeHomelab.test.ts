@@ -350,7 +350,7 @@ describe("describeHomelabHandler — full depth redaction", () => {
     expect(gluetun?.config?.hostname).toBe("gluetun");
 
     const portainer = snap.sections.containers?.find((c) => c.vmid === 102);
-    expect(portainer?.config?.password).toBe("[REDACTED:password]");
+    expect(portainer?.config?.password).toMatch(/^<redacted len=\d+>$/);
     expect(JSON.stringify(snap)).not.toContain("supersecret");
     expect(snap.redactions).toBe(1);
 

@@ -114,7 +114,7 @@ describe("tailLogHandler — redaction is mandatory", () => {
 
     expect(res.content).not.toContain("sk-supersecrettoken12345");
     expect(res.content).not.toContain("hunter2");
-    expect(res.content).toContain("[REDACTED]");
+    expect(res.content).toMatch(/<redacted len=\d+>/);
     expect(res.content).toContain("starting app"); // non-secret lines preserved
   });
 });
