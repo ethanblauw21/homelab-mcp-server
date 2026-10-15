@@ -298,16 +298,17 @@ export function redactString(text: string, extraKeys: string[] = []): RedactionR
   //     value runs to whitespace — commas included, so a secret with a comma is
   //     not half-leaked; for a NON-secret name the text after its first comma is
   //     re-scanned, so `a=1,webhook=x` (docker ps Labels) still catches `webhook`.
-  const inline =
-    /(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_.-]*)(\s*=\s*)(<redacted[^>]*>|"[^"\n]*"|'[^'\n]*'|\\"(?:[^"\\\n]|\\[^"])*\\"|[^\s"'`]+)/g;
-  const assign = (src: string): string =>
-    src.replace(inline, (m, name: string, sep: string, value: string) => {
+  //     The rescan is one forward pass over the token (`redactCommaTail`): a long
+  //     `a=1,a=1,…` run would otherwise go quadratic (or, recursively, overflow the stack).
+  out = out.replace(
+    /(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_.-]*)(\s*=\s*)(<redacted[^>]*>|"[^"\n]*"|'[^'\n]*'|\\"(?:[^"\\\n]|\\[^"])*\\"|[^\s"'`]+)/g,
+    (m, name: string, sep: string, value: string) => {
       if (keyRe.test(name) && !isExemptValue(value)) return `${name}${sep}${markValue(value)}`;
       const comma = value.indexOf(",");
       if (comma === -1 || /^["'\\<]/.test(value)) return m;
-      return `${name}${sep}${value.slice(0, comma + 1)}${assign(value.slice(comma + 1))}`;
-    });
-  out = assign(out);
+      return `${name}${sep}${redactCommaTail(value, comma + 1, keyRe, markValue)}`;
+    }
+  );
 
   // 13. CLI `--password value` (space-separated long flag).
   out = out.replace(
@@ -331,6 +332,28 @@ export function redactString(text: string, extraKeys: string[] = []): RedactionR
   );
 
   return { value: out, redactedCount: count };
+}
+
+/**
+ * The comma-separated tail of a non-secret unquoted value (`a=1,webhook=x`), from
+ * `from`: the first secret-named `name=` masks the rest of the token (a secret with
+ * a comma is not half-leaked); a non-secret one skips to its next comma.
+ */
+function redactCommaTail(token: string, from: number, keyRe: RegExp, markValue: (raw: string) => string): string {
+  const nameEq = /(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_.-]*)=/g;
+  nameEq.lastIndex = from;
+  for (let m = nameEq.exec(token); m; m = nameEq.exec(token)) {
+    const valueStart = nameEq.lastIndex;
+    if (valueStart >= token.length) break;
+    if (keyRe.test(m[1]!)) {
+      const rest = token.slice(valueStart);
+      if (!isExemptValue(rest)) return token.slice(0, valueStart) + markValue(rest);
+    }
+    const comma = token.indexOf(",", valueStart);
+    if (comma === -1) break;
+    nameEq.lastIndex = comma + 1;
+  }
+  return token;
 }
 
 const LINE_KV = /^(\s*(?:-\s+)?(?:export\s+)?(["']?))([A-Za-z0-9_.-]+)((?:\2)?\s*[:=][ \t]*)(.*)$/;
