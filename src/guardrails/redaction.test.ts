@@ -29,6 +29,22 @@ describe("fixtures — every rule, both directions", () => {
   }
 });
 
+describe("inline NAME=value comma rescan", () => {
+  it("keeps the rescan semantics: a secret after a comma masks the rest of the token", () => {
+    expect(redactString("labels=a=1,webhook=fake,more x=2").value).toBe("labels=a=1,webhook=<redacted len=9> x=2");
+    expect(redactString("ids=1,2,3 PORT=80").value).toBe("ids=1,2,3 PORT=80");
+  });
+
+
+  it("handles a long `a=1,a=1,…` chain without overflowing the stack, and still catches a secret at the end", () => {
+    const t0 = Date.now();
+    const r = redactString("x=" + "a=1,".repeat(200_000) + "token=fake-chain-secret");
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(r.value).not.toContain("fake-chain-secret");
+    expect(r.value.endsWith("token=<redacted len=17>")).toBe(true);
+  });
+});
+
 describe("marker + fingerprint", () => {
   it("replaces only the value and records its length", () => {
     expect(redactString("Password=abc").value).toBe("Password=<redacted len=3>");
