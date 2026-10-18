@@ -82,6 +82,16 @@ The JSONL log is not rewritten. It is the append-only system of record (ADR-004)
 
 New keys were already created at 600. An existing key is now tightened to 600 on load when group or other bits are set, with one stderr line (POSIX only).
 
+### 8. Addendum (same day): compose_update holds only when it will recreate
+
+The `hold` step ran before the pull, so a run that turned out already-current re-pointed `mcp-hold-<service>` at the current image. On 2026-10-17 the verification run did this to searxng, leaving the real rollback image (held by the earlier update) with no tag, where a prune would delete it. The same run created a redundant `mcp-hold-ollama` on the current image. The ops session restored both by hand.
+
+The order is now pull, resolve, then hold only when the pulled image differs from the running one (or the file's ref changed). Pulling first is safe because the running container keeps the old image referenced until the hold tags it. An already-current run issues no `docker tag` at all, and reports the image the existing hold points at as `existingHoldImageId` (null when there is none). If the hold fails, nothing is recreated and the ref is tagged back onto the running image.
+
+The rollback path (re-tag the hold, `up -d --pull never`) only runs after a recreate, and a recreate is now always preceded by a hold in the same run, so it never relies on a hold from an earlier run.
+
+No tool lists or removes images by `dangling=true`. On Docker 29 with the containerd image store that filter includes still-tagged images, so anything added later must not treat "dangling" as "safe to remove".
+
 ## Scope boundaries
 
 - `guest_backup_restore` on the API path still does not poll its task. That has not come up in practice and is left alone here.
