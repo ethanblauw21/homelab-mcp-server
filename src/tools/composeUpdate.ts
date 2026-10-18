@@ -37,6 +37,7 @@ import {
   buildHealthSampleCommand,
   buildImageInfoCommand,
   configFilesInclude,
+  envFilesFor,
   evaluateHealthPoll,
   holdTagFor,
   isDigestPinned,
@@ -45,7 +46,9 @@ import {
   parseHealthSample,
   parseImageInfo,
   parseImageRef,
+  probeBindingWarning,
   watchtowerManages,
+  type ContainerIdentity,
   type HealthSample,
 } from "./dockerUpdate.js";
 
@@ -87,6 +90,7 @@ export type ComposeUpdateOutcome =
   | "already-current"
   | "updated"
   | "rolled-back"
+  | "rollback-ok-probe-failed"
   | "rollback-failed"
   | "failed-needs-file-revert"
   | "pull-failed";
@@ -96,6 +100,8 @@ export interface HealthReport {
   status: "pass" | "fail";
   elapsedMs: number;
   detail: string;
+  /** ADR-027: the container gate passed and only the caller's HTTP probe failed. */
+  probeOnly?: boolean;
 }
 
 export interface ComposeUpdateResult {
@@ -114,6 +120,8 @@ export interface ComposeUpdateResult {
   health?: HealthReport;
   rollbackHealth?: HealthReport;
   steps: Array<{ step: string; exitCode: number | null; stderr?: string }>;
+  /** ADR-027: --env-file paths passed to compose (from the environment_file label); never their contents. */
+  envFiles: string[];
   warnings: string[];
   nextSteps?: string[];
 }
@@ -213,8 +221,18 @@ export async function composeUpdateHandler(
   const project = target.composeProject;
   assertComposeProject(project);
 
-  // Resolved compose model (interpolation + the sibling .env applied, as compose sees it).
-  const compose = (args: string): string => buildComposeCommand(input.composePath, project, args);
+  // ADR-027 — the project's recorded --env-file paths (environment_file label).
+  // Without them compose only sees a sibling .env, and a project started with
+  // `--env-file elsewhere` fails `config` on missing variables. Paths only: the
+  // files are read by compose on the node, never by the server.
+  const env = envFilesFor(target);
+  for (const r of env.rejected) {
+    warnings.push(`Ignored environment_file entry ${JSON.stringify(r)} (not a plain absolute path).`);
+  }
+  const envFiles = env.files;
+
+  // Resolved compose model (interpolation + the env files applied, as compose sees it).
+  const compose = (args: string): string => buildComposeCommand(input.composePath, project, args, envFiles);
   const cfgRes = await transport.exec(pct(compose("config --format json")), timeoutMs);
   if (cfgRes.exitCode !== 0) {
     throw new Error(`docker compose config failed (exit ${cfgRes.exitCode}): ${cfgRes.stderr.trim().slice(0, 500)}`);
@@ -264,6 +282,26 @@ export async function composeUpdateHandler(
     warnings.push(why + " Proceeding because allowWatchtowerManaged: true.");
   }
 
+  // ADR-027 — sanity-check the caller's probe against the RUNNING image before
+  // anything changes. A probe that already fails here cannot tell a bad update
+  // from a bad URL (ops finding 2026-10-17: searxng's port was published on
+  // 10.0.0.52 only, the probe targeted 127.0.0.1, and a healthy service was rolled
+  // back and reported rollback-failed). The binding check explains the likely cause.
+  if (input.probe) {
+    const holder = netnsHolder(target, running);
+    const bindingWarning = probeBindingWarning(input.probe.url, holder);
+    const baseline = await runProbe(input.probe.url);
+    if (!baseline.ok) {
+      throw new Error(
+        `Refusing compose_update of '${input.service}': the probe ${input.probe.url} already fails against the ` +
+          `running image (${baseline.detail}), so it cannot judge the update. ` +
+          (bindingWarning ? `Likely cause: ${bindingWarning} ` : "") +
+          "Fix the probe URL, or drop probe to rely on the HEALTHCHECK/stability gate. Nothing was changed."
+      );
+    }
+    if (bindingWarning) warnings.push(bindingWarning);
+  }
+
   // §4 — has the compose file's ref moved away from what the container was created from?
   const runRef = parseImageRef(target.ref);
   const newRef = parseImageRef(fileRef);
@@ -291,6 +329,7 @@ export async function composeUpdateHandler(
     currentVersion: oldInfo?.version ?? null,
     holdTag,
     steps,
+    envFiles,
     warnings,
   };
 
@@ -361,9 +400,9 @@ export async function composeUpdateHandler(
     return finish({ ...base, outcome: "updated", newImageId, newVersion, health }, { isRevertible: true });
   }
 
-  // ---- Failure paths. Both count toward the breaker. ----
-  breaker?.check(breakerKey, now());
+  // ---- Failure paths. Each counts toward the breaker except a probe-only miss on both images. ----
   if (refMismatch) {
+    breaker?.check(breakerKey, now());
     return finish(
       {
         ...base,
@@ -394,16 +433,37 @@ export async function composeUpdateHandler(
         : { mode: "stability", status: "fail", elapsedMs: 0, detail: "rollback up -d failed" };
   }
   const rolledBack = rollbackHealth.status === "pass";
-  if (rolledBack) {
+  // ADR-027 — both images passed the container gate and failed only the caller's
+  // probe: the previous image is running and healthy by every measure the server
+  // owns, so this is a rollback that worked plus a probe that is probably wrong,
+  // not a rollback failure — and not a thrash loop for the breaker to count.
+  const probeOnlyBoth = health.probeOnly === true && rollbackHealth.probeOnly === true;
+  if (!probeOnlyBoth) breaker?.check(breakerKey, now());
+  if (rolledBack || probeOnlyBoth) {
     warnings.push(
       `Local tag ${fileRef} now points at the previous image again (it disagrees with the registry until the ` +
         "next deliberate update). Rollback restores the image, not volume data a new version may have migrated."
     );
   }
+  if (probeOnlyBoth) {
+    warnings.push(
+      `The probe ${input.probe!.url} failed against both images while both passed the ${health.mode} gate, so the ` +
+        "probe URL may be wrong. The previous image is running. The new image may have been fine: fix the probe and re-run."
+    );
+  }
+  const outcome: ComposeUpdateOutcome = rolledBack ? "rolled-back" : probeOnlyBoth ? "rollback-ok-probe-failed" : "rollback-failed";
   return finish(
-    { ...base, outcome: rolledBack ? "rolled-back" : "rollback-failed", newImageId, newVersion, health, rollbackHealth },
-    rolledBack ? {} : { failed: true }
+    { ...base, outcome, newImageId, newVersion, health, rollbackHealth },
+    outcome === "rollback-failed" ? { failed: true } : {}
   );
+
+  async function runProbe(url: string): Promise<{ ok: boolean; status: number; detail: string }> {
+    const secs = Math.max(1, Math.min(30, timeoutMsToSecs(timeoutMs)));
+    const pr = await transport.exec(pct(buildCurlProbeCommand(url, secs)), timeoutMs);
+    const out = parseCurlProbeOutput(pr.stdout);
+    const ok = pr.exitCode === 0 && evaluateHttpOk(out.status, input.probe?.expectStatus);
+    return { ok, status: out.status, detail: out.status ? `HTTP ${out.status}` : `curl exit ${pr.exitCode}` };
+  }
 
   async function healthGate(container: string, expectImageId: string): Promise<HealthReport> {
     const start = now();
@@ -426,19 +486,31 @@ export async function composeUpdateHandler(
       await sleep(pollMs);
     }
     if (verdict.state === "pass" && input.probe) {
-      const secs = Math.max(1, Math.min(30, timeoutMsToSecs(timeoutMs)));
-      const pr = await transport.exec(pct(buildCurlProbeCommand(input.probe.url, secs)), timeoutMs);
-      const out = parseCurlProbeOutput(pr.stdout);
-      if (pr.exitCode !== 0 || !evaluateHttpOk(out.status, input.probe.expectStatus)) {
+      const pr = await runProbe(input.probe.url);
+      if (!pr.ok) {
         return {
           mode: verdict.mode,
           status: "fail",
           elapsedMs: now() - start,
-          detail: `${verdict.detail}, but probe ${input.probe.url} returned ${out.status || `exit ${pr.exitCode}`}`,
+          detail: `${verdict.detail}, but probe ${input.probe.url} returned ${pr.status || pr.detail}`,
+          probeOnly: true,
         };
       }
-      return { mode: verdict.mode, status: "pass", elapsedMs: now() - start, detail: `${verdict.detail}; probe ${out.status}` };
+      return { mode: verdict.mode, status: "pass", elapsedMs: now() - start, detail: `${verdict.detail}; probe ${pr.status}` };
     }
     return { mode: verdict.mode, status: verdict.state === "pass" ? "pass" : "fail", elapsedMs: now() - start, detail: verdict.detail };
   }
+}
+
+/**
+ * The container whose published bindings a probe would hit: the target itself, or
+ * — when it joins another container's network namespace (`container:<id>`) — that
+ * provider. An unresolvable provider falls back to the target (the binding check
+ * then declines to judge, see `probeBindingWarning`).
+ */
+function netnsHolder(target: ContainerIdentity, running: ContainerIdentity[]): ContainerIdentity {
+  const m = /^container:(.+)$/.exec(target.networkMode);
+  if (!m) return target;
+  const ref = m[1]!;
+  return running.find((c) => c.id === ref || c.name === ref || (ref.length >= 12 && c.id.startsWith(ref))) ?? target;
 }

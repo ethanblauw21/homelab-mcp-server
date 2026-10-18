@@ -70,6 +70,59 @@ describe("snapshotCreateHandler", () => {
     expect(res.evicted).toEqual(["mcp-20260101-000000"]);
   });
 
+  // Ops finding 2026-10-17: retention must run AFTER a successful create.
+  const AT_CAP_LIST = {
+    stdout: [
+      "`-> mcp-20260101-000000 2026-01-01 auto",
+      "`-> mcp-20260102-000000 2026-01-02 auto",
+      "`-> mcp-20260103-000000 2026-01-03 auto",
+    ].join("\n"),
+    stderr: "",
+    exitCode: 0,
+  };
+
+  it("creates the new snapshot BEFORE evicting the oldest one", async () => {
+    const t = new FakeTransport();
+    const seen: string[] = [];
+    const exec = t.exec.bind(t);
+    t.exec = async (cmd, ms) => (seen.push(cmd), exec(cmd, ms));
+    t.setExecResult("pct list", { stdout: PCT_LIST_101, stderr: "", exitCode: 0 });
+    t.setExecResult("pct listsnapshot 101", AT_CAP_LIST);
+
+    const res = await snapshotCreateHandler({ vmid: 101 }, t, audit, cfg, NOW);
+    expect(res.evicted).toEqual(["mcp-20260101-000000"]);
+    const createIdx = seen.indexOf("pct snapshot 101 mcp-20260609-213000");
+    const deleteIdx = seen.indexOf("pct delsnapshot 101 mcp-20260101-000000");
+    expect(createIdx).toBeGreaterThan(-1);
+    expect(deleteIdx).toBeGreaterThan(createIdx);
+  });
+
+  it("evicts nothing when the create fails", async () => {
+    const t = new FakeTransport();
+    const seen: string[] = [];
+    const exec = t.exec.bind(t);
+    t.exec = async (cmd, ms) => (seen.push(cmd), exec(cmd, ms));
+    t.setExecResult("pct list", { stdout: PCT_LIST_101, stderr: "", exitCode: 0 });
+    t.setExecResult("pct listsnapshot 101", AT_CAP_LIST);
+    t.setExecResult("pct snapshot 101 mcp-20260609-213000", { stdout: "", stderr: "out of space", exitCode: 1 });
+
+    await expect(snapshotCreateHandler({ vmid: 101 }, t, audit, cfg, NOW)).rejects.toThrow(/out of space/);
+    expect(seen.some((c) => c.includes("delsnapshot"))).toBe(false);
+  });
+
+  it("reports (does not throw) a post-create eviction failure — the snapshot exists", async () => {
+    const t = new FakeTransport();
+    t.setExecResult("pct list", { stdout: PCT_LIST_101, stderr: "", exitCode: 0 });
+    t.setExecResult("pct listsnapshot 101", AT_CAP_LIST);
+    t.setExecResult("pct delsnapshot 101 mcp-20260101-000000", { stdout: "", stderr: "locked", exitCode: 2 });
+
+    const res = await snapshotCreateHandler({ vmid: 101 }, t, audit, cfg, NOW);
+    expect(res.name).toBe("mcp-20260609-213000");
+    expect(res.evicted).toEqual([]);
+    expect(res.evictionErrors).toEqual(["mcp-20260101-000000: exit 2: locked"]);
+    expect(audit.readAll()[0].note).toMatch(/eviction failed for mcp-20260101-000000/);
+  });
+
   it("auto-detects qm and follows the vmstate config flag (A3.2)", async () => {
     const t = new FakeTransport();
     cfg = makeConfig(tmpDir, { vmstate: true });

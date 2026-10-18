@@ -4,7 +4,7 @@
 **Date:** 2026-06-23
 **Deciders:** Ethan
 **Depends on:** ADR-004 (transport/guardrail/exit semantics), ADR-005 (`tail_log`/probes patterns), ADR-007 (tiers + MCPOperate role), ADR-008 (`guest_backup` vzdump fallback), ADR-009 (integrity watched set), ADR-011 (edit-tools over write-tools), ADR-020 (probes/regex/systemd front door)
-**Required by:** — none yet —
+**Required by:** ADR-027 (#9 amended: a vzdump poll timeout is pending, not failed; the content-type hint only on a matching exit status)
 **Source:** A full live-node dogfooding session against `proxlab` (companion tier, CT100 adguard-dns + CT101 dockerBoss) — every registered tool was exercised ~5× with a mutation/adversarial mindset. This ADR records the defects and rough edges that surfaced and the changes needed to close them.
 
 ## Context

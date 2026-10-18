@@ -48,7 +48,16 @@ export function identityRow(c: Partial<ContainerIdentity> & { name: string }): s
     c.diunLabel ?? "",
     c.diunWatchRepoLabel ?? "",
     c.networkMode ?? "bridge",
+    c.composeEnvFiles ?? "",
+    c.publishedPorts ? JSON.stringify(portsJson(c.publishedPorts)) : "null",
   ].join("\t");
+}
+
+/** Inverse of parsePortMap: bindings → the `.NetworkSettings.Ports` JSON shape. */
+function portsJson(ports: NonNullable<ContainerIdentity["publishedPorts"]>): Record<string, Array<{ HostIp: string; HostPort: string }>> {
+  const out: Record<string, Array<{ HostIp: string; HostPort: string }>> = {};
+  for (const p of ports) (out[p.containerPort] ??= []).push({ HostIp: p.hostIp, HostPort: p.hostPort });
+  return out;
 }
 
 /**

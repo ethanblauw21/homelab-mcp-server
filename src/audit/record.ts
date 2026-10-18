@@ -105,6 +105,10 @@ export interface AuditRecord {
   // reconciled against the audit trail, and a thrash loop of *failing* reverts left
   // no forensic record. Distinct from `refused` (the breaker itself blocked the call).
   failed?: boolean;
+  // ADR-027 — a long-running node task (vzdump) outlived the server's wait. The
+  // outcome is UNKNOWN, not failed: the task keeps running on the node. Distinct
+  // from `failed` and `timedOut` (an exec killed by the node-side `timeout`).
+  pending?: boolean;
   note?: string;
 }
 

@@ -88,6 +88,11 @@ export interface BackupCreateOpts {
   /** Goes into the archive notes; carries the `mcp-` ownership tag. */
   notes: string;
   compress?: string;
+  /**
+   * ADR-027 — SSH backend only: the node-side `timeout` for the blocking vzdump
+   * (a kill when exceeded). The API backend returns a UPID at once and ignores it.
+   */
+  timeoutMs?: number;
 }
 
 export interface NodeOps {

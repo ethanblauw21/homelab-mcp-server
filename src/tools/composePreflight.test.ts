@@ -12,6 +12,8 @@ import {
   analyzeCompose,
   parseProcNetTcpPorts,
   parseSsListeners,
+  parseAttributedListeners,
+  buildAttributedListenerProbe,
   PORT_ENV_HINTS,
   type ComposeModel,
 } from "./composePreflight.js";
@@ -467,5 +469,63 @@ LISTEN  0       128      0.0.0.0:9999         0.0.0.0:*          users:(("gluetu
     const out = `State  Recv-Q Send-Q Local Address:Port Peer Address:Port
 LISTEN 0      128    *:7000             *:*`;
     expect(parseSsListeners(out)).toEqual([{ port: 7000 }]);
+  });
+});
+
+describe("ADR-027 attributed listener probe", () => {
+  const A = "a".repeat(64);
+  it("maps listener pids to containers and their compose project", () => {
+    const out = [
+      `LISTEN 0 128 0.0.0.0:8888 0.0.0.0:* users:(("granian",pid=11,fd=7),("granian",pid=12,fd=7))`,
+      `LISTEN 0 128 [::]:8888 [::]:* users:(("granian",pid=11,fd=8))`,
+      `LISTEN 0 128 127.0.0.1:41641 0.0.0.0:* users:(("tailscaled",pid=99,fd=3))`,
+      "---MCP-PIDMAP---",
+      `11\t`,
+      `12\t${A}`,
+      `99\tnot-a-container-id`,
+    ].join("\n");
+    expect(parseAttributedListeners(out, [{ id: A, name: "searxng", project: "1" }])).toEqual([
+      { port: 8888, holder: "granian", container: "searxng", project: "1" },
+      { port: 41641, holder: "tailscaled" },
+    ]);
+  });
+
+  it("tolerates output with no pid map", () => {
+    expect(parseAttributedListeners(`LISTEN 0 128 0.0.0.0:80 0.0.0.0:*`, [])).toEqual([{ port: 80 }]);
+  });
+
+  it("crossCheckBoundPorts: an own-project holder is info; a foreign container is an error", () => {
+    const claims = [
+      { service: "searxng", port: 8888, source: "expose" as const, raw: "8888" },
+      { service: "dozzle", port: 8080, source: "expose" as const, raw: "8080" },
+    ];
+    const hz = crossCheckBoundPorts(
+      claims,
+      [
+        { port: 8888, holder: "granian", container: "searxng-1", project: "1" },
+        { port: 8080, holder: "x", container: "other", project: "2" },
+      ],
+      ["searxng", "dozzle"],
+      { ownProjects: ["1"] }
+    );
+    expect(hz.map((h) => [h.port, h.severity])).toEqual([[8888, "info"], [8080, "error"]]);
+  });
+
+  it("crossCheckBoundPorts: netnsAllOwn only covers unattributed holders", () => {
+    const claims = [{ service: "s", port: 1, source: "expose" as const, raw: "1" }];
+    expect(crossCheckBoundPorts(claims, [{ port: 1 }], ["s"], { netnsAllOwn: true })[0]!.severity).toBe("info");
+    expect(crossCheckBoundPorts(claims, [{ port: 1 }], ["s"])[0]!.severity).toBe("warn");
+    expect(
+      crossCheckBoundPorts(claims, [{ port: 1, container: "x", project: "z" }], ["s"], { netnsAllOwn: true, ownProjects: ["1"] })[0]!
+        .severity
+    ).toBe("error");
+  });
+
+  it("buildAttributedListenerProbe nsenters the provider's netns and emits the pid map", () => {
+    const cmd = buildAttributedListenerProbe("tailscale");
+    expect(cmd).toContain("docker inspect -f '{{.State.Pid}}' tailscale");
+    expect(cmd).toContain(`nsenter -t "$P" -n ss -tlnp`);
+    expect(cmd).toContain("---MCP-PIDMAP---");
+    expect(buildAttributedListenerProbe(null)).toMatch(/^L=\$\(ss -tlnp\)/);
   });
 });

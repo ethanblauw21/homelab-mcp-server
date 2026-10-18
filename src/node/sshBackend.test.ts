@@ -32,6 +32,40 @@ describe("SshBackend.createBackup", () => {
   });
 });
 
+describe("SshBackend long-task timeout (ADR-027)", () => {
+  function timed(): { be: SshBackend; seen: Array<[string, number | undefined]> } {
+    const ft = new FakeTransport();
+    const seen: Array<[string, number | undefined]> = [];
+    const exec = ft.exec.bind(ft);
+    ft.exec = async (cmd, ms) => (seen.push([cmd, ms]), exec(cmd, ms));
+    return { be: new SshBackend(ft, TIMEOUT, 1_800_000), seen };
+  }
+
+  it("runs vzdump under the long-task timeout, not the 30 s command timeout", async () => {
+    const { be, seen } = timed();
+    await be.createBackup(101, "lxc", { mode: "snapshot", storage: "local", notes: "mcp-x" });
+    expect(seen[0]![1]).toBe(1_800_000);
+  });
+
+  it("prefers a per-call vzdump timeout", async () => {
+    const { be, seen } = timed();
+    await be.createBackup(101, "lxc", { mode: "snapshot", storage: "local", notes: "mcp-x", timeoutMs: 3_600_000 });
+    expect(seen[0]![1]).toBe(3_600_000);
+  });
+
+  it("runs restore under the long-task timeout", async () => {
+    const { be, seen } = timed();
+    await be.restoreBackup(101, "lxc", "local:backup/vzdump-lxc-101.tar.zst");
+    expect(seen[0]![1]).toBe(1_800_000);
+  });
+
+  it("keeps ordinary commands on the command timeout", async () => {
+    const { be, seen } = timed();
+    await be.deleteBackupArchive("local", "local:backup/vzdump-lxc-101.tar.zst");
+    expect(seen[0]![1]).toBe(TIMEOUT);
+  });
+});
+
 describe("SshBackend.listBackupArchives", () => {
   it("resolves the node via hostname, parses pvesh JSON, and filters by vmid", async () => {
     const listCmd = "pvesh get /nodes/pve/storage/local/content --content backup --output-format json";

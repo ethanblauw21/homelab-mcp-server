@@ -10,6 +10,8 @@ import {
   localDigestFor,
   extractImageVersion,
   parseContainerIdentities,
+  buildComposeCommand,
+  probeBindingWarning,
   parseImageInfo,
   buildImageInfoCommand,
   pickEnv,
@@ -388,5 +390,60 @@ describe("evaluateHealthPoll (pure; no sleeping)", () => {
 
   it("no samples is pending", () => {
     expect(evaluateHealthPoll([], 0).state).toBe("pending");
+  });
+});
+
+describe("ADR-027 — env files, published ports, probe binding check", () => {
+  it("parses the environment_file label and published ports from the identity row; old 12-field rows still parse", () => {
+    const base = ["/searxng", "c".repeat(64), "searxng/searxng:latest", D("4"), "running", "s", "searxng", "/x.yml", "", "", "", "bridge"];
+    const ports = JSON.stringify({ "8080/tcp": [{ HostIp: "10.0.0.52", HostPort: "8888" }], "53/udp": null });
+    const [c] = parseContainerIdentities([...base, "/data/segmem/.env", ports].join("\t"));
+    expect(c!.composeEnvFiles).toBe("/data/segmem/.env");
+    expect(c!.publishedPorts).toEqual([{ containerPort: "8080/tcp", hostIp: "10.0.0.52", hostPort: "8888" }]);
+    const [old] = parseContainerIdentities(base.join("\t"));
+    expect(old).toMatchObject({ composeEnvFiles: "", publishedPorts: [] });
+    const [bad] = parseContainerIdentities([...base, "<no value>", "not-json"].join("\t"));
+    expect(bad).toMatchObject({ composeEnvFiles: "", publishedPorts: [] });
+  });
+
+  it("buildComposeCommand puts each --env-file (quoted) before the subcommand", () => {
+    expect(buildComposeCommand("/data/segmem/repo/compose.yml", "segmem", "config --format json", ["/data/segmem/.env", "/x/it's.env"])).toBe(
+      "cd '/data/segmem/repo' && docker compose -p segmem -f '/data/segmem/repo/compose.yml' " +
+        "--env-file '/data/segmem/.env' --env-file '/x/it'\\''s.env' config --format json"
+    );
+    expect(buildComposeCommand("/a/c.yml", "p", "pull x")).toBe("cd '/a' && docker compose -p p -f '/a/c.yml' pull x");
+  });
+
+  const c = (publishedPorts: Array<{ containerPort: string; hostIp: string; hostPort: string }>, networkMode = "bridge") => ({
+    name: "searxng",
+    networkMode,
+    publishedPorts,
+  });
+
+  it("probeBindingWarning: the searxng case (published on 10.0.0.52 only, probe on 127.0.0.1)", () => {
+    const w = probeBindingWarning("http://127.0.0.1:8888/healthz", c([{ containerPort: "8080/tcp", hostIp: "10.0.0.52", hostPort: "8888" }]));
+    expect(w).toMatch(/publishes port 8888 only on 10\.0\.0\.52/);
+  });
+
+  it("probeBindingWarning: null when the binding is reachable", () => {
+    const wild = c([{ containerPort: "8080/tcp", hostIp: "0.0.0.0", hostPort: "8888" }]);
+    expect(probeBindingWarning("http://127.0.0.1:8888/", wild)).toBeNull();
+    expect(probeBindingWarning("http://10.0.0.52:8888/", c([{ containerPort: "8080/tcp", hostIp: "10.0.0.52", hostPort: "8888" }]))).toBeNull();
+    expect(probeBindingWarning("http://localhost:8888/", c([{ containerPort: "8080/tcp", hostIp: "127.0.0.1", hostPort: "8888" }]))).toBeNull();
+    expect(probeBindingWarning("https://127.0.0.1/", c([{ containerPort: "443/tcp", hostIp: "", hostPort: "443" }]))).toBeNull();
+  });
+
+  it("probeBindingWarning: warns on a port nothing publishes", () => {
+    expect(probeBindingWarning("http://127.0.0.1:9000/", c([]))).toMatch(/it publishes no ports/);
+    expect(probeBindingWarning("http://127.0.0.1:9000/", c([{ containerPort: "80/tcp", hostIp: "0.0.0.0", hostPort: "8080" }]))).toMatch(
+      /does not match any port searxng publishes \(published bindings: 0\.0\.0\.0:8080\)/
+    );
+  });
+
+  it("probeBindingWarning: declines to judge hostnames and shared/host network namespaces", () => {
+    expect(probeBindingWarning("http://searxng:8080/", c([]))).toBeNull();
+    expect(probeBindingWarning("http://127.0.0.1:9000/", c([], "container:" + "d".repeat(64)))).toBeNull();
+    expect(probeBindingWarning("http://127.0.0.1:9000/", c([], "host"))).toBeNull();
+    expect(probeBindingWarning("not a url", c([]))).toBeNull();
   });
 });

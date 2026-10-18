@@ -51,14 +51,20 @@ export class SshBackend implements NodeOps {
 
   constructor(
     private readonly transport: SshTransport,
-    private readonly timeoutMs: number
+    private readonly timeoutMs: number,
+    /**
+     * ADR-027 — node-side timeout for vzdump / restore. These block for minutes, so
+     * the ordinary command timeout (30 s) would kill every real backup. Defaults to
+     * `timeoutMs` so existing callers and tests are unchanged.
+     */
+    private readonly longTaskTimeoutMs: number = timeoutMs
   ) {}
 
   /** Cached PVE node name (for `pvesh` paths). Proxmox pins it to `hostname`. */
   private nodeName?: string;
 
-  private async exec(cmd: string): Promise<string> {
-    const res = await this.transport.exec(cmd, this.timeoutMs);
+  private async exec(cmd: string, timeoutMs: number = this.timeoutMs): Promise<string> {
+    const res = await this.transport.exec(cmd, timeoutMs);
     if (res.exitCode !== 0) {
       throw new Error(`\`${cmd}\` failed (exit ${res.exitCode}): ${res.stderr.trim()}`);
     }
@@ -171,7 +177,7 @@ export class SshBackend implements NodeOps {
   // which is the only CLI surface that returns the notes the mcp- tag lives in).
 
   async createBackup(vmid: number, _type: GuestType, opts: BackupCreateOpts): Promise<TaskRef> {
-    await this.exec(buildVzdumpCommand(vmid, opts));
+    await this.exec(buildVzdumpCommand(vmid, opts), opts.timeoutMs ?? this.longTaskTimeoutMs);
     return { upid: `ssh:vzdump:${vmid}` };
   }
 
@@ -196,7 +202,7 @@ export class SshBackend implements NodeOps {
   }
 
   async restoreBackup(vmid: number, type: GuestType, volid: string): Promise<TaskRef> {
-    await this.exec(buildRestoreCommand(type, vmid, volid));
+    await this.exec(buildRestoreCommand(type, vmid, volid), this.longTaskTimeoutMs);
     return { upid: `ssh:restore:${type}:${vmid}` };
   }
 

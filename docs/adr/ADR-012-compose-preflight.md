@@ -4,7 +4,7 @@
 **Date:** 2026-06-17
 **Deciders:** Ethan
 **Depends on:** ADR-001 (SSH transport, path validation), ADR-004 (denylist/path validation, read caps, dryRun doctrine), ADR-007 (permission tiers, registration filtering, hybrid transport), ADR-008 (Docker layer — `pct exec` plumbing, `docker_ps`/`compose_redeploy`, the three-layer node→LXC→Docker topology)
-**Required by:** ADR-025 (`parseCompose`/`netnsOwner`/`groupByNetns` reused for `compose_update`'s netns-provider refusal and `docker_restart`'s dependent guard)
+**Required by:** ADR-025 (`parseCompose`/`netnsOwner`/`groupByNetns` reused for `compose_update`'s netns-provider refusal and `docker_restart`'s dependent guard), ADR-027 (bound-port probe attributes each port to a container + compose project; own-project holders are info)
 **Relates to:** GitHub #19
 
 ## Context

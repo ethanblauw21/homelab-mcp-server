@@ -28,6 +28,7 @@ import {
   buildComposeUpCommand,
   parseComposeProjects,
   parseDockerLabels,
+  parseEnvFileLabel,
   type DockerMount,
 } from "./dockerHelpers.js";
 
@@ -620,5 +621,39 @@ describe("compose_discover parsing (ADR-016 §3)", () => {
 
   it("(sanity) buildComposeUpCommand still quotes the path", () => {
     expect(buildComposeUpCommand("/opt/media/dc.yml")).toBe("docker compose -f '/opt/media/dc.yml' up -d");
+  });
+});
+
+describe("ADR-027 — multi-value compose labels and env files", () => {
+  it("parseDockerLabels keeps a comma inside a value (docker ps does not escape it)", () => {
+    const m = parseDockerLabels(
+      "com.docker.compose.project=segmem,com.docker.compose.project.environment_file=/data/segmem/.env,/data/segmem/b.env,com.docker.compose.service=ollama"
+    );
+    expect(m["com.docker.compose.project.environment_file"]).toBe("/data/segmem/.env,/data/segmem/b.env");
+    expect(m["com.docker.compose.service"]).toBe("ollama");
+  });
+
+  it("parseEnvFileLabel keeps absolute paths, dedupes, and rejects relative/traversal/control-char entries", () => {
+    expect(parseEnvFileLabel("/a/.env, /b/.env,/a/.env")).toEqual({ files: ["/a/.env", "/b/.env"], rejected: [] });
+    expect(parseEnvFileLabel("rel.env,/x/../etc/shadow,/ok/.env,/bad\n.env")).toEqual({
+      files: ["/ok/.env"],
+      rejected: ["rel.env", "/x/../etc/shadow", "/bad\n.env"],
+    });
+    expect(parseEnvFileLabel(undefined)).toEqual({ files: [], rejected: [] });
+    expect(parseEnvFileLabel("<no value>")).toEqual({ files: [], rejected: [] });
+  });
+
+  it("parseComposeProjects surfaces envFiles from the environment_file label", () => {
+    const row = {
+      ID: "a",
+      Names: "segmem-ollama-1",
+      Image: "ollama/ollama:latest",
+      Ports: "",
+      Labels:
+        "com.docker.compose.project=segmem,com.docker.compose.project.config_files=/data/segmem/repo/compose.yml," +
+        "com.docker.compose.project.environment_file=/data/segmem/.env,com.docker.compose.service=ollama",
+    };
+    const [p] = parseComposeProjects(JSON.stringify(row));
+    expect(p).toMatchObject({ project: "segmem", configFile: "/data/segmem/repo/compose.yml", envFiles: ["/data/segmem/.env"] });
   });
 });
