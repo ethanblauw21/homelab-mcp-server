@@ -107,10 +107,10 @@ describe("compose_update", () => {
 
   const stepNames = (r: { steps: Array<{ step: string }> }) => r.steps.map((s) => s.step);
 
-  it("updates: hold → pull → recreate → healthy, audited and revertible", async () => {
+  it("updates: pull → hold → recreate → healthy, audited and revertible", async () => {
     const r = await run();
     expect(r.outcome).toBe("updated");
-    expect(stepNames(r)).toEqual(["hold", "pull", "resolve", "recreate"]);
+    expect(stepNames(r)).toEqual(["pull", "resolve", "hold", "recreate"]);
     expect(r).toMatchObject({ oldImageId: OLD, newImageId: NEW, currentVersion: "4.0.19", newVersion: "4.0.20", holdTag: HOLD, project: "1" });
     expect(r.health).toMatchObject({ mode: "healthcheck", status: "pass" });
     const cmds = t.commands.map(inner);
@@ -148,11 +148,55 @@ describe("compose_update", () => {
     expect(t.commands.some((c) => c.includes("up -d"))).toBe(false);
   });
 
+  // --- Hold tag must survive a no-op run (ops finding 2026-10-17, searxng mcp-hold) ---
+
+  const PREV_HOLD = D("9"); // the image a previous real update held
+  const holdCmds = () => t.commands.map(inner).filter((c) => /docker tag \S+ \S+:mcp-hold-/.test(c));
+
+  it("already-current never re-points an existing hold tag, and reports what it points at", async () => {
+    t.on(has("docker image inspect --format '{{.Id}}'", REF), ok(OLD + "\n")); // pulled == running
+    t.on(has("docker image inspect --format '{{.Id}}'", HOLD), ok(PREV_HOLD + "\n"));
+    const r = await run();
+    expect(r.outcome).toBe("already-current");
+    expect(holdCmds()).toEqual([]);
+    expect(t.commands.some((c) => inner(c).includes("docker tag"))).toBe(false);
+    expect(stepNames(r)).toEqual(["pull", "resolve"]);
+    expect(r.existingHoldImageId).toBe(PREV_HOLD);
+  });
+
+  it("already-current with no previous hold creates none and reports null", async () => {
+    t.on(has("docker image inspect --format '{{.Id}}'", REF), ok(OLD + "\n"));
+    t.on(has("docker image inspect --format '{{.Id}}'", HOLD), fail("No such image"));
+    const r = await run();
+    expect(holdCmds()).toEqual([]);
+    expect(r.existingHoldImageId).toBeNull();
+  });
+
+  it("a real update holds the RUNNING image id under the hold tag, after the pull and before the recreate", async () => {
+    const r = await run();
+    expect(r.outcome).toBe("updated");
+    expect(holdCmds()).toEqual([`pct exec 101 -- bash -c 'docker tag ${OLD} ${HOLD}'`].map(inner));
+    const cmds = t.commands.map(inner);
+    const pull = cmds.findIndex((c) => c.includes("pull sonarr"));
+    const hold = cmds.findIndex((c) => c.includes(`docker tag ${OLD} ${HOLD}`));
+    const up = cmds.findIndex((c) => c.includes("up -d --no-deps sonarr"));
+    expect(pull).toBeLessThan(hold);
+    expect(hold).toBeLessThan(up);
+  });
+
+  it("a failed hold recreates nothing and puts the ref back on the running image", async () => {
+    t.on(has("docker tag", OLD, HOLD), fail("no space"));
+    await expect(run()).rejects.toThrow(/Could not pin the running image.*nothing was recreated; .* points at the running image again/);
+    const cmds = t.commands.map(inner);
+    expect(cmds.some((c) => c.includes(`docker tag ${OLD} ${REF}`))).toBe(true);
+    expect(cmds.some((c) => c.includes("up -d"))).toBe(false);
+  });
+
   it("unhealthy → re-tags the held image and recreates with --pull never → rolled-back", async () => {
     samples = [sample("running", "unhealthy")];
     const r = await run();
     expect(r.outcome).toBe("rolled-back");
-    expect(stepNames(r)).toEqual(["hold", "pull", "resolve", "recreate", "rollback-retag", "rollback-recreate"]);
+    expect(stepNames(r)).toEqual(["pull", "resolve", "hold", "recreate", "rollback-retag", "rollback-recreate"]);
     const cmds = t.commands.map(inner);
     expect(cmds.some((c) => c.includes(`docker tag ${HOLD} ${REF}`))).toBe(true);
     expect(cmds.some((c) => c.includes("up -d --no-deps --pull never sonarr"))).toBe(true);

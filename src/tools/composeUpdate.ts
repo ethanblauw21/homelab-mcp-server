@@ -1,6 +1,7 @@
 /**
  * `compose_update` (ADR-025 §3) — update ONE compose service: record what runs →
- * hold the old image under a server-owned tag → pull → `up -d --no-deps <svc>` →
+ * pull → (only if the image changed) hold the old image under a server-owned tag →
+ * `up -d --no-deps <svc>` →
  * health gate → on failure, re-tag the held image back under the ref and recreate
  * with `--pull never`. The compose file is never written.
  *
@@ -119,6 +120,8 @@ export interface ComposeUpdateResult {
   holdTag: string;
   health?: HealthReport;
   rollbackHealth?: HealthReport;
+  /** already-current only: the image the existing hold tag points at (untouched), or null when there is none. */
+  existingHoldImageId?: string | null;
   steps: Array<{ step: string; exitCode: number | null; stderr?: string }>;
   /** ADR-027: --env-file paths passed to compose (from the environment_file label); never their contents. */
   envFiles: string[];
@@ -364,16 +367,12 @@ export async function composeUpdateHandler(
     return result;
   };
 
-  // ---- Hold the old image under the server-owned tag (moves any previous hold: retention 1/service). ----
-  const holdRes = await run("hold", `docker tag ${oldImageId} ${holdTag}`);
-  if (holdRes.exitCode !== 0) {
-    throw new Error(
-      `Could not pin the running image under ${holdTag} (exit ${holdRes.exitCode}): ${holdRes.stderr.trim()}. ` +
-        "Nothing was pulled or recreated."
-    );
-  }
-
   // ---- Pull. ----
+  // ADR-027 addendum: pull BEFORE holding. The hold used to run first, so a no-op
+  // (already-current) run re-pointed mcp-hold-<service> at the CURRENT image and
+  // the real rollback image lost its last tag (ops finding 2026-10-17, searxng).
+  // Pulling first is safe: the old image is referenced by the running container,
+  // so nothing can remove it before it is held below.
   const pullRes = await run("pull", compose(`pull ${input.service}`), d?.updatePullTimeoutMs ?? 600_000);
   if (pullRes.exitCode !== 0) {
     return finish({ ...base, outcome: "pull-failed", newImageId: null, newVersion: null }, { failed: true });
@@ -386,7 +385,24 @@ export async function composeUpdateHandler(
   const newInfoRes = await transport.exec(pct(buildImageInfoCommand([newImageId])), timeoutMs);
   const newVersion = parseImageInfo(newInfoRes.stdout).get(newImageId)?.version ?? null;
   if (newImageId === oldImageId && !refMismatch) {
-    return finish({ ...base, outcome: "already-current", newImageId, newVersion });
+    // Tags are left exactly as they were; report what the existing hold points at.
+    const held = await transport.exec(pct(`docker image inspect --format '{{.Id}}' ${holdTag}`), timeoutMs);
+    const existingHold = held.exitCode === 0 && held.stdout.trim() ? held.stdout.trim() : null;
+    return finish({ ...base, outcome: "already-current", newImageId, newVersion, existingHoldImageId: existingHold });
+  }
+
+  // ---- Hold the old image under the server-owned tag (moves any previous hold: retention 1/service). ----
+  // Only reached when the container is about to be recreated, so a hold always
+  // belongs to the run whose rollback may need it.
+  const holdRes = await run("hold", `docker tag ${oldImageId} ${holdTag}`);
+  if (holdRes.exitCode !== 0) {
+    // Put the ref back on the running image so the local tag matches what runs.
+    const restore = await run("restore-ref", `docker tag ${oldImageId} ${fileRef}`);
+    throw new Error(
+      `Could not pin the running image under ${holdTag} (exit ${holdRes.exitCode}): ${holdRes.stderr.trim()}. ` +
+        "The new image was pulled but nothing was recreated" +
+        (restore.exitCode === 0 ? `; ${fileRef} points at the running image again.` : `, and ${fileRef} could not be re-pointed at the running image.`)
+    );
   }
 
   // ---- Recreate + health gate. ----
