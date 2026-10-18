@@ -75,6 +75,10 @@ export interface BoundPort {
   port: number;
   /** Best-effort identity of who holds it (container/process name), when known. */
   holder?: string;
+  /** ADR-027 — the Docker container holding the listener (pid → cgroup → container id), when attributed. */
+  container?: string;
+  /** ADR-027 — that container's compose project label ("" when it has none). */
+  project?: string;
 }
 
 export interface PreflightReport {
@@ -439,12 +443,29 @@ export function detectNetnsRecreate(next: ComposeModel, prev?: ComposeModel): Ha
 // Check 3.3 — live bound-port cross-check
 // ---------------------------------------------------------------------------
 
+export interface BoundPortAttribution {
+  /**
+   * ADR-027 — compose projects the analysed file already runs as (containers whose
+   * config_files label names it). A port held by one of their containers is the
+   * stack's own running instance — the thing a redeploy replaces — not a conflict.
+   */
+  ownProjects?: string[];
+  /**
+   * ADR-027 — the probe ran inside a netns whose every running member belongs to
+   * an own project, so any holder there is this stack even when the per-port
+   * container attribution was unavailable.
+   */
+  netnsAllOwn?: boolean;
+}
+
 export function crossCheckBoundPorts(
   claims: PortClaim[],
   bound: BoundPort[],
-  ownNames: string[]
+  ownNames: string[],
+  attribution: BoundPortAttribution = {}
 ): Hazard[] {
   const own = new Set(ownNames);
+  const ownProjects = new Set(attribution.ownProjects ?? []);
   const boundByPort = new Map<number, BoundPort>();
   for (const b of bound) if (!boundByPort.has(b.port)) boundByPort.set(b.port, b);
 
@@ -457,10 +478,28 @@ export function crossCheckBoundPorts(
     // Bound by one of our own stack's services ⇒ that's expected (it's us), ignore.
     if (b.holder && own.has(b.holder)) continue;
     seen.add(c.port);
+    // ADR-027 — held by this same project's running instance (ops finding
+    // 2026-10-17: every port tailscale published came back as "bound elsewhere",
+    // the holder being the running copy of the stack itself). Informational only.
+    const byContainer = b.container !== undefined && b.project !== undefined && ownProjects.has(b.project);
+    if (byContainer || (b.container === undefined && attribution.netnsAllOwn)) {
+      hazards.push({
+        kind: "port-bound-elsewhere",
+        severity: "info",
+        services: [c.service],
+        port: c.port,
+        detail: byContainer
+          ? `port ${c.port} is held by ${b.container} of this same project (${b.project}) — its running instance, which a redeploy replaces.`
+          : `port ${c.port} is bound in the stack's shared network namespace, whose running members all belong to this project — its running instance.`,
+        recommendation: "None needed for a redeploy of this stack.",
+      });
+      continue;
+    }
     // A *known* foreign holder is a hard error. An *unknown* holder is only a warn:
     // without identity we cannot rule out that the binding is our own already-running
     // instance of this very service (the TOCTOU/identity honesty of §3.3, §7).
-    const severity: Hazard["severity"] = b.holder ? "error" : "warn";
+    const who = b.container ? `${b.container}${b.project ? ` (project ${b.project})` : ""}` : b.holder;
+    const severity: Hazard["severity"] = who ? "error" : "warn";
     hazards.push({
       kind: "port-bound-elsewhere",
       severity,
@@ -468,9 +507,9 @@ export function crossCheckBoundPorts(
       port: c.port,
       detail:
         `${c.service} wants internal port ${c.port}, but it is already bound in the guest` +
-        (b.holder ? ` by ${b.holder}` : " (holder unknown — possibly your own running instance)") +
+        (who ? ` by ${who}` : " (holder unknown — possibly your own running instance)") +
         ` — the deploy may fail to bind (the 500 you'd otherwise debug by hand).`,
-      recommendation: `Pick a free internal port for ${c.service} (current binding holder: ${b.holder ?? "unknown"}).`,
+      recommendation: `Pick a free internal port for ${c.service} (current binding holder: ${who ?? "unknown"}).`,
     });
   }
   return hazards;
@@ -524,10 +563,73 @@ export function parseSsListeners(output: string): BoundPort[] {
 }
 
 // ---------------------------------------------------------------------------
+// ADR-027 — attributed listener probe (port → pid → container → project)
+// ---------------------------------------------------------------------------
+
+export const PID_MAP_MARKER = "---MCP-PIDMAP---";
+
+/**
+ * One LXC-level command that lists TCP listeners in the stack's network namespace
+ * and maps each listener pid to a Docker container id. `ss` inside the provider
+ * container (the old probe) only sees the provider's own processes — dependents
+ * share the netns but not the PID namespace — so every dependent's port came back
+ * holder-unknown. From the LXC, `nsenter -n` into the provider's netns sees every
+ * listener with LXC-level pids, and `/proc/<pid>/cgroup` names the container.
+ * `provider` must be charset-validated by the caller. Exits non-zero when the
+ * tooling is missing so the caller can fall back to the old probe.
+ */
+export function buildAttributedListenerProbe(provider: string | null): string {
+  const listen =
+    provider === null
+      ? "L=$(ss -tlnp) || exit 4"
+      : `P=$(docker inspect -f '{{.State.Pid}}' ${provider}) && [ "$P" -gt 0 ] || exit 3; ` +
+        `command -v nsenter >/dev/null || exit 5; L=$(nsenter -t "$P" -n ss -tlnp) || exit 4`;
+  return (
+    `${listen}; printf '%s\\n' "$L"; echo '${PID_MAP_MARKER}'; ` +
+    `for p in $(printf '%s\\n' "$L" | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do ` +
+    `printf '%s\\t%s\\n' "$p" "$(grep -oE '[0-9a-f]{64}' /proc/$p/cgroup 2>/dev/null | head -n1)"; done`
+  );
+}
+
+/**
+ * Parse `buildAttributedListenerProbe` output against the LXC's container list
+ * (`{id, name, project}`). Each listener keeps its process-name holder; when one of
+ * its pids maps to a known container, `container`/`project` are filled in.
+ */
+export function parseAttributedListeners(
+  output: string,
+  containers: Array<{ id: string; name: string; project: string }>
+): BoundPort[] {
+  const at = output.indexOf(PID_MAP_MARKER);
+  const listeners = at === -1 ? output : output.slice(0, at);
+  const pidLines = at === -1 ? "" : output.slice(at + PID_MAP_MARKER.length);
+  const pidToCid = new Map<string, string>();
+  for (const line of pidLines.split("\n")) {
+    const [pid, cid] = line.trim().split("\t");
+    if (pid && cid && /^[0-9a-f]{64}$/.test(cid)) pidToCid.set(pid, cid);
+  }
+  const byId = new Map(containers.map((c) => [c.id, c]));
+  // One entry per port + process; a v4 and a v6 row of the same listener merge, and
+  // whichever row resolved a container supplies the attribution.
+  const byKey = new Map<string, BoundPort>();
+  for (const line of listeners.split("\n")) {
+    const [row] = parseSsListeners(line);
+    if (!row) continue;
+    const pids = [...line.matchAll(/pid=(\d+)/g)].map((m) => m[1]!);
+    const owner = pids.map((p) => byId.get(pidToCid.get(p) ?? "")).find((c) => c !== undefined);
+    const key = `${row.port}:${row.holder ?? ""}`;
+    const prev = byKey.get(key);
+    if (prev && (prev.container !== undefined || !owner)) continue;
+    byKey.set(key, { ...row, ...(owner && { container: owner.name, project: owner.project }) });
+  }
+  return [...byKey.values()];
+}
+
+// ---------------------------------------------------------------------------
 // analyzeCompose — the orchestrating pure fn
 // ---------------------------------------------------------------------------
 
-export interface AnalyzeOptions {
+export interface AnalyzeOptions extends BoundPortAttribution {
   prev?: ComposeModel;
   bound?: BoundPort[];
   /** When false, the bound-port cross-check is skipped and reported as not-checked. */
@@ -545,7 +647,12 @@ export function analyzeCompose(next: ComposeModel, opts: AnalyzeOptions = {}): P
 
   const boundPortsChecked = Boolean(opts.boundPortsChecked && opts.bound);
   if (boundPortsChecked) {
-    hazards.push(...crossCheckBoundPorts(claims, opts.bound!, next.services.map((s) => s.name)));
+    hazards.push(
+      ...crossCheckBoundPorts(claims, opts.bound!, next.services.map((s) => s.name), {
+        ownProjects: opts.ownProjects,
+        netnsAllOwn: opts.netnsAllOwn,
+      })
+    );
   }
 
   // The dominant provider: the netns owner with the most dependents (the tailscale

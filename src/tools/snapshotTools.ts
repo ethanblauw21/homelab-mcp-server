@@ -117,22 +117,17 @@ export async function snapshotCreateHandler(
   audit: AuditLog,
   cfg: Config,
   now: Date = new Date()
-): Promise<{ name: string; guestType: GuestType; evicted: string[] }> {
+): Promise<{ name: string; guestType: GuestType; evicted: string[]; evictionErrors?: string[] }> {
   const timeoutMs = cfg.ssh.commandTimeoutMs;
   const type = await detectGuestType(transport, input.vmid, timeoutMs);
 
-  // Retention BEFORE creation: count mcp- snapshots and evict oldest to make
-  // room. Non-mcp snapshots are never counted or touched.
+  // Retention runs AFTER a successful create (ops finding 2026-10-17): evicting
+  // first meant a failed create left the guest with fewer rollback points than it
+  // started with. The pre-create listing is the eviction universe, so the new
+  // snapshot can never be chosen; the guest holds cap+1 mcp- snapshots for the
+  // seconds between create and evict. Non-mcp snapshots are never counted or touched.
   const existing = await listSnapshots(transport, type, input.vmid, timeoutMs);
   const mcpNames = existing.filter((s) => s.mcpManaged).map((s) => s.name);
-  const evicted: string[] = [];
-  for (const name of planSnapshotEviction(mcpNames, cfg.snapshot.perGuestCap)) {
-    const res = await transport.exec(buildSnapshotDeleteCommand(type, input.vmid, name), timeoutMs);
-    if (res.exitCode !== 0) {
-      throw new Error(`Retention eviction of ${name} failed (exit ${res.exitCode}): ${res.stderr.trim()}`);
-    }
-    evicted.push(name);
-  }
 
   const name = generateSnapshotName(now);
   const createRes = await transport.exec(
@@ -158,6 +153,19 @@ export async function snapshotCreateHandler(
     throw new Error(enrichSnapshotFailure(createRes.stderr, type, input.vmid, configText));
   }
 
+  // The snapshot exists now, so an eviction failure must not read as a create
+  // failure: it is reported, and the extra snapshot is retired on the next create.
+  const evicted: string[] = [];
+  const evictionErrors: string[] = [];
+  for (const old of planSnapshotEviction(mcpNames, cfg.snapshot.perGuestCap)) {
+    const res = await transport.exec(buildSnapshotDeleteCommand(type, input.vmid, old), timeoutMs);
+    if (res.exitCode !== 0) {
+      evictionErrors.push(`${old}: exit ${res.exitCode}: ${res.stderr.trim()}`);
+      continue;
+    }
+    evicted.push(old);
+  }
+
   const record = buildAuditRecord({
     tool: "snapshot_create",
     host: cfg.ssh.host,
@@ -165,11 +173,12 @@ export async function snapshotCreateHandler(
     note:
       `Created snapshot ${name} (${type})` +
       (evicted.length ? `; evicted ${evicted.join(", ")}` : "") +
+      (evictionErrors.length ? `; eviction failed for ${evictionErrors.join("; ")}` : "") +
       (input.note ? ` — ${input.note}` : ""),
   });
   await audit.append(record);
 
-  return { name, guestType: type, evicted };
+  return { name, guestType: type, evicted, ...(evictionErrors.length > 0 && { evictionErrors }) };
 }
 
 // ---------------------------------------------------------------------------

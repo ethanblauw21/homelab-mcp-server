@@ -4,7 +4,7 @@
 **Date:** 2026-10-13
 **Deciders:** Ethan
 **Depends on:** ADR-004 (confirm gate, honest `ExecResult`, charset validation), ADR-007 (tiers, registration filtering), ADR-008 (Docker layer — `pct exec docker …` plumbing, `compose_redeploy`, `dockerHelpers.ts`), ADR-012 (`parseCompose`/`netnsOwner`/`groupByNetns` — the netns-provider hazard model), ADR-016 (`docker_inspect` projection, `imageId` as the container-level pin, `compose_discover` producing `composePath`), ADR-020 (`service_restart` shape; `http_probe` `fromVmid` core), ADR-021 (rollback circuit breaker — a new key family), ADR-024 (allowlist gate covers the new tools)
-**Required by:** — none yet —
+**Required by:** ADR-027 (compose_update env files, baseline probe check, `rollback-ok-probe-failed`)
 **Source:** Operator feature request (2026-10-13), items 2–4: `compose_update`, `docker_restart`, and a read of pending updates (Diun or registry) so finding updates needs no shell. Decisions taken with the operator: rollback by **local re-tag** (no compose-file mutation); **Diun is in scope for v1** because its tag history helps choose a version. Revised the same day after a read-only live check of Diun/Watchtower on CT101 (§0).
 
 ## Context

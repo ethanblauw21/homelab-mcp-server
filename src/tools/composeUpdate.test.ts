@@ -209,13 +209,108 @@ describe("compose_update", () => {
     expect(audit.readAll().at(-1)!.failed).toBe(true);
   });
 
+  /** True once the NEW image has been recreated (and until a rollback re-tag). */
+  const newImageUp = (): boolean => t.commands.some((c) => inner(c).includes("up -d --no-deps sonarr")) && !rolledBack;
+
   it("a failed probe fails the gate even when the container is healthy", async () => {
     // The probe gates the rollback too: the new image answers 503, the old one 200.
-    t.on(has("curl -k"), () => ok(rolledBack ? "200 2 0.01" : "503 0 0.01"));
+    t.on(has("curl -k"), () => ok(newImageUp() ? "503 0 0.01" : "200 2 0.01"));
     const r = await run({ probe: { url: "http://localhost:8989/ping" } });
-    expect(r.health).toMatchObject({ status: "fail", detail: expect.stringMatching(/503/) });
+    expect(r.health).toMatchObject({ status: "fail", detail: expect.stringMatching(/503/), probeOnly: true });
     expect(r.outcome).toBe("rolled-back");
     expect(r.rollbackHealth?.detail).toMatch(/probe 200/);
+    expect(breaker.peek("compose/101/sonarr", clock).recentCount).toBe(1);
+  });
+
+  // --- ADR-027: probe sanity (ops finding 2026-10-17, searxng) ---
+
+  const SEARX = (ports = [{ containerPort: "8080/tcp", hostIp: "10.0.0.52", hostPort: "8888" }]) =>
+    identityRow({ name: "sonarr", ref: REF, imageId: OLD, composeProject: "1", composeService: "sonarr", composeConfigFiles: PATH, publishedPorts: ports });
+
+  it("refuses up front when the probe already fails against the running image, naming the binding mismatch", async () => {
+    t.on(/docker ps -q --no-trunc \| xargs -r docker inspect/, ok(SEARX()));
+    t.on(has("curl -k"), { stdout: "000 0 0.00", stderr: "", exitCode: 7 });
+    const err = await run({ probe: { url: "http://127.0.0.1:8888/healthz" } }).catch((e: Error) => e);
+    expect((err as Error).message).toMatch(/already fails against the running image \(curl exit 7\)/);
+    expect((err as Error).message).toMatch(/publishes port 8888 only on 10\.0\.0\.52/);
+    expect((err as Error).message).toMatch(/Nothing was changed/);
+    const cmds = t.commands.map(inner);
+    expect(cmds.some((c) => c.includes("docker tag") || c.includes(" pull ") || c.includes("up -d"))).toBe(false);
+    expect(breaker.peek("compose/101/sonarr", clock).recentCount).toBe(0);
+  });
+
+  it("probe failing on BOTH images while both pass the gate → rollback-ok-probe-failed, not failed, breaker untouched", async () => {
+    // Baseline passes (e.g. a flaky upstream), then both images miss the probe.
+    let probes = 0;
+    t.on(has("curl -k"), () => (probes++ === 0 ? ok("200 2 0.01") : { stdout: "000 0 0.00", stderr: "", exitCode: 7 }));
+    const r = await run({ probe: { url: "http://localhost:8989/ping" } });
+    expect(r.outcome).toBe("rollback-ok-probe-failed");
+    expect(r.health?.probeOnly).toBe(true);
+    expect(r.rollbackHealth?.probeOnly).toBe(true);
+    expect(r.warnings.join(" ")).toMatch(/failed against both images.*probe URL may be wrong/);
+    const rec = audit.readAll().at(-1)!;
+    expect(rec.failed).toBeUndefined();
+    expect(rec.note).toMatch(/rollback-ok-probe-failed/);
+    expect(breaker.peek("compose/101/sonarr", clock).recentCount).toBe(0);
+  });
+
+  it("still reports rollback-failed when the old image fails the container gate itself", async () => {
+    let probes = 0;
+    t.on(has("curl -k"), () => (probes++ === 0 ? ok("200 2 0.01") : { stdout: "000 0 0.00", stderr: "", exitCode: 7 }));
+    rollbackSamples = [sample("running", "unhealthy", 0, OLD)];
+    const r = await run({ probe: { url: "http://localhost:8989/ping" } });
+    expect(r.outcome).toBe("rollback-failed");
+    expect(audit.readAll().at(-1)!.failed).toBe(true);
+    expect(breaker.peek("compose/101/sonarr", clock).recentCount).toBe(1);
+  });
+
+  it("warns (without refusing) when a passing probe does not match a published binding", async () => {
+    t.on(/docker ps -q --no-trunc \| xargs -r docker inspect/, ok(SEARX()));
+    t.on(has("curl -k"), ok("200 2 0.01"));
+    const r = await run({ probe: { url: "http://127.0.0.1:9999/ping" } });
+    expect(r.outcome).toBe("updated");
+    expect(r.warnings.join(" ")).toMatch(/does not match any port sonarr publishes \(published bindings: 10\.0\.0\.52:8888\)/);
+  });
+
+  // --- ADR-027: the project's --env-file (ops finding 2026-10-17, segmem) ---
+
+  it("passes every environment_file entry as --env-file to config, pull and up — paths only", async () => {
+    t.on(
+      /docker ps -q --no-trunc \| xargs -r docker inspect/,
+      ok(
+        identityRow({
+          name: "sonarr",
+          ref: REF,
+          imageId: OLD,
+          composeProject: "1",
+          composeService: "sonarr",
+          composeConfigFiles: PATH,
+          composeEnvFiles: "/data/segmem/.env, /data/segmem/extra.env,relative.env",
+        })
+      )
+    );
+    const r = await run();
+    expect(r.outcome).toBe("updated");
+    expect(r.envFiles).toEqual(["/data/segmem/.env", "/data/segmem/extra.env"]);
+    expect(r.warnings.join(" ")).toMatch(/Ignored environment_file entry "relative.env"/);
+    const flags = "--env-file '/data/segmem/.env' --env-file '/data/segmem/extra.env'";
+    const cmds = t.commands.map(inner);
+    for (const sub of ["config --format json", "pull sonarr", "up -d --no-deps sonarr"]) {
+      const c = cmds.find((x) => x.includes(sub))!;
+      expect(c).toContain(`-f '${PATH}' ${flags} ${sub}`);
+    }
+    // The env files are only ever compose arguments — never read, printed or copied by the server.
+    for (const c of cmds.filter((x) => x.includes("/data/segmem/"))) {
+      expect(c).toMatch(/docker compose -p 1 -f /);
+      expect(c).not.toMatch(/\b(cat|head|tail|grep|cp|base64)\b[^|]*segmem/);
+    }
+    expect(JSON.stringify(audit.readAll())).not.toMatch(/TS_AUTHKEY=/);
+  });
+
+  it("a compose config failure on a missing variable refuses with no change", async () => {
+    t.on(has("config --format json"), fail("required variable TS_AUTHKEY is missing a value"));
+    await expect(run()).rejects.toThrow(/docker compose config failed.*TS_AUTHKEY is missing a value/);
+    expect(t.commands.some((c) => inner(c).includes("docker tag"))).toBe(false);
   });
 
   it("§4 ref changed in the file → failed-needs-file-revert with the calls to issue, no re-tag", async () => {

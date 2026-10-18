@@ -4,6 +4,10 @@ import {
   isMcpArchive,
   generateBackupNote,
   planArchiveEviction,
+  planPostCreateEviction,
+  checkBackupHeadroom,
+  backupFailureHint,
+  formatBytes,
   parseArchiveContent,
   assertStorageName,
   assertVolid,
@@ -210,5 +214,50 @@ describe("CLI builders", () => {
   });
   it("builds a pvesm free command", () => {
     expect(buildArchiveFreeCommand("local:backup/a")).toBe("pvesm free 'local:backup/a'");
+  });
+});
+
+describe("ADR-027 post-create retention helpers", () => {
+  const a = (volid: string, ctime: number, mcp = true, sizeBytes?: number): ArchiveInfo => ({
+    volid,
+    vmid: 101,
+    ctime,
+    sizeBytes,
+    notes: mcp ? "mcp-x" : "nightly",
+    mcpManaged: mcp,
+  });
+
+  it("planPostCreateEviction never selects the new archive and keeps the total within cap", () => {
+    const list = [a("s:backup/new", 300), a("s:backup/mid", 200), a("s:backup/old", 100), a("s:backup/human", 50, false)];
+    expect(planPostCreateEviction(list, "s:backup/new", 1)).toEqual(["s:backup/mid", "s:backup/old"]);
+    expect(planPostCreateEviction(list, "s:backup/new", 2)).toEqual(["s:backup/old"]);
+    expect(planPostCreateEviction(list, "s:backup/new", 0)).toEqual(["s:backup/mid", "s:backup/old"]);
+    // even if the new archive somehow sorts oldest, it is not a candidate
+    expect(planPostCreateEviction([a("s:backup/new", 1), a("s:backup/x", 500)], "s:backup/new", 1)).toEqual(["s:backup/x"]);
+  });
+
+  it("checkBackupHeadroom uses the newest sized archive plus a 10% margin", () => {
+    const list = [a("s:backup/old", 100, true, 50), a("s:backup/new", 200, false, 100)];
+    expect(checkBackupHeadroom(list, 110).verdict).toBe("ok");
+    expect(checkBackupHeadroom(list, 109)).toMatchObject({ verdict: "insufficient", estimateBytes: 100, availBytes: 109 });
+  });
+
+  it("checkBackupHeadroom is unknown without a size estimate or a storage figure", () => {
+    expect(checkBackupHeadroom([a("s:backup/x", 1)], 10).verdict).toBe("unknown");
+    expect(checkBackupHeadroom([a("s:backup/x", 1, true, 5)], undefined)).toMatchObject({ verdict: "unknown", estimateBytes: 5 });
+  });
+
+  it("backupFailureHint fires only for content-type / storage failures", () => {
+    expect(backupFailureHint("could not get storage information for 'local': wrong content type", "local")).toMatch(
+      /content type/
+    );
+    expect(backupFailureHint("job errors", "local")).toBeNull();
+    expect(backupFailureHint("still running after 600000ms", "media-backup")).toBeNull();
+  });
+
+  it("formatBytes", () => {
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(1536)).toBe("1.5 KiB");
+    expect(formatBytes(87 * 2 ** 30)).toBe("87.0 GiB");
   });
 });

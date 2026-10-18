@@ -16,11 +16,19 @@ import { assertContainerRunning, pullContainerFile } from "./pctFiles.js";
 import { buildPctExecCommand } from "./pctHelpers.js";
 import { assertDockerName } from "./dockerHelpers.js";
 import {
+  buildContainerIdentityCommand,
+  configFilesInclude,
+  parseContainerIdentities,
+  type ContainerIdentity,
+} from "./dockerUpdate.js";
+import {
   parseCompose,
   groupByNetns,
   analyzeCompose,
   parseSsListeners,
   parseProcNetTcpPorts,
+  buildAttributedListenerProbe,
+  parseAttributedListeners,
   ComposeParseError,
   type ComposeModel,
   type BoundPort,
@@ -67,18 +75,29 @@ async function readComposeText(
   return content ? content.toString("utf8") : undefined;
 }
 
+interface BoundPortProbe {
+  bound: BoundPort[];
+  ownProjects: string[];
+  netnsAllOwn: boolean;
+}
+
 /**
- * Best-effort bound-port probe. Prefers `ss -tlnp` (gives holder names) inside the
- * netns owner's container; falls back to `/proc/net/tcp*`. When no shared provider
- * exists, probes the LXC's own net namespace. Any failure ⇒ null (the report then
- * marks boundPortsChecked:false — over-reporting "not checked" is the safe failure).
+ * Best-effort bound-port probe. ADR-027: first the attributed probe — from the LXC,
+ * `nsenter` into the netns provider's namespace (or the LXC's own when there is no
+ * shared provider), list listeners, and map each pid to its Docker container and
+ * that container's compose project — so a port held by this stack's own running
+ * instance is told apart from a real conflict. If that tooling is missing, falls
+ * back to the original probe: `ss -tlnp` inside the provider's container, else
+ * `/proc/net/tcp*`. Any failure ⇒ null (the report then marks
+ * boundPortsChecked:false — over-reporting "not checked" is the safe failure).
  */
 async function probeBoundPorts(
   transport: SshTransport,
   vmid: number,
+  composePath: string,
   model: ComposeModel,
   cfg: Config
-): Promise<BoundPort[] | null> {
+): Promise<BoundPortProbe | null> {
   // Pick the dominant netns provider (the tailscale role): the service others attach to.
   const groups = groupByNetns(model);
   const provider =
@@ -86,6 +105,40 @@ async function probeBoundPorts(
       .filter((g) => g.provider !== null && g.dependents.length > 0)
       .sort((a, b) => b.dependents.length - a.dependents.length)[0]?.provider ?? null;
 
+  // Which projects already run from this file, and which container is the provider.
+  let running: ContainerIdentity[] = [];
+  try {
+    const scan = await transport.exec(buildPctExecCommand(vmid, buildContainerIdentityCommand()), cfg.ssh.commandTimeoutMs);
+    if (scan.exitCode === 0) running = parseContainerIdentities(scan.stdout);
+  } catch {
+    running = [];
+  }
+  const ownProjects = [
+    ...new Set(running.filter((c) => configFilesInclude(c.composeConfigFiles, composePath)).map((c) => c.composeProject)),
+  ].filter((p) => p !== "");
+  const providerContainer =
+    provider === null
+      ? undefined
+      : running.find((c) => c.composeService === provider && ownProjects.includes(c.composeProject)) ??
+        running.find((c) => c.name === provider);
+  const netnsAllOwn = providerContainer !== undefined && ownProjects.length > 0 && netnsMembers(providerContainer, running).every((c) => ownProjects.includes(c.composeProject));
+
+  // 1) Attributed probe from the LXC.
+  if (provider === null || providerContainer !== undefined) {
+    const target = providerContainer?.name ?? null;
+    if (target !== null) assertDockerName(target); // charset-guard before interpolation
+    try {
+      const res = await transport.exec(buildPctExecCommand(vmid, buildAttributedListenerProbe(target)), cfg.ssh.commandTimeoutMs);
+      if (res.exitCode === 0 && res.stdout.trim()) {
+        const ids = running.map((c) => ({ id: c.id, name: c.name, project: c.composeProject }));
+        return { bound: parseAttributedListeners(res.stdout, ids), ownProjects, netnsAllOwn: provider !== null && netnsAllOwn };
+      }
+    } catch {
+      /* fall through to the in-container probe */
+    }
+  }
+
+  // 2) Original probe: inside the provider's container (or the LXC's own netns).
   const listenerProbe = "ss -tlnp 2>/dev/null || cat /proc/net/tcp /proc/net/tcp6 2>/dev/null";
   let inner: string;
   if (provider !== null) {
@@ -99,11 +152,20 @@ async function probeBoundPorts(
     const res = await transport.exec(cmd, cfg.ssh.commandTimeoutMs);
     const out = (res.stdout ?? "").trim();
     if (!out) return null;
-    if (/LISTEN|users:\(|^State\b/im.test(out)) return parseSsListeners(out);
-    return parseProcNetTcpPorts(out).map((port) => ({ port }));
+    const bound = /LISTEN|users:\(|^State\b/im.test(out) ? parseSsListeners(out) : parseProcNetTcpPorts(out).map((port) => ({ port }));
+    return { bound, ownProjects, netnsAllOwn: provider !== null && netnsAllOwn };
   } catch {
     return null;
   }
+}
+
+/** The running containers sharing `provider`'s network namespace, provider included. */
+function netnsMembers(provider: ContainerIdentity, running: ContainerIdentity[]): ContainerIdentity[] {
+  return running.filter((c) => {
+    if (c.id === provider.id) return true;
+    const m = /^container:(.+)$/.exec(c.networkMode);
+    return m !== null && (m[1] === provider.id || m[1] === provider.name);
+  });
 }
 
 /** Local single-quote escaper (mirrors ssh/command.ts shSingleQuote, kept local to avoid a cycle). */
@@ -161,14 +223,16 @@ export async function composePreflightHandler(
     throw err;
   }
 
-  let bound: BoundPort[] | null = null;
+  let probe: BoundPortProbe | null = null;
   if (input.checkBoundPorts) {
-    bound = await probeBoundPorts(transport, input.vmid, nextModel, cfg);
+    probe = await probeBoundPorts(transport, input.vmid, input.composePath, nextModel, cfg);
   }
 
   return analyzeCompose(nextModel, {
     prev: prevModel,
-    bound: bound ?? undefined,
-    boundPortsChecked: input.checkBoundPorts && bound !== null,
+    bound: probe?.bound,
+    boundPortsChecked: input.checkBoundPorts && probe !== null,
+    ownProjects: probe?.ownProjects,
+    netnsAllOwn: probe?.netnsAllOwn,
   });
 }

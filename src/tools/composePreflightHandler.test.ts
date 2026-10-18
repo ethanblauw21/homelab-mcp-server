@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { composePreflightHandler } from "./composePreflightHandler.js";
 import type { ExecResult, ReadFileOptions, SshTransport, FileEntry, FileStat } from "../ssh/transport.js";
+import { identityRow } from "./dockerUpdateTestkit.js";
 
 const cfg = {
   ssh: { host: "node.lan", commandTimeoutMs: 5000 },
@@ -22,6 +23,10 @@ class PreflightFake implements SshTransport {
       onPull?: Record<string, string | null>;
       probeStdout?: string;
       probeExit?: number;
+      /** ADR-027: `docker ps | xargs docker inspect` identity rows. */
+      identityStdout?: string;
+      /** ADR-027: output of the LXC-level attributed listener probe (undefined ⇒ tooling missing, exit 5). */
+      attributedStdout?: string;
     } = {}
   ) {}
 
@@ -44,6 +49,14 @@ class PreflightFake implements SshTransport {
       }
       this.staged.set(tmp, Buffer.from(content));
       return { stdout: "", stderr: "", exitCode: 0 };
+    }
+    if (command.includes("xargs -r docker inspect")) {
+      return { stdout: this.opts.identityStdout ?? "", stderr: "", exitCode: 0 };
+    }
+    if (command.includes("---MCP-PIDMAP---")) {
+      return this.opts.attributedStdout === undefined
+        ? { stdout: "", stderr: "", exitCode: 5 }
+        : { stdout: this.opts.attributedStdout, stderr: "", exitCode: 0 };
     }
     if (command.includes("ss -tlnp")) {
       return { stdout: this.opts.probeStdout ?? "", stderr: "", exitCode: this.opts.probeExit ?? 0 };
@@ -198,5 +211,87 @@ services:
       cfg
     );
     expect(r.boundPortsChecked).toBe(false);
+  });
+
+  // --- ADR-027: ports held by this same project's running instance (ops finding 2026-10-17, stack 1) ---
+
+  const PATH = "/data/compose/1/docker-compose.yml";
+  const TS_ID = "a".repeat(64);
+  const SEARX_ID = "b".repeat(64);
+  const FOREIGN_ID = "c".repeat(64);
+  const STACK = `
+services:
+  tailscale: { image: tailscale/tailscale:latest }
+  searxng: { network_mode: service:tailscale, expose: ["8888"] }
+  dozzle: { network_mode: service:tailscale, expose: ["8080"] }
+`;
+  const stackRows = (extra: string[] = []) =>
+    [
+      identityRow({ name: "tailscale", id: TS_ID, composeProject: "1", composeService: "tailscale", composeConfigFiles: PATH }),
+      identityRow({ name: "searxng", id: SEARX_ID, composeProject: "1", composeService: "searxng", composeConfigFiles: PATH, networkMode: `container:${TS_ID}` }),
+      ...extra,
+    ].join("\n");
+  const attributed = (rows: string[], pids: string[]) =>
+    ["State Recv-Q Send-Q Local Address:Port Peer Address:Port Process", ...rows, "---MCP-PIDMAP---", ...pids].join("\n");
+
+  it("downgrades ports held by the same project's running containers to info (attributed via nsenter + cgroup)", async () => {
+    const ft = new PreflightFake({
+      onPull: { [PATH]: STACK },
+      identityStdout: stackRows(),
+      attributedStdout: attributed(
+        [
+          `LISTEN 0 128 0.0.0.0:8888 0.0.0.0:* users:(("granian",pid=4101,fd=7))`,
+          `LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("app",pid=4202,fd=3))`,
+        ],
+        [`4101\t${SEARX_ID}`, `4202\t${TS_ID}`]
+      ),
+    });
+    const r = await composePreflightHandler({ vmid: 101, composePath: PATH, checkBoundPorts: true }, ft, cfg);
+    const bound = r.hazards.filter((h) => h.kind === "port-bound-elsewhere");
+    expect(bound.map((h) => [h.port, h.severity])).toEqual([[8888, "info"], [8080, "info"]]);
+    expect(bound[0]!.detail).toMatch(/held by searxng of this same project \(1\)/);
+    expect(r.ok).toBe(true);
+    // Probed from the LXC into the provider's netns, not via docker exec.
+    expect(ft.commands.some((c) => c.includes("nsenter") && c.includes("tailscale"))).toBe(true);
+    expect(ft.commands.some((c) => c.includes("docker exec tailscale"))).toBe(false);
+  });
+
+  it("still errors when a container from ANOTHER project holds the port", async () => {
+    const ft = new PreflightFake({
+      onPull: { [PATH]: STACK },
+      identityStdout: stackRows([
+        identityRow({ name: "gluetun", id: FOREIGN_ID, composeProject: "vpn", composeService: "gluetun", networkMode: `container:${TS_ID}` }),
+      ]),
+      attributedStdout: attributed([`LISTEN 0 128 0.0.0.0:8888 0.0.0.0:* users:(("gluetun",pid=9,fd=1))`], [`9\t${FOREIGN_ID}`]),
+    });
+    const r = await composePreflightHandler({ vmid: 101, composePath: PATH, checkBoundPorts: true }, ft, cfg);
+    const bound = r.hazards.filter((h) => h.kind === "port-bound-elsewhere");
+    expect(bound).toHaveLength(1);
+    expect(bound[0]).toMatchObject({ severity: "error", port: 8888 });
+    expect(bound[0]!.detail).toMatch(/by gluetun \(project vpn\)/);
+    expect(r.ok).toBe(false);
+  });
+
+  it("falls back to netns membership when nsenter is unavailable: every member is this project ⇒ info", async () => {
+    const ss = `State Recv-Q Send-Q Local Address:Port Peer Address:Port
+LISTEN 0 128 0.0.0.0:8888 0.0.0.0:*`;
+    const ft = new PreflightFake({ onPull: { [PATH]: STACK }, identityStdout: stackRows(), probeStdout: ss });
+    const r = await composePreflightHandler({ vmid: 101, composePath: PATH, checkBoundPorts: true }, ft, cfg);
+    const bound = r.hazards.filter((h) => h.kind === "port-bound-elsewhere");
+    expect(bound).toHaveLength(1);
+    expect(bound[0]).toMatchObject({ severity: "info", port: 8888 });
+    expect(ft.commands.some((c) => c.includes("docker exec tailscale"))).toBe(true);
+  });
+
+  it("membership fallback keeps the warning when a foreign container shares the netns", async () => {
+    const ss = `State Recv-Q Send-Q Local Address:Port Peer Address:Port
+LISTEN 0 128 0.0.0.0:8888 0.0.0.0:*`;
+    const ft = new PreflightFake({
+      onPull: { [PATH]: STACK },
+      identityStdout: stackRows([identityRow({ name: "gluetun", id: FOREIGN_ID, composeProject: "vpn", networkMode: `container:${TS_ID}` })]),
+      probeStdout: ss,
+    });
+    const r = await composePreflightHandler({ vmid: 101, composePath: PATH, checkBoundPorts: true }, ft, cfg);
+    expect(r.hazards.find((h) => h.kind === "port-bound-elsewhere")).toMatchObject({ severity: "warn" });
   });
 });

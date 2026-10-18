@@ -4,7 +4,7 @@
 **Date:** 2026-06-22
 **Deciders:** Ethan
 **Depends on:** ADR-003 (the rollback verbs `revert_file`/`snapshot_rollback`; backup/target-descriptor model), ADR-004 (the denylist/confirm **tripwire doctrine** + the pure-guardrail-function pattern this matches), ADR-008 (`guest_backup_restore` — the third rollback verb), ADR-015 (auditStats silent-failure signals — the refusal row becomes one), ADR-020 (which deferred this exact item, naming the session-state open question)
-**Required by:** ADR-025 (`compose_update`'s automatic re-tag rollback joins the rollback family under a `compose/<vmid>/<service>` key)
+**Required by:** ADR-025 (`compose_update`'s automatic re-tag rollback joins the rollback family under a `compose/<vmid>/<service>` key), ADR-027 (compose_update `rollback-ok-probe-failed` does not count toward the breaker)
 **Realizes deferral:** ADR-020 "Scope boundaries → Deliberately excluded backlog" item 8 ("circuit breaker — needs session-state semantics")
 **Source:** `docs/tool-ideas.md` item 8 ("rollback circuit breaker — the 'panicked agent' guard"), the last small-lift item of the live dogfooding backlog. Items 9 (semantic history) and 10 (`index_path`) remain deferred large lifts (embedding dependency + ADR-006 write-path invariant; two non-existent indexer subsystems) and stay ranked in `tool-ideas.md`.
 

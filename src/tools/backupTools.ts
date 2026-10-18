@@ -28,6 +28,10 @@ import {
   generateBackupNote,
   isMcpArchive,
   planArchiveEviction,
+  planPostCreateEviction,
+  checkBackupHeadroom,
+  backupFailureHint,
+  formatBytes,
   assertStorageName,
   volidStorage,
   type ArchiveInfo,
@@ -38,28 +42,41 @@ export type Sleep = (ms: number) => Promise<void>;
 const defaultSleep: Sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * ADR-023 #9 — poll a vzdump task to its terminal state (API path only). Returns
- * `ok: false` with the Proxmox exit string on failure, or after the timeout. The
- * loop is bounded by whole polls (timeout / interval) rather than a wall clock so
- * an injected no-op `sleep` makes the test deterministic.
+ * ADR-023 #9 / ADR-027 — poll a vzdump task to its terminal state (API path only).
+ * Three outcomes, kept distinct: `ok`, `failed` (the task stopped with a non-OK
+ * exit status), and `pending` (the wait ran out while the task was still running —
+ * an UNKNOWN outcome, not a failure; vzdump carries on without us). A poll that
+ * throws (a network blip) is retried until the deadline. The loop is bounded by
+ * whole polls (timeout / interval) rather than a wall clock so an injected no-op
+ * `sleep` makes the test deterministic.
  */
 async function waitForBackupTask(
   node: NodeOps,
   upid: string,
-  cfg: Config,
+  timeoutMs: number,
+  pollIntervalMs: number,
   sleep: Sleep
-): Promise<{ ok: boolean; exitstatus: string }> {
-  const interval = Math.max(1, cfg.backup.taskPollIntervalMs);
-  const maxPolls = Math.max(1, Math.ceil(cfg.backup.taskTimeoutMs / interval));
+): Promise<{ state: "ok" | "failed" | "pending"; exitstatus: string }> {
+  const interval = Math.max(1, pollIntervalMs);
+  const maxPolls = Math.max(1, Math.ceil(timeoutMs / interval));
+  let lastError: string | undefined;
   for (let i = 0; i < maxPolls; i++) {
-    const st = await node.taskStatus!(upid);
-    if (st.status === "stopped") {
-      const exitstatus = st.exitstatus ?? "unknown";
-      return { ok: exitstatus === "OK", exitstatus };
+    try {
+      const st = await node.taskStatus!(upid);
+      if (st.status === "stopped") {
+        const exitstatus = st.exitstatus ?? "unknown";
+        return { state: exitstatus === "OK" ? "ok" : "failed", exitstatus };
+      }
+      lastError = undefined;
+    } catch (err) {
+      lastError = (err as Error).message;
     }
     if (i < maxPolls - 1) await sleep(interval);
   }
-  return { ok: false, exitstatus: `still running after ${cfg.backup.taskTimeoutMs}ms` };
+  return {
+    state: "pending",
+    exitstatus: `still running after ${timeoutMs}ms` + (lastError ? ` (last status poll failed: ${lastError})` : ""),
+  };
 }
 
 async function resolveType(node: NodeOps, vmid: number): Promise<GuestType> {
@@ -72,6 +89,9 @@ async function resolveType(node: NodeOps, vmid: number): Promise<GuestType> {
 // ---------------------------------------------------------------------------
 // guest_backup
 // ---------------------------------------------------------------------------
+
+/** Per-call wait ceiling: 6 h. Past that, poll guest_backup_list instead. */
+const MAX_BACKUP_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 
 export const GuestBackupInputSchema = z.object({
   vmid: z.number().int().positive().describe("Guest ID (LXC container or VM) to back up"),
@@ -92,6 +112,23 @@ export const GuestBackupInputSchema = z.object({
         "Overrides config NODE_BACKUP_STORAGE; the default `local` usually carries " +
         "import/vztmpl/iso (NOT backup), so vzdump fails 'wrong content type' there."
     ),
+  timeoutMs: z
+    .number()
+    .int()
+    .min(60_000)
+    .max(MAX_BACKUP_TIMEOUT_MS)
+    .optional()
+    .describe(
+      "How long to wait for vzdump (default config BACKUP_TASK_TIMEOUT_MS, 30 min). On the API path, " +
+        "outliving it returns status 'pending' — the backup keeps running; it is NOT a failure. Raise it for big guests."
+    ),
+  evictBeforeCreate: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Old, unsafe order: delete the previous mcp- archive BEFORE vzdump runs. Only for a storage that " +
+        "cannot hold one extra archive; if vzdump then fails the guest has no mcp- archive at all."
+    ),
   confirm: z
     .boolean()
     .default(false)
@@ -100,6 +137,25 @@ export const GuestBackupInputSchema = z.object({
 
 export type GuestBackupInput = z.infer<typeof GuestBackupInputSchema>;
 
+export interface GuestBackupResult {
+  vmid: number;
+  guestType: GuestType;
+  mode: string;
+  note: string;
+  task: string;
+  storage: string;
+  /** "completed": vzdump finished OK. "pending": still running when the wait ended (outcome unknown). */
+  status: "completed" | "pending";
+  taskStatus: string;
+  evicted: string[];
+  volid: string | null;
+  warnings: string[];
+  /** Eviction that would have run on success; held back because the outcome is not known yet. */
+  pendingEviction?: string[];
+  evictionErrors?: string[];
+  nextSteps?: string[];
+}
+
 export async function guestBackupHandler(
   input: GuestBackupInput,
   node: NodeOps,
@@ -107,17 +163,7 @@ export async function guestBackupHandler(
   cfg: Config,
   now: Date = new Date(),
   sleep: Sleep = defaultSleep
-): Promise<{
-  vmid: number;
-  guestType: GuestType;
-  mode: string;
-  note: string;
-  task: string;
-  storage: string;
-  taskStatus: string;
-  evicted: string[];
-  volid: string | null;
-}> {
+): Promise<GuestBackupResult> {
   if (!input.confirm) {
     throw new Error(
       `Refusing guest_backup on ${input.vmid} without confirm: true. vzdump is a heavy, ` +
@@ -127,78 +173,179 @@ export async function guestBackupHandler(
   const storage = input.storage ?? cfg.backup.nodeBackupStorage;
   assertStorageName(storage);
   const type = await resolveType(node, input.vmid);
-
-  // Retention BEFORE create: evict oldest mcp- archives so the post-create count
-  // stays within cap. Human-made archives (no mcp- note) are never touched.
-  const existing = await node.listBackupArchives(storage, input.vmid);
-  const archives: ArchiveInfo[] = existing.map((a) => ({ ...a, mcpManaged: isMcpArchive(a.notes) }));
+  const cap = cfg.backup.guestArchivePerGuestCap;
+  const timeoutMs = input.timeoutMs ?? cfg.backup.taskTimeoutMs;
+  const warnings: string[] = [];
   const evicted: string[] = [];
-  for (const volid of planArchiveEviction(archives, cfg.backup.guestArchivePerGuestCap)) {
-    await node.deleteBackupArchive(storage, volid);
-    evicted.push(volid);
+  const evictionErrors: string[] = [];
+
+  const toInfo = (list: Awaited<ReturnType<NodeOps["listBackupArchives"]>>): ArchiveInfo[] =>
+    list.map((a) => ({ ...a, mcpManaged: isMcpArchive(a.notes) }));
+  const evict = async (volids: string[]): Promise<void> => {
+    for (const volid of volids) {
+      try {
+        await node.deleteBackupArchive(storage, volid);
+        evicted.push(volid);
+      } catch (err) {
+        evictionErrors.push(`${volid}: ${(err as Error).message}`);
+      }
+    }
+  };
+
+  // ADR-027 — retention runs AFTER the new archive is confirmed (ops finding
+  // 2026-10-17: evicting first left CT 101 with no mcp- archive for the 14 minutes
+  // vzdump ran). That briefly holds cap+1 archives, so check the storage has room
+  // for one more; a storage that cannot is refused here, before anything changes,
+  // unless the caller deliberately opts into the old order.
+  const before = toInfo(await node.listBackupArchives(storage, input.vmid));
+  const plannedIfFull = planArchiveEviction(before, cap);
+  if (input.evictBeforeCreate) {
+    await evict(planArchiveEviction(before, cap));
+    if (evictionErrors.length > 0) {
+      throw new Error(`guest_backup of ${input.vmid}: pre-create eviction failed (${evictionErrors.join("; ")}); nothing was created.`);
+    }
+    warnings.push("evictBeforeCreate: the previous mcp- archive was deleted before vzdump ran.");
+  } else if (plannedIfFull.length > 0) {
+    let avail: number | undefined;
+    try {
+      avail = (await node.storageStatus()).find((s) => s.storage === storage)?.availBytes;
+    } catch {
+      avail = undefined;
+    }
+    const room = checkBackupHeadroom(before, avail);
+    if (room.verdict === "insufficient") {
+      throw new Error(
+        `Refusing guest_backup of ${input.vmid}: storage "${storage}" has ${formatBytes(room.availBytes!)} free, but the ` +
+          `last archive of this guest was ${formatBytes(room.estimateBytes!)}. The new archive is written BEFORE the old ` +
+          `mcp- archive (${plannedIfFull.join(", ")}) is evicted, so the storage must hold one extra archive. Free space ` +
+          "on the storage, pick another storage, or re-issue with evictBeforeCreate: true (no rollback point while vzdump runs). " +
+          "Nothing was deleted or created."
+      );
+    }
+    if (room.verdict === "unknown") {
+      warnings.push(
+        `Could not confirm "${storage}" has room for one extra archive (no size estimate or storage figure); ` +
+          "the old mcp- archive is evicted only after the new one succeeds."
+      );
+    }
   }
 
   const note = generateBackupNote(now, input.note);
-  const ref = await node.createBackup(input.vmid, type, { mode: input.mode, storage, notes: note });
+  const auditBase = { tool: "guest_backup" as const, host: cfg.ssh.host, vmid: input.vmid };
+  const what = `vzdump (${input.mode}) of ${type} ${input.vmid} to ${storage}`;
+
+  let ref: { upid: string };
+  try {
+    ref = await node.createBackup(input.vmid, type, { mode: input.mode, storage, notes: note, timeoutMs });
+  } catch (err) {
+    // SSH path: vzdump blocks and throws on a non-zero exit (including a node-side
+    // `timeout` kill, which really does stop vzdump). Nothing is evicted.
+    const msg = (err as Error).message;
+    await audit.append(buildAuditRecord({ ...auditBase, isLargeChange: false, failed: true, note: `${what} FAILED: ${msg}` }));
+    const hint = backupFailureHint(msg, storage);
+    throw new Error(`guest_backup of ${input.vmid} failed: ${msg}.${hint ? ` ${hint}` : ""} No archive was evicted.`);
+  }
 
   // ADR-023 #9 — the API path returns a UPID before vzdump finishes, so a task
-  // that fails async (e.g. `storage` lacks the `backup` content type) would read
-  // as success. Poll it to completion and surface a real failure LOUDLY. The SSH
-  // backend blocks + throws on a non-zero exit, so it is already loud — and it may
-  // omit `taskStatus`, in which case the poll is skipped.
+  // that fails async would read as success. Poll it. The SSH backend blocks and
+  // throws on failure, and may omit `taskStatus`, in which case the poll is skipped.
   let taskStatus = "OK";
   if (node.kind === "api" && typeof node.taskStatus === "function") {
-    const outcome = await waitForBackupTask(node, ref.upid, cfg, sleep);
-    if (!outcome.ok) {
+    const outcome = await waitForBackupTask(node, ref.upid, timeoutMs, cfg.backup.taskPollIntervalMs, sleep);
+    if (outcome.state === "failed") {
+      await audit.append(
+        buildAuditRecord({ ...auditBase, isLargeChange: false, failed: true, note: `${what} FAILED: ${outcome.exitstatus}; UPID ${ref.upid}` })
+      );
+      const hint = backupFailureHint(outcome.exitstatus, storage);
+      throw new Error(`guest_backup of ${input.vmid} failed: ${outcome.exitstatus}.${hint ? ` ${hint}` : ""} No archive was evicted.`);
+    }
+    if (outcome.state === "pending") {
+      // ADR-027 — a timeout is not a failure. Evict nothing (the outcome is not
+      // known), audit it as pending, and tell the caller how to find out.
       await audit.append(
         buildAuditRecord({
-          tool: "guest_backup",
-          host: cfg.ssh.host,
-          vmid: input.vmid,
-          isLargeChange: false,
-          note: `vzdump (${input.mode}) of ${type} ${input.vmid} to ${storage} FAILED: ${outcome.exitstatus}`,
+          ...auditBase,
+          isLargeChange: true,
+          pending: true,
+          note: `${what} PENDING: ${outcome.exitstatus}; UPID ${ref.upid}; note "${note}"; retention deferred`,
         })
       );
-      throw new Error(
-        `guest_backup of ${input.vmid} failed: ${outcome.exitstatus}. ` +
-          `Storage "${storage}" must have the \`backup\` content type — pass storage:"<name>" ` +
-          "or set NODE_BACKUP_STORAGE (the default `local` usually cannot hold backups)."
-      );
+      return {
+        vmid: input.vmid,
+        guestType: type,
+        mode: input.mode,
+        note,
+        task: ref.upid,
+        storage,
+        status: "pending",
+        taskStatus: outcome.exitstatus,
+        evicted,
+        volid: null,
+        warnings,
+        ...(plannedIfFull.length > 0 && !input.evictBeforeCreate && { pendingEviction: plannedIfFull }),
+        nextSteps: [
+          `vzdump is still running on the node (UPID ${ref.upid}); this is not a failure.`,
+          `guest_backup_list { vmid: ${input.vmid}, storage: "${storage}" } shows the archive with note "${note}" once it finishes.`,
+          `While it runs the guest carries a backup lock (describe_guest / \`pct config ${input.vmid}\` shows "lock: backup").`,
+          "Retention was deferred: the extra mcp- archive is evicted by the next successful guest_backup of this guest.",
+          `Next time pass timeoutMs (e.g. ${Math.min(MAX_BACKUP_TIMEOUT_MS, timeoutMs * 2)}) to wait it out.`,
+        ],
+      };
     }
     taskStatus = outcome.exitstatus;
   }
 
-  // H9/F9 — resolve the created archive's VOLID and return it. vzdump names the
-  // file in the node's LOCAL timezone, so the volid is not reconstructable from our
-  // UTC note; instead re-list the storage and match our exact (second-precision,
-  // unique) note. Best-effort: a listing failure or a notes mismatch leaves volid
-  // null — the backup still succeeded and `note` still identifies it. This closes
-  // the gap where guest_backup_restore had no volid to feed back in.
+  // H9/F9 — resolve the created archive's VOLID. vzdump names the file in the
+  // node's LOCAL timezone, so re-list and match our exact (second-precision,
+  // unique) note. ADR-027: retention needs this — an unresolved volid means the
+  // new archive is not confirmed, so nothing is evicted.
   let volid: string | null = null;
+  let after: ArchiveInfo[] = [];
   try {
-    const after = await node.listBackupArchives(storage, input.vmid);
+    after = toInfo(await node.listBackupArchives(storage, input.vmid));
     const mine = after
       .filter((a) => a.notes !== undefined && a.notes.trim() === note)
       .sort((a, b) => (b.ctime ?? 0) - (a.ctime ?? 0));
     volid = mine[0]?.volid ?? null;
   } catch {
-    /* best-effort — volid stays null */
+    /* volid stays null */
+  }
+
+  if (volid !== null) {
+    await evict(planPostCreateEviction(after, volid, cap));
+  } else if (!input.evictBeforeCreate && plannedIfFull.length > 0) {
+    warnings.push(
+      `Could not find the new archive (note "${note}") in the "${storage}" listing, so retention was skipped: ` +
+        "the old mcp- archive is kept. guest_backup_list shows both."
+    );
   }
 
   await audit.append(
     buildAuditRecord({
-      tool: "guest_backup",
-      host: cfg.ssh.host,
-      vmid: input.vmid,
+      ...auditBase,
       isLargeChange: true,
       note:
-        `vzdump (${input.mode}) of ${type} ${input.vmid} to ${storage} via ${node.kind}; note "${note}"` +
+        `${what} via ${node.kind}; note "${note}"` +
         (volid ? `; volid ${volid}` : "") +
-        (evicted.length ? `; evicted ${evicted.join(", ")}` : ""),
+        (evicted.length ? `; evicted ${evicted.join(", ")}` : "") +
+        (evictionErrors.length ? `; eviction failed for ${evictionErrors.join("; ")}` : ""),
     })
   );
 
-  return { vmid: input.vmid, guestType: type, mode: input.mode, note, task: ref.upid, storage, taskStatus, evicted, volid };
+  return {
+    vmid: input.vmid,
+    guestType: type,
+    mode: input.mode,
+    note,
+    task: ref.upid,
+    storage,
+    status: "completed",
+    taskStatus,
+    evicted,
+    volid,
+    warnings,
+    ...(evictionErrors.length > 0 && { evictionErrors }),
+  };
 }
 
 // ---------------------------------------------------------------------------

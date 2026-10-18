@@ -466,8 +466,9 @@ export function buildDockerChmodCommand(
  * usually-better rollback for a Docker host: pair `revert_file` (restore the
  * compose file from backup) with this to roll a stack back in seconds.
  */
-export function buildComposeUpCommand(composePath: string): string {
-  return `docker compose -f ${shSingleQuote(composePath)} up -d`;
+export function buildComposeUpCommand(composePath: string, envFiles: string[] = []): string {
+  const env = envFiles.map((f) => ` --env-file ${shSingleQuote(f)}`).join("");
+  return `docker compose -f ${shSingleQuote(composePath)}${env} up -d`;
 }
 
 // ---------------------------------------------------------------------------
@@ -552,7 +553,7 @@ function parseEnvArray(env: unknown): Record<string, unknown> {
 }
 
 /** Flatten `.NetworkSettings.Ports` ({"8080/tcp":[{HostIp,HostPort}], "53/udp":null}). */
-function parsePortMap(ports: unknown): DockerPortMap[] {
+export function parsePortMap(ports: unknown): DockerPortMap[] {
   const out: DockerPortMap[] = [];
   const obj = asObj(ports);
   for (const [containerPort, bindings] of Object.entries(obj)) {
@@ -748,17 +749,58 @@ export interface ComposeProject {
   project: string;
   /** com.docker.compose.project.config_files label, when present. */
   configFile?: string;
+  /**
+   * com.docker.compose.project.environment_file label: the `--env-file` paths the
+   * project was started with (paths only — contents are never read). compose_update
+   * and compose_redeploy pass them back so interpolation matches the original run.
+   */
+  envFiles?: string[];
   services: ComposeService[];
+}
+
+/**
+ * Parse compose's `com.docker.compose.project.environment_file` label — a
+ * comma-separated list of the `--env-file` paths a project was started with
+ * (ops finding 2026-10-17: segmem runs with `--env-file /data/segmem/.env` and no
+ * sibling .env, so a bare `docker compose config` failed on a missing variable).
+ * Only absolute paths free of control characters and commas are kept; anything
+ * else lands in `rejected` so the caller can say why it was skipped. The files
+ * themselves are never read here or anywhere — compose reads them on the node.
+ */
+export function parseEnvFileLabel(label: string | undefined): { files: string[]; rejected: string[] } {
+  const files: string[] = [];
+  const rejected: string[] = [];
+  for (const raw of (label ?? "").split(",")) {
+    const p = raw.trim();
+    if (!p || p === "<no value>") continue;
+    // eslint-disable-next-line no-control-regex
+    if (!p.startsWith("/") || /[\x00-\x1f]/.test(p) || p.split("/").includes("..")) {
+      rejected.push(p);
+      continue;
+    }
+    if (!files.includes(p)) files.push(p);
+  }
+  return { files, rejected };
 }
 
 /** Parse the comma-joined `k=v` `docker ps` Labels field into a map. */
 export function parseDockerLabels(labels: string): Record<string, string> {
   const out: Record<string, string> = {};
+  let last: string | undefined;
   for (const pair of labels.split(",")) {
     const eq = pair.indexOf("=");
-    if (eq === -1) continue;
+    if (eq === -1) {
+      // `docker ps` joins labels with "," and does not escape a "," inside a value,
+      // so compose's multi-file labels (config_files, environment_file) arrive split.
+      // A segment with no "=" continues the previous value.
+      if (last !== undefined && pair.trim()) out[last] += "," + pair.trim();
+      continue;
+    }
     const k = pair.slice(0, eq).trim();
-    if (k) out[k] = pair.slice(eq + 1).trim();
+    if (k) {
+      out[k] = pair.slice(eq + 1).trim();
+      last = k;
+    }
   }
   return out;
 }
@@ -772,7 +814,7 @@ export function parseDockerLabels(labels: string): Record<string, string> {
  * Projects + services are sorted for a stable result; services dedupe by name.
  */
 export function parseComposeProjects(output: string): ComposeProject[] {
-  const byProject = new Map<string, { configFile?: string; services: Map<string, ComposeService> }>();
+  const byProject = new Map<string, { configFile?: string; envFiles?: string[]; services: Map<string, ComposeService> }>();
   for (const line of output.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -792,6 +834,8 @@ export function parseComposeProjects(output: string): ComposeProject[] {
     }
     const configFile = labels["com.docker.compose.project.config_files"];
     if (configFile && !entry.configFile) entry.configFile = configFile;
+    const envFiles = parseEnvFileLabel(labels["com.docker.compose.project.environment_file"]).files;
+    if (envFiles.length > 0 && !entry.envFiles) entry.envFiles = envFiles;
     const serviceName = labels["com.docker.compose.service"] || str(row.Names);
     if (!entry.services.has(serviceName)) {
       entry.services.set(serviceName, {
@@ -806,6 +850,7 @@ export function parseComposeProjects(output: string): ComposeProject[] {
     .map(([project, e]) => ({
       project,
       ...(e.configFile ? { configFile: e.configFile } : {}),
+      ...(e.envFiles ? { envFiles: e.envFiles } : {}),
       services: [...e.services.values()].sort((a, b) => a.name.localeCompare(b.name)),
     }));
 }

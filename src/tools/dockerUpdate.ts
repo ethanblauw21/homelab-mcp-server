@@ -10,6 +10,7 @@
  * (container/service/project names, image refs) or single-quoted.
  */
 import { shSingleQuote } from "../ssh/command.js";
+import { parseEnvFileLabel, parsePortMap, type DockerPortMap } from "./dockerHelpers.js";
 
 const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 /** Field separator for the batched `--format` templates (a tab; values never contain one). */
@@ -141,6 +142,10 @@ export interface ContainerIdentity {
   /** `diun.watch_repo` label value ("" when absent). */
   diunWatchRepoLabel: string;
   networkMode: string;
+  /** `com.docker.compose.project.environment_file` label ("" when absent): the --env-file paths. */
+  composeEnvFiles: string;
+  /** Published port bindings (`.NetworkSettings.Ports`); empty for a container in another's netns. */
+  publishedPorts: DockerPortMap[];
 }
 
 const IDENTITY_FORMAT = [
@@ -156,6 +161,8 @@ const IDENTITY_FORMAT = [
   '{{index .Config.Labels "diun.enable"}}',
   '{{index .Config.Labels "diun.watch_repo"}}',
   "{{.HostConfig.NetworkMode}}",
+  '{{index .Config.Labels "com.docker.compose.project.environment_file"}}',
+  "{{json .NetworkSettings.Ports}}",
 ].join(SEP);
 
 /** One identity row per running container (`all` includes stopped ones). */
@@ -187,9 +194,21 @@ export function parseContainerIdentities(output: string): ContainerIdentity[] {
       diunLabel: clean(f[9]),
       diunWatchRepoLabel: clean(f[10]),
       networkMode: clean(f[11]),
+      composeEnvFiles: clean(f[12]),
+      publishedPorts: parsePortsJson(f[13]),
     });
   }
   return out;
+}
+
+function parsePortsJson(v: string | undefined): DockerPortMap[] {
+  const s = clean(v);
+  if (!s || s === "null") return [];
+  try {
+    return parsePortMap(JSON.parse(s));
+  } catch {
+    return [];
+  }
 }
 
 export interface LocalImageInfo {
@@ -647,8 +666,65 @@ function posixDirname(p: string): string {
  * derive the project from the directory name) and running from the file's
  * directory (so its sibling `.env` loads) match how Portainer deploys a stack.
  */
-export function buildComposeCommand(composePath: string, project: string, args: string): string {
-  return `cd ${shSingleQuote(posixDirname(composePath))} && docker compose -p ${project} -f ${shSingleQuote(composePath)} ${args}`;
+/**
+ * `docker compose` for one project. `envFiles` are the project's recorded
+ * `--env-file` paths (ADR-027 — from the environment_file label); compose reads
+ * them on the node, the server only passes the paths. `--env-file` is a global
+ * flag, so it precedes the subcommand.
+ */
+export function buildComposeCommand(composePath: string, project: string, args: string, envFiles: string[] = []): string {
+  const env = envFiles.map((f) => ` --env-file ${shSingleQuote(f)}`).join("");
+  return `cd ${shSingleQuote(posixDirname(composePath))} && docker compose -p ${project} -f ${shSingleQuote(composePath)}${env} ${args}`;
+}
+
+/** The env files a running service container was started with (ADR-027). */
+export function envFilesFor(c: Pick<ContainerIdentity, "composeEnvFiles">): { files: string[]; rejected: string[] } {
+  return parseEnvFileLabel(c.composeEnvFiles);
+}
+
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+const WILDCARD_IPS = new Set(["", "0.0.0.0", "::"]);
+
+/**
+ * ADR-027 — would a probe URL curled from inside the LXC reach one of the
+ * container's published bindings? Returns a human warning when it clearly would
+ * not, or null when it would or when it cannot be judged (a hostname, or a
+ * container that shares another container's network namespace, whose bindings
+ * live on that provider). Ops finding 2026-10-17: searxng was published on
+ * 10.0.0.52:8888 only and the probe targeted 127.0.0.1:8888.
+ */
+export function probeBindingWarning(
+  url: string,
+  container: Pick<ContainerIdentity, "name" | "networkMode" | "publishedPorts">
+): string | null {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  if (/^(container|service):/.test(container.networkMode) || container.networkMode === "host") return null;
+  const host = u.hostname.toLowerCase();
+  const isIp = /^[0-9.]+$/.test(host) || host.includes(":") || host.startsWith("[");
+  if (!isIp && host !== "localhost") return null;
+  const port = u.port || (u.protocol === "https:" ? "443" : "80");
+  const onPort = container.publishedPorts.filter((p) => p.hostPort === port);
+  const all = container.publishedPorts.map((p) => `${p.hostIp || "0.0.0.0"}:${p.hostPort}`);
+  const listing = all.length > 0 ? `published bindings: ${[...new Set(all)].join(", ")}` : "it publishes no ports";
+  if (onPort.length === 0) {
+    return `probe ${u.host} does not match any port ${container.name} publishes (${listing}); the probe may be wrong.`;
+  }
+  const reachable = onPort.some(
+    (p) =>
+      WILDCARD_IPS.has(p.hostIp) ||
+      p.hostIp.toLowerCase() === host ||
+      (LOOPBACK_HOSTS.has(host) && LOOPBACK_HOSTS.has(p.hostIp))
+  );
+  if (reachable) return null;
+  return (
+    `probe targets ${u.host}, but ${container.name} publishes port ${port} only on ` +
+    `${onPort.map((p) => p.hostIp).join(", ")} (${listing}); the probe may be wrong.`
+  );
 }
 
 /** The server-owned rollback hold tag (`mcp-` ownership convention): one per service. */

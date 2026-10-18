@@ -201,7 +201,7 @@ const driftSink = new SnapshotStore<unknown>(config.ui.driftDir, config.ui.drift
 const nodeOps: NodeOps =
   config.api.baseUrl && config.api.tokenId && config.api.tokenSecret && config.api.node
     ? new ApiBackend(makeApiHttp(config.api), { node: config.api.node })
-    : new SshBackend(sshTransport, config.ssh.commandTimeoutMs);
+    : new SshBackend(sshTransport, config.ssh.commandTimeoutMs, config.backup.taskTimeoutMs);
 
 function errResult(err: unknown) {
   const msg = err instanceof Error ? err.message : String(err);
@@ -789,7 +789,7 @@ register(
   {
     description:
       "Read-only compose project map from the running containers' compose labels inside an LXC: " +
-      "[{ project, configFile, services: [{ name, image, ports }] }]. Produces the composePath that " +
+      "[{ project, configFile, envFiles?, services: [{ name, image, ports }] }]. Produces the composePath that " +
       "compose_redeploy/compose_preflight need. Sees only running containers (a down project is " +
       "invisible). Read-only, not audited.",
     inputSchema: ComposeDiscoverInputSchema,
@@ -932,7 +932,10 @@ register(
     description:
       "Create a vzdump archive of a guest (the rollback path for guests that cannot snapshot, e.g. GPU " +
       "passthrough). Confirm-gated: vzdump is heavy and suspend/stop modes interrupt service. Archives are " +
-      "note-tagged mcp- and retention-capped per guest (default 1); human-made archives are never touched.",
+      "note-tagged mcp- and retention-capped per guest (default 1); human-made archives are never touched. " +
+      "Retention runs only AFTER the new archive is confirmed, so the storage briefly holds one extra archive. " +
+      "If vzdump outlives the wait (timeoutMs, default 30 min) the result is status 'pending', not a failure: " +
+      "the backup keeps running; check guest_backup_list.",
     inputSchema: GuestBackupInputSchema,
   },
   async (input) => {
@@ -984,7 +987,8 @@ register(
     description:
       "Redeploy a Docker Compose stack inside an LXC: docker compose -f <composePath> up -d (run on the LXC " +
       "host via pct exec). Confirm-gated (recreates containers, disrupts services). Pair with revert_file on " +
-      "the compose file for a seconds-scale stack rollback (no vzdump needed). Companion tier; audited.",
+      "the compose file for a seconds-scale stack rollback (no vzdump needed). Reuses the project's recorded " +
+      "--env-file paths (or pass envFiles). Companion tier; audited.",
     inputSchema: ComposeRedeployInputSchema,
   },
   async (input) => {
@@ -1046,7 +1050,9 @@ register(
       "rollback). The compose file is never written. Refuses build: services, digest-pinned refs, netns " +
       "providers, and Watchtower-managed containers (unless allowWatchtowerManaged). Rollback restores the " +
       "image, not volume data — guest_backup first for risky upgrades. Confirm-gated; audited; rollbacks count " +
-      "toward the rollback circuit breaker.",
+      "toward the rollback circuit breaker. Passes the project's recorded --env-file paths (environment_file " +
+      "label). A probe is first checked against the RUNNING image and refused if it already fails there; if both " +
+      "images later fail only the probe the outcome is rollback-ok-probe-failed (not counted by the breaker).",
     inputSchema: ComposeUpdateInputSchema,
   },
   async (input) => {

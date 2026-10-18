@@ -74,6 +74,64 @@ export function planArchiveEviction(archives: ArchiveInfo[], cap: number, incomi
 }
 
 /**
+ * ADR-027 — post-create retention (pure). Runs only once the new archive is
+ * confirmed and its volid resolved: the new archive is taken out of the
+ * candidate set (it can never be evicted, whatever the cap), and the remaining
+ * `mcp-` archives are trimmed so the total, new one included, is within cap.
+ * A cap below 1 is treated as 1 — retention never deletes the only rollback point.
+ */
+export function planPostCreateEviction(archives: ArchiveInfo[], newVolid: string, cap: number): string[] {
+  const others = archives.filter((a) => a.volid !== newVolid);
+  return planArchiveEviction(others, Math.max(1, cap), 1);
+}
+
+/**
+ * ADR-027 — will the storage hold one more archive before retention frees the old
+ * ones? The estimate is the newest existing archive of the same guest (any owner),
+ * the best size proxy the listing offers; with no prior archive or no storage
+ * figure the check is `unknown`, never a refusal. A 10% margin covers growth.
+ */
+export function checkBackupHeadroom(
+  archives: ArchiveInfo[],
+  availBytes: number | undefined
+): { verdict: "ok" | "insufficient" | "unknown"; estimateBytes?: number; availBytes?: number } {
+  const sized = archives
+    .filter((a) => typeof a.sizeBytes === "number" && a.sizeBytes > 0)
+    .sort((a, b) => (b.ctime ?? 0) - (a.ctime ?? 0));
+  const estimate = sized[0]?.sizeBytes;
+  if (estimate === undefined || availBytes === undefined || !Number.isFinite(availBytes)) {
+    return { verdict: "unknown", ...(estimate !== undefined && { estimateBytes: estimate }) };
+  }
+  const needed = Math.ceil((estimate * 11) / 10);
+  return { verdict: availBytes >= needed ? "ok" : "insufficient", estimateBytes: estimate, availBytes };
+}
+
+/**
+ * ADR-027 — the storage-content-type hint is attached ONLY when the vzdump exit
+ * status is about content type or storage. Before, every failure (including a
+ * plain "still running" timeout) carried it and sent operators to the wrong cause.
+ */
+export function backupFailureHint(exitstatus: string, storage: string): string | null {
+  if (!/content.?type|storage/i.test(exitstatus)) return null;
+  return (
+    `Storage "${storage}" must have the \`backup\` content type — pass storage:"<name>" ` +
+    "or set NODE_BACKUP_STORAGE (the default `local` usually cannot hold backups)."
+  );
+}
+
+/** Human byte size for messages (binary units, one decimal). */
+export function formatBytes(n: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`;
+}
+
+/**
  * Parse a Proxmox storage-content listing (the array shape returned by both the
  * REST API `/storage/<s>/content?content=backup` and `pvesh get … --output-format
  * json`). Tolerant of the two notes field names PVE has used (`notes` / `comment`)

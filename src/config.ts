@@ -81,8 +81,12 @@ const ConfigSchema = z.object({
     // ADR-023 #9 — the API path returns a vzdump UPID immediately; poll the task
     // to completion so an async failure (e.g. the storage lacks `backup` content
     // type) surfaces loudly instead of as a false success. vzdump is minutes-scale.
+    // ADR-027: outliving this wait is reported as PENDING (the task keeps running),
+    // never as a failure. 30 min covers an ~90 GB LXC (CT 101 takes ~14 min);
+    // guest_backup takes a per-call `timeoutMs` for bigger guests. The SSH backend
+    // uses it as the node-side `timeout` for vzdump/restore, where it IS a kill.
     taskPollIntervalMs: z.number().default(2_000),
-    taskTimeoutMs: z.number().default(600_000),
+    taskTimeoutMs: z.number().default(1_800_000),
   }),
   audit: z.object({
     logPath: z.string(),
@@ -462,7 +466,7 @@ function loadConfig(): Config {
         : 2_000,
       taskTimeoutMs: process.env.BACKUP_TASK_TIMEOUT_MS
         ? parseInt(process.env.BACKUP_TASK_TIMEOUT_MS)
-        : 600_000,
+        : 1_800_000,
     },
     audit: {
       logPath: process.env.AUDIT_LOG_PATH ?? path.join(LOCAL_DATA_DIR, "audit.jsonl"),
