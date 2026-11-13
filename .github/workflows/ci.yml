@@ -14,24 +14,23 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        node: [20, 22]
+        # 22 = oldest supported (maintenance LTS to 2027-04); 24/26 = active LTS.
+        # Node 20 dropped: end-of-life since 2026-04-30.
+        node: [22, 24, 26]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      # better-sqlite3 ships no Node-20 Windows prebuilt (lowest win32-x64 node
-      # prebuilt is the Node-22 ABI), so on this cell npm must compile it from
-      # source. Node 20's bundled npm carries node-gyp@10.1.0, whose PowerShell
-      # Visual Studio finder crashes with ERR_CHILD_PROCESS_STDIO_MAXBUFFER on the
-      # runner's VS 2026 ("18") install and reports "unknown version undefined" —
-      # the bug fixed in node-gyp >=10.2. Refresh npm (which carries a modern
-      # node-gyp) so the native build can find the toolchain. Windows-only; the
-      # other matrix cells either find a prebuilt or have a working compiler.
-      # Pinned to npm 11, not @latest: npm 12 requires Node >=22.22 (breaks the
-      # Node 20 cell) and skips dependency install scripts by default (so
-      # better-sqlite3's native binding is never built).
+      # If better-sqlite3 has no win32 prebuilt for a matrix Node, npm compiles it
+      # from source, and an old bundled node-gyp (<10.2) crashes finding the
+      # runner's VS 2026 install (ERR_CHILD_PROCESS_STDIO_MAXBUFFER, "unknown
+      # version undefined"). This bit the old Node 20 cell. Refreshing npm keeps a
+      # modern node-gyp on every Windows cell in case a new Node major lands before
+      # its prebuilt does. Pinned to npm 11, not @latest: npm 12 skips dependency
+      # install scripts by default, so better-sqlite3's native binding would never
+      # be built.
       - name: Modernize node-gyp toolchain (Windows)
         if: runner.os == 'Windows'
         run: npm install -g npm@11
@@ -48,7 +47,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 26
           cache: npm
       - run: npm ci
       - run: npm run build
