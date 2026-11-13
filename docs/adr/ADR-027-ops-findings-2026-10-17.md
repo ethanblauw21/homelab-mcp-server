@@ -92,9 +92,22 @@ The rollback path (re-tag the hold, `up -d --pull never`) only runs after a recr
 
 No tool lists or removes images by `dangling=true`. On Docker 29 with the containerd image store that filter includes still-tagged images, so anything added later must not treat "dangling" as "safe to remove".
 
+### 9. Addendum (2026-11-12): guest_backup_restore awaits its tasks
+
+§ Scope boundaries left the API restore unpolled. It was worse than a missing poll. `stopGuest`, `restoreBackup` and `startGuest` each return a UPID before the task finishes, so the restore was issued while the stop was still running, the start while the restore still held the guest lock, and a restore that failed asynchronously was audited as "Restored". On the SSH path a `pct start` that exits non-zero while the guest comes up (ADR-023 B5) threw after a successful restore, so no audit row was written at all.
+
+On the API path each task is now awaited with the same `waitForBackupTask` poll `guest_backup` uses, bounded by a new per-call `timeoutMs` (default `backup.taskTimeoutMs`):
+
+- A stop that fails or outlives the wait refuses before the restore and audits `failed: true`. The guest is unchanged.
+- A restore that fails throws and audits `failed: true`. The guest is not started. The message says a forced restore may already have removed the old disks.
+- A restore that outlives the wait returns `status: "pending"`, audits `pending: true`, and does not start the guest.
+- After a successful restore, the guest's own run-state decides whether it restarted, on both backends (bounded by `snapshot.restartPollIntervalMs`/`restartTimeoutMs`). A start that errors while the guest comes up counts as restarted. A guest that never reaches running returns `restarted: false` with a note, not a throw, because the restore itself did happen.
+
+The result gains `status: "completed" | "pending"`, and `taskStatus`/`note` when relevant.
+
 ## Scope boundaries
 
-- `guest_backup_restore` on the API path still does not poll its task. That has not come up in practice and is left alone here.
+- ~~`guest_backup_restore` on the API path still does not poll its task.~~ Done in §9 (2026-11-12).
 - A pending backup's eviction is deferred to the next successful backup of that guest. There is no separate "apply retention" verb.
 - The probe binding check is a hint. It cannot see NAT, a reverse proxy, or a hostname's resolution.
 - The android MCP's `apt-get` confirm gate mentioned in the ops report is a different server and is out of scope.

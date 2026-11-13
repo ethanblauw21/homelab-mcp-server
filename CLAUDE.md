@@ -203,6 +203,7 @@ A Node/TypeScript **stdio MCP server** (`@modelcontextprotocol/sdk`, `ssh2`, `zo
 - **compose env files.** The identity scan reads `com.docker.compose.project.environment_file`; `compose_update` and `compose_redeploy` pass each path as `--env-file` (paths only, never read by the server), `compose_redeploy` takes an `envFiles` override, `compose_discover` reports `envFiles`. `parseDockerLabels` keeps commas inside label values.
 - **compose_update probe sanity.** A probe is curled against the running image first and the call is refused if it already fails; `probeBindingWarning` compares the URL with published bindings. Both images failing only the probe ⇒ `rollback-ok-probe-failed` (not `failed`, not counted by the breaker).
 - **compose_preflight** maps each bound port to a container and compose project (`nsenter` into the provider netns + `/proc/<pid>/cgroup`); a port held by the analysed project's own containers is `info`.
+- **guest_backup_restore awaits each task (§9).** On the API path stop → restore → start are each polled (per-call `timeoutMs`); a failed stop/restore audits `failed: true` and throws, a slow restore is `status: "pending"` with the guest left stopped, and run-state (not the start's exit) decides `restarted`.
 - **`node dist/cli/rescrubAuditDb.js`** re-redacts pre-ADR-026 `audit.db` rows: dry run by default, `--apply` backs up first (that backup holds the old text; delete it after checking). The JSONL is not rewritten. `redaction.key` is tightened to 600 on load.
 
 ## Commands

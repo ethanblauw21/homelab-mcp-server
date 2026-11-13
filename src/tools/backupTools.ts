@@ -366,6 +366,17 @@ export const GuestBackupRestoreInputSchema = z.object({
     .describe(
       "ADR-021: bypass the rollback circuit breaker for this one call (a deliberate, audited act, distinct from confirm)."
     ),
+  timeoutMs: z
+    .number()
+    .int()
+    .min(60_000)
+    .max(MAX_BACKUP_TIMEOUT_MS)
+    .optional()
+    .describe(
+      "How long to wait for each node task (stop, restore, start) on the API path (default config " +
+        "BACKUP_TASK_TIMEOUT_MS, 30 min). A restore that outlives it returns status 'pending' and the guest is " +
+        "NOT started (the restore still holds its lock) — check pct_list/qm_list later."
+    ),
 });
 
 export type GuestBackupRestoreInput = z.infer<typeof GuestBackupRestoreInputSchema>;
@@ -375,8 +386,9 @@ export async function guestBackupRestoreHandler(
   node: NodeOps,
   audit: AuditLog,
   cfg: Config,
-  breaker?: RollbackBreaker
-): Promise<{ vmid: number; guestType: GuestType; archive: string; restarted: boolean }> {
+  breaker?: RollbackBreaker,
+  sleep: Sleep = defaultSleep
+): Promise<GuestBackupRestoreResult> {
   if (!input.confirm) {
     throw new Error(
       "Refusing guest_backup_restore without confirm: true. A restore REPLACES THE ENTIRE GUEST " +
@@ -436,30 +448,135 @@ export async function guestBackupRestoreHandler(
         "Re-issue with stopIfRunning: true to stop, restore, and restart it."
     );
   }
+  // On the API path every step returns a UPID before the task finishes (ADR-023 #9).
+  // Without awaiting each one, the restore was issued while the stop was still
+  // running, the start while the restore still held its lock, and a restore that
+  // failed asynchronously was audited as "Restored". The SSH backend is synchronous
+  // and loud (exec throws on a non-zero exit), so the poll is skipped there.
+  const timeoutMs = input.timeoutMs ?? cfg.backup.taskTimeoutMs;
+  const pollMs = cfg.backup.taskPollIntervalMs;
+  const awaitTask = async (upid: string): Promise<{ state: "ok" | "failed" | "pending"; exitstatus: string }> =>
+    node.kind === "api" && typeof node.taskStatus === "function"
+      ? waitForBackupTask(node, upid, timeoutMs, pollMs, sleep)
+      : { state: "ok", exitstatus: "OK" };
+  const auditStep = (fields: { failed?: boolean; pending?: boolean; note: string }) =>
+    audit.append(
+      buildAuditRecord({
+        tool: "guest_backup_restore",
+        host: cfg.ssh.host,
+        vmid: input.vmid,
+        isLargeChange: true,
+        ...(input.overrideCircuitBreaker && { circuitBreakerOverridden: true }),
+        ...fields,
+      })
+    );
+
   if (wasRunning) {
-    await node.stopGuest(input.vmid, type);
+    const stop = await awaitTask((await node.stopGuest(input.vmid, type)).upid);
+    if (stop.state !== "ok") {
+      const msg =
+        `guest_backup_restore: stopping ${type} ${input.vmid} did not complete (${stop.exitstatus}); ` +
+        "the restore was NOT attempted and the guest is unchanged.";
+      await auditStep({ failed: true, note: msg });
+      throw new Error(msg);
+    }
   }
 
-  await node.restoreBackup(input.vmid, type, input.archive);
-
-  if (wasRunning) {
-    await node.startGuest(input.vmid, type);
+  const restore = await awaitTask((await node.restoreBackup(input.vmid, type, input.archive)).upid);
+  if (restore.state === "failed") {
+    const msg =
+      `guest_backup_restore: restoring ${type} ${input.vmid} from ${input.archive} failed: ${restore.exitstatus}. ` +
+      "A forced restore may have already removed the old guest disks — check pct_list/qm_list before retrying.";
+    await auditStep({ failed: true, note: msg });
+    throw new Error(msg);
   }
-
-  await audit.append(
-    buildAuditRecord({
-      tool: "guest_backup_restore",
-      host: cfg.ssh.host,
+  if (restore.state === "pending") {
+    const note =
+      `Restore of ${type} ${input.vmid} from ${input.archive} via ${node.kind} still running (${restore.exitstatus}); ` +
+      `guest NOT started${wasRunning ? " (it was running before)" : ""}.`;
+    await auditStep({ pending: true, note });
+    return {
       vmid: input.vmid,
-      isLargeChange: true,
-      ...(input.overrideCircuitBreaker && { circuitBreakerOverridden: true }),
+      guestType: type,
+      archive: input.archive,
+      status: "pending",
+      restarted: false,
+      taskStatus: restore.exitstatus,
       note:
-        `Restored ${type} ${input.vmid} from ${input.archive} via ${node.kind}; ` +
-        `prior run-state: ${wasRunning ? "running (restarted)" : "stopped"}.`,
-    })
-  );
+        `${note} The restore holds the guest lock until it finishes. Check pct_list/qm_list, then start it with ` +
+        "guest_start. Pass a larger timeoutMs next time to wait it out.",
+    };
+  }
 
-  return { vmid: input.vmid, guestType: type, archive: input.archive, restarted: wasRunning };
+  // ADR-023 B5: a start can report failure (pct start exit 124, a null exit) while the
+  // guest still comes up, so the guest's own run-state decides — on both backends.
+  let restarted = false;
+  let startNote = "";
+  if (wasRunning) {
+    let startError: string | undefined;
+    try {
+      const start = await awaitTask((await node.startGuest(input.vmid, type)).upid);
+      if (start.state !== "ok") startError = start.exitstatus;
+    } catch (err) {
+      startError = (err as Error).message;
+    }
+    restarted = await waitForGuestStatus(
+      node,
+      input.vmid,
+      type,
+      cfg.snapshot?.restartPollIntervalMs ?? 2_000,
+      cfg.snapshot?.restartTimeoutMs ?? 60_000,
+      sleep
+    );
+    if (!restarted) startNote = ` Restart FAILED (${startError ?? "guest did not reach running"}); start it with guest_start.`;
+  }
+
+  const note =
+    `Restored ${type} ${input.vmid} from ${input.archive} via ${node.kind}; ` +
+    `prior run-state: ${wasRunning ? (restarted ? "running (restarted)" : "running (NOT restarted)") : "stopped"}.` +
+    startNote;
+  await auditStep({ note });
+
+  return {
+    vmid: input.vmid,
+    guestType: type,
+    archive: input.archive,
+    status: "completed",
+    restarted,
+    ...(startNote && { note: note }),
+  };
+}
+
+export interface GuestBackupRestoreResult {
+  vmid: number;
+  guestType: GuestType;
+  archive: string;
+  /** "pending" = the restore task outlived the wait (API path); the guest was not started. */
+  status: "completed" | "pending";
+  restarted: boolean;
+  taskStatus?: string;
+  note?: string;
+}
+
+/** Poll NodeOps run-state until running or the deadline (mirrors snapshotTools' waitForGuestRunning). */
+async function waitForGuestStatus(
+  node: NodeOps,
+  vmid: number,
+  type: GuestType,
+  pollIntervalMs: number,
+  maxWaitMs: number,
+  sleep: Sleep
+): Promise<boolean> {
+  const interval = Math.max(1, pollIntervalMs);
+  for (let waited = 0; ; waited += interval) {
+    try {
+      if ((await node.guestStatus(vmid, type)).status === "running") return true;
+    } catch {
+      // a transient status error is not a verdict; keep polling until the deadline
+    }
+    if (waited >= maxWaitMs) return false;
+    await sleep(interval);
+  }
 }
 
 // ---------------------------------------------------------------------------

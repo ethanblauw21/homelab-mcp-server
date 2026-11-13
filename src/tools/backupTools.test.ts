@@ -506,6 +506,119 @@ describe("guest_backup_restore", () => {
   });
 });
 
+/**
+ * guest_backup_restore on the API path: each UPID (stop/restore/start) is polled.
+ * `byUpid` gives the terminal status per task; `statusSeq` drives guestStatus
+ * (first entry = the pre-restore run-state check, last entry repeats).
+ */
+class FakeNodeRestoreTasks extends FakeNode {
+  polled: string[] = [];
+  constructor(
+    archives: BackupArchive[],
+    private byUpid: Record<string, { status: string; exitstatus?: string }>,
+    private statusSeq: string[] = ["running"]
+  ) {
+    super(guests, archives);
+  }
+  private statusCalls = 0;
+  override async guestStatus(): Promise<{ status: string }> {
+    const i = Math.min(this.statusCalls++, this.statusSeq.length - 1);
+    return { status: this.statusSeq[i]! };
+  }
+  async taskStatus(upid: string): Promise<{ status: string; exitstatus?: string }> {
+    this.polled.push(upid);
+    return this.byUpid[upid] ?? { status: "stopped", exitstatus: "OK" };
+  }
+}
+
+describe("guest_backup_restore — API task polling", () => {
+  const archive = "media-backup:backup/vzdump-lxc-101.tar.zst";
+  const arch = [{ volid: archive, vmid: 101, notes: "mcp-x" }];
+  const cfgR = {
+    ...cfg,
+    snapshot: { restartPollIntervalMs: 10, restartTimeoutMs: 30 },
+  } as unknown as import("../config.js").Config;
+  const run = (node: NodeOps, extra: Partial<{ timeoutMs: number }> = {}) =>
+    guestBackupRestoreHandler(
+      { vmid: 101, archive, confirm: true, stopIfRunning: true, ...extra },
+      node,
+      audit,
+      cfgR,
+      undefined,
+      noSleep
+    );
+
+  it("awaits stop, restore and start in order before reporting success", async () => {
+    const node = new FakeNodeRestoreTasks(arch, {});
+    const out = await run(node);
+    expect(out.status).toBe("completed");
+    expect(out.restarted).toBe(true);
+    expect(node.calls).toEqual(["stop:lxc:101", `restore:lxc:101:${archive}`, "start:lxc:101"]);
+    expect(node.polled).toEqual(["UPID:stop", "UPID:restore", "UPID:start"]);
+    expect(records).toHaveLength(1);
+    expect(records[0]!.failed).toBeUndefined();
+    expect(records[0]!.note).toContain("running (restarted)");
+  });
+
+  it("throws and audits failed on an async restore failure, and never starts the guest", async () => {
+    const node = new FakeNodeRestoreTasks(arch, {
+      "UPID:restore": { status: "stopped", exitstatus: "unable to restore CT 101 - no space left" },
+    });
+    await expect(run(node)).rejects.toThrow(/failed: unable to restore CT 101 - no space left/);
+    expect(node.calls).not.toContain("start:lxc:101");
+    expect(records).toHaveLength(1);
+    expect(records[0]!.failed).toBe(true);
+    expect(records[0]!.note).not.toMatch(/^Restored/);
+  });
+
+  it("returns pending (not success, not failure) when the restore outlives the wait, and does not start", async () => {
+    const node = new FakeNodeRestoreTasks(arch, { "UPID:restore": { status: "running" } });
+    const out = await run(node, { timeoutMs: 60_000 });
+    expect(out.status).toBe("pending");
+    expect(out.restarted).toBe(false);
+    expect(out.taskStatus).toMatch(/still running after 60000ms/);
+    expect(node.calls).not.toContain("start:lxc:101");
+    expect(records[0]!.pending).toBe(true);
+    expect(records[0]!.failed).toBeUndefined();
+  });
+
+  it("refuses to restore when the stop task fails", async () => {
+    const node = new FakeNodeRestoreTasks(arch, { "UPID:stop": { status: "stopped", exitstatus: "CT is locked" } });
+    await expect(run(node)).rejects.toThrow(/restore was NOT attempted/);
+    expect(node.calls).toEqual(["stop:lxc:101"]);
+    expect(records[0]!.failed).toBe(true);
+  });
+
+  it("B5: a start that errors while the guest comes up still counts as restarted", async () => {
+    // SSH-like: no taskStatus, startGuest throws (pct start exit 124) but run-state says running.
+    const node = new FakeNode(guests, [...arch], "running");
+    node.startGuest = async () => {
+      throw new Error("Command failed (exit 124)");
+    };
+    const out = await guestBackupRestoreHandler(
+      { vmid: 101, archive, confirm: true, stopIfRunning: true },
+      node,
+      audit,
+      cfgR,
+      undefined,
+      noSleep
+    );
+    expect(out.status).toBe("completed");
+    expect(out.restarted).toBe(true);
+    expect(records).toHaveLength(1);
+    expect(records[0]!.note).toContain("running (restarted)");
+  });
+
+  it("reports restarted: false (not a throw) when the guest never reaches running after a restore", async () => {
+    const node = new FakeNodeRestoreTasks(arch, {}, ["running", "stopped"]);
+    const out = await run(node);
+    expect(out.status).toBe("completed");
+    expect(out.restarted).toBe(false);
+    expect(out.note).toMatch(/Restart FAILED/);
+    expect(records[0]!.note).toContain("running (NOT restarted)");
+  });
+});
+
 describe("guest_backup_list (H9/F9)", () => {
   const archives: BackupArchive[] = [
     { volid: "media-backup:backup/mcp-old", vmid: 101, ctime: 100, notes: "mcp-20260101-000000" },
