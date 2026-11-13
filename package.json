@@ -68,7 +68,7 @@
   "allowScripts": {
     "better-sqlite3@12.10.1": true,
     "cpu-features@0.0.10": true,
-    "esbuild@0.28.0": true,
+    "esbuild@0.28.2": true,
     "esbuild@0.25.12": true,
     "ssh2@1.17.0": true
   }
